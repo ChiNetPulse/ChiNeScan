@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt, clippy
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
@@ -84,7 +84,7 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - run: uv sync --locked --python 3.12 --extra dev
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120.0
       - name: Install native engine for full Python suite
         run: uv pip install --python .venv/bin/python ./engine
         env:
