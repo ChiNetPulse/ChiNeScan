@@ -1,13 +1,16 @@
 # ChiNeScan
 
-<p align="center"><img src="docs/assets/chinescan-cover.png" alt="ChiNeScan: a local security workstation" width="100%"></p>
-<p align="center"><sub>Illustrative artwork. Terminal text in the image is decorative, not real output.</sub></p>
+<p align="center"><img src="assets/social-preview.png" alt="ChiNeScan local-first security assessment workstation dashboard" width="100%"></p>
 
 **Local-first security assessment workstation for code, logs, malware triage, investigations, and reports.**
 
 **Core technologies:** Python (backend, analysis engine, CLI) · Rust (optional PyO3 redaction extension with automatic Python fallback) · TypeScript/React (web dashboard)
 
 ChiNeScan runs assessments on the operator's machine. Local files, findings, credentials, SQLite records, and reports remain local unless an operator explicitly enables a supported network lookup or audit. The dashboard is an authenticated loopback application.
+
+## Regenerating the cover
+
+From the repository root, run `node scripts/make-cover.mjs`. This uses the existing frontend Playwright installation to render the 1280x640 cover at device scale factor 1 and the 1200x630 Open Graph image.
 
 ## What it does today
 
