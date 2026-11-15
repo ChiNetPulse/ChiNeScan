@@ -11,6 +11,7 @@
     "check:csp": "node scripts/check-csp.mjs",
     "test": "vitest run",
     "test:e2e": "playwright test -c playwright.config.ts"
+    ,"cover": "node ../scripts/make-cover.mjs"
   },
   "dependencies": {
     "react": "^19.3.1",
