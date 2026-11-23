@@ -203,6 +203,7 @@ def create_operator(path: Path, email: str, password: str) -> None:
         {
             "schema_version": 2,
             "email": normalized,
+            "identity_id": str(uuid.uuid4()),
             "password_hash": PasswordHasher().hash(password),
             "auth_epoch": secrets.token_hex(16),
         },
@@ -249,6 +250,38 @@ def operator_auth_epoch(path: Path) -> str:
     if not isinstance(epoch, str) or len(epoch) < 16:
         return "legacy"
     return epoch
+
+
+def operator_identity_id(path: Path) -> str | None:
+    """Return the stable credential-account UUID when it has been initialized."""
+    try:
+        value = _read(path).get("identity_id")
+        return str(uuid.UUID(value)) if isinstance(value, str) else None
+    except (CredentialError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def ensure_operator_identity_id(path: Path, identity_id: str) -> str:
+    """Persist a stable identity reference without changing authentication secrets."""
+    try:
+        selected = str(uuid.UUID(identity_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise CredentialError("Local operator identity is invalid.") from exc
+    with _CREDENTIAL_LOCK:
+        data = _read(path)
+        current = data.get("identity_id")
+        if current is not None:
+            try:
+                normalized = str(uuid.UUID(current))
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise CredentialError("Local operator identity is invalid.") from exc
+            if normalized != current:
+                raise CredentialError("Local operator identity is invalid.")
+            return normalized
+        data["identity_id"] = selected
+        timestamped_credential_backup(path)
+        _write_atomic(path, data)
+        return selected
 
 
 def verify_operator(path: Path, email: str, password: str) -> bool:
@@ -472,6 +505,7 @@ class Session:
     csrf_token: str
     expires_at: float
     auth_epoch: str
+    user_id: str | None = None
     created_at: float = 0.0
     last_seen_at: float = 0.0
 
@@ -496,7 +530,9 @@ class SessionStore:
     def _key(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
-    def create(self, email: str, auth_epoch: str) -> tuple[str, Session]:
+    def create(
+        self, email: str, auth_epoch: str, user_id: str | None = None
+    ) -> tuple[str, Session]:
         token = secrets.token_urlsafe(32)
         now = self._clock()
         session = Session(
@@ -504,6 +540,7 @@ class SessionStore:
             secrets.token_urlsafe(32),
             now + self.ttl_seconds,
             auth_epoch,
+            user_id=user_id,
             created_at=now,
             last_seen_at=now,
         )

@@ -1,4 +1,4 @@
-import type { ApprovedFolder, CaseData, CaseSummary, CodeJob, CodeProject, Finding, FolderPreview, ModuleCapability, Overview, Page, Scan, LogSource, LogSourceRegistryStatus, LogJob, LogAlert, LogEvent, LogTimeline, MalwareAnalysis, MalwareCapability, MalwareJob, MalwareSample, ProjectDetail, ProjectSummary, ProjectLogLocation, ProjectLogSuggestion, ProjectLogJob, ProjectMalwareJob, MalwareHostHint, FsDirectory, FsPage, GitHubImportCapabilities, GitHubImportPreview, GitHubImportJob, ChainInfo, ChainJob, ChainGraph, DashboardAlert, ModuleScore } from './types';
+import type { ApprovedFolder, CaseData, CaseSummary, CodeJob, CodeProject, Finding, FolderPreview, ModuleCapability, Overview, Page, Scan, LogSource, LogSourceRegistryStatus, LogJob, LogAlert, LogEvent, LogTimeline, MalwareAnalysis, MalwareCapability, MalwareJob, MalwareSample, ProjectDetail, ProjectSummary, ProjectLogLocation, ProjectLogSuggestion, ProjectLogJob, ProjectMalwareJob, MalwareHostHint, FsDirectory, FsPage, GitHubImportCapabilities, GitHubImportPreview, GitHubImportJob, ChainInfo, ChainJob, ChainGraph, DashboardAlert, ModuleScore, Organization, OrganizationMember, Client, Engagement, EngagementAssignment } from './types';
 
 export function safeLocalUrl(value: unknown): string | null {
   if (typeof value !== 'string' || value.trim() !== value || !value.startsWith('/') || value.startsWith('//') || value.includes('\\')) return null;
@@ -54,6 +54,19 @@ export const api = {
   chainGraph: (id: string) => request<ChainGraph>(`/api/chain/traces/${encodeURIComponent(id)}/graph`),
   chainExportUrl: (id: string, fmt: string) => `/api/chain/traces/${encodeURIComponent(id)}/export/${encodeURIComponent(fmt)}`,
   session: () => request<{ authenticated: boolean; email_masked: string | null; signup_available: boolean }>('/api/auth/session'),
+  currentUser: () => request<{ id: string; email_normalized: string; display_name: string; status: string; created_at: string }>('/api/auth/me'),
+  organizations: () => request<{ items: Organization[] }>('/api/organizations'),
+  createOrganization: (name: string, slug: string) => request<Organization>('/api/organizations', { method: 'POST', body: JSON.stringify({ name, slug }) }),
+  organizationClients: (id: string) => request<{ items: Client[] }>(`/api/organizations/${encodeURIComponent(id)}/clients`),
+  createOrganizationClient: (id: string, name: string, description: string) => request<Client>(`/api/organizations/${encodeURIComponent(id)}/clients`, { method: 'POST', body: JSON.stringify({ name, description }) }),
+  organizationMembers: (id: string) => request<{ items: OrganizationMember[] }>(`/api/organizations/${encodeURIComponent(id)}/members`),
+  addOrganizationMember: (id: string, user_id: string, role: string) => request<OrganizationMember>(`/api/organizations/${encodeURIComponent(id)}/members`, { method: 'POST', body: JSON.stringify({ user_id, role }) }),
+  updateOrganizationMember: (id: string, user_id: string, changes: { role?: string; status?: string }) => request<OrganizationMember>(`/api/organizations/${encodeURIComponent(id)}/members/${encodeURIComponent(user_id)}`, { method: 'PATCH', body: JSON.stringify(changes) }),
+  organizationEngagements: (id: string) => request<{ items: Engagement[] }>(`/api/organizations/${encodeURIComponent(id)}/engagements`),
+  createOrganizationEngagement: (id: string, name: string, description: string, client_id: string | null) => request<Engagement>(`/api/organizations/${encodeURIComponent(id)}/engagements`, { method: 'POST', body: JSON.stringify({ name, description, client_id }) }),
+  engagementAssignments: (organization_id: string, engagement_id: string) => request<{ items: EngagementAssignment[] }>(`/api/organizations/${encodeURIComponent(organization_id)}/engagements/${encodeURIComponent(engagement_id)}/assignments`),
+  createEngagementAssignment: (organization_id: string, engagement_id: string, user_id: string, role: string) => request<EngagementAssignment>(`/api/organizations/${encodeURIComponent(organization_id)}/engagements/${encodeURIComponent(engagement_id)}/assignments`, { method: 'POST', body: JSON.stringify({ user_id, role }) }),
+  updateEngagementAssignment: (organization_id: string, engagement_id: string, user_id: string, status: string) => request<EngagementAssignment>(`/api/organizations/${encodeURIComponent(organization_id)}/engagements/${encodeURIComponent(engagement_id)}/assignments/${encodeURIComponent(user_id)}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
   csrf: () => request<{ csrf_token: string }>('/api/auth/csrf'),
   login: (email: string, password: string) => request<{ email: string; csrf_token: string }>('/api/auth/login', {
     method: 'POST', body: JSON.stringify({ email, password }),

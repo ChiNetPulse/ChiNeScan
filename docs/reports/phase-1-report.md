@@ -1787,3 +1787,22 @@ The broader Ruff exclusion and frontend build provide a clean source/build check
 
 The Rust ZIP metadata function was added after the initial report entries above. Final engine rerun: `cargo fmt --check` exit 0; `cargo clippy --all-targets -- -D warnings` exit 0; `cargo test --locked` exit 0 with `49 passed; 0 failed`, doc tests `0 passed; 0 failed`. Three new synthetic tests cover ordinary central-directory metadata, traversal/backslash/absolute names, encrypted flags, truncation, and oversized input. The function is available through the optional PyO3 extension but is not yet used by the production Python analyzer, so it does not close the File Analyzer module gap.
 
+
+## Phase 1B implementation verification addendum — 2026-11-22
+
+This addendum records the Phase 1B implementation checks in the existing report. It does not replace prior Phase 1 results. Repository: `C:\GitHub\Chinescan`; branch `main`; starting commit `5678972f085231babdda6ad2612b7425c126015a`.
+
+| Command | Exit | Exact result |
+| --- | ---: | --- |
+| `py -3.12 -m pytest -q --basetemp C:\cs-pytest-full` | 0 | `731 passed, 5 deselected, 4 warnings in 318.46s`. Covers the existing Python suite plus Phase 1B tests. |
+| `npm test -- --run` (from `frontend`) | 0 | `Test Files 17 passed (17); Tests 74 passed (74)`. |
+| `npm run build` (from `frontend`) | 0 | `tsc -b` succeeded; Vite built 38 modules; strict-CSP source and built-asset check passed. Vite reports the existing `TerminalBackdropScene` chunk above 500 kB. |
+| `py -3.12 -m ruff check . --output-format concise` | 1 | `15 errors`; same count as the accepted baseline. Findings include ARTEX and previously modified configuration files; no ARTEX files were changed for this milestone. |
+| `py -3.12 -m ruff format --check .` | 1 | `8 files would be reformatted, 217 files already formatted`. The accepted baseline recorded 6 files; formatting was not applied broadly. |
+| `py -3.12 -m mypy chinescan` | 1 | One known ARTEX error remains: `chinescan/integrations/artex/client.py:40`, `HTTPSConnection` receives `str | None` where `str` is expected. The Phase 1B modules pass their focused mypy check. |
+| `py -3.12 -m alembic heads` | 0 | `0005_identity_organizations (head)`. |
+| `git diff --check` | 0 | No whitespace errors. |
+
+The first complete Python run using the default long Windows pytest temporary path exposed recovery-verifier assumptions that rejected additive migration `0005`, plus a local GitHub-import fixture crossing its Windows path-length guard. Recovery verification and migration expectations were updated for the new schema; the GitHub-import and recovery cases passed with a short external pytest temporary directory. The final full Python run above passed. The full frontend build includes the TypeScript check and CSP validation. No Rust files or shared Rust interfaces were changed, and no external targets or scanners were invoked.
+
+The reconciliation report is generated transactionally in `organization_bootstrap_reports` when the existing operator is bootstrapped. Tests verified the report with synthetic databases, including an empty legacy database and a mapped synthetic record. No user production database was opened or migrated during verification, so no production reconciliation counts are claimed here.

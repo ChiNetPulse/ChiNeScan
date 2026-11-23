@@ -208,9 +208,20 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
     if "records" not in tables:
         return None, "required records table is missing"
     dashboard_tables = {"dashboard_alerts", "dashboard_alert_audit"}
+    organization_tables = {
+        "users",
+        "organizations",
+        "organization_memberships",
+        "clients",
+        "engagements",
+        "engagement_assignments",
+        "record_ownership",
+        "organization_bootstrap_reports",
+        "organization_audit_events",
+    }
     extras = tables - {"records", "alembic_version"}
     app_extras = extras - {"sqlite_sequence"}
-    if app_extras - dashboard_tables:
+    if app_extras - dashboard_tables - organization_tables:
         return None, "database contains an unsupported table layout"
     columns = connection.execute("PRAGMA table_info(records)").fetchall()
     signature = [(row["name"], row["type"].upper(), row["notnull"], row["pk"]) for row in columns]
@@ -242,9 +253,14 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         return revision, "unsupported migration revision"
     if revision == "0004_dashboard_alerts" and app_extras != dashboard_tables:
         return revision, "dashboard alert tables are missing"
-    if revision != "0004_dashboard_alerts" and extras:
+    if revision == "0005_identity_organizations" and app_extras != (
+        dashboard_tables | organization_tables
+    ):
+        return revision, "identity and organization tables are missing"
+    if revision not in {"0004_dashboard_alerts", "0005_identity_organizations"} and extras:
         return revision, "dashboard alert tables do not match migration revision"
-    for table_name in dashboard_tables if revision == "0004_dashboard_alerts" else ():
+    dashboard_revisions = {"0004_dashboard_alerts", "0005_identity_organizations"}
+    for table_name in dashboard_tables if revision in dashboard_revisions else ():
         column_names = {
             row["name"] for row in connection.execute(f'PRAGMA table_info("{table_name}")')
         }
@@ -255,6 +271,12 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         )
         if not required <= column_names:
             return revision, "dashboard alert table does not match the supported schema"
+    if revision == "0005_identity_organizations":
+        for table_name in organization_tables:
+            if not connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table_name,)
+            ).fetchone():
+                return revision, "identity and organization table is missing"
     return revision, None
 
 

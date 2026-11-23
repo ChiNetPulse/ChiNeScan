@@ -10,10 +10,11 @@ import { ProjectsWorkspace } from './ProjectsWorkspace';
 import { ScanityReportImport } from './ScanityReportImport';
 import { SystemStatus } from './SystemStatus';
 import { DashboardScoresAlerts } from './DashboardScoresAlerts';
+import { OrganizationsWorkspace } from './OrganizationsWorkspace';
 import { TerminalBackdrop } from './TerminalBackdrop';
 import { useGlassTracking } from './glass';
 
-type Section = 'overview' | 'scans' | 'findings' | 'cases' | 'jobs' | 'projects' | 'logs' | 'malware' | 'chain' | 'status' | 'modules';
+type Section = 'overview' | 'scans' | 'findings' | 'cases' | 'jobs' | 'projects' | 'logs' | 'malware' | 'chain' | 'status' | 'modules' | 'organizations';
 type Detail = { kind: 'scan'; id: string } | { kind: 'finding'; id: string } | null;
 type AuthPage = 'login' | 'signup' | 'forgot' | 'forgot-confirmed' | 'reset';
 
@@ -137,7 +138,7 @@ export function App() {
           ? <RecoveryInstructions onBack={() => navigateAuth('login', setAuthPage)} onReset={() => navigateAuth('reset', setAuthPage)}/>
           : <Login error={error} busy={busy} signupAvailable={signupAvailable} onSubmit={submitLogin} onRetry={() => window.location.reload()} onSignup={() => { navigateAuth('signup', setAuthPage); setError(''); }} onForgot={() => { navigateAuth('forgot', setAuthPage); setError(''); }} />;
 
-  const title = section === 'chain' ? 'On-chain tracing' : section === 'overview' ? 'Overview' : section === 'scans' ? 'Scan history' : section === 'findings' ? 'Findings' : section === 'cases' ? 'Cases' : section === 'jobs' ? 'Code assessments' : section === 'projects' ? 'Projects' : section === 'malware' ? 'Malware triage' : section === 'status' ? 'System status' : section === 'modules' ? 'Modules' : 'Log analysis';
+  const title = section === 'chain' ? 'On-chain tracing' : section === 'overview' ? 'Overview' : section === 'scans' ? 'Scan history' : section === 'findings' ? 'Findings' : section === 'cases' ? 'Cases' : section === 'jobs' ? 'Code assessments' : section === 'projects' ? 'Projects' : section === 'malware' ? 'Malware triage' : section === 'status' ? 'System status' : section === 'modules' ? 'Modules' : section === 'organizations' ? 'Organizations & engagements' : 'Log analysis';
   const nav = (id: Section, label: string, glyph: string) => <button data-glass className={`nav-link ${section === id ? 'active' : ''}`} key={id} onClick={() => { setSection(id); setPage(0); setFilter(''); setDetail(null); }}><span className="nav-glyph" aria-hidden="true">{glyph}</span>{label}{id === 'scans' && overview ? <span className="nav-count">{overview.scan_count}</span> : null}</button>;
 
   return <div className="app-shell">
@@ -146,7 +147,7 @@ export function App() {
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark" aria-hidden="true"><span>C</span><i /></div><div><strong>ChiNeScan</strong><small>LOCAL SECURITY WORKSTATION</small></div></div>
       <div className="nav-caption">WORKSPACE</div>
-      <nav aria-label="Main navigation">{nav('overview', 'Overview', '⌂')}{nav('projects', 'Projects', '▧')}{nav('jobs', 'Code assessments', '⌘')}{nav('logs', 'Log analysis', '≋')}{nav('malware', 'Malware triage', '◇')}{nav('chain', 'On-chain tracing', '◎')}{nav('scans', 'Scans', '⌕')}{nav('findings', 'Findings', '◈')}{nav('cases', 'Cases', '▤')}{nav('modules', 'Modules', '▦')}{nav('status', 'System status', '◉')}</nav>
+      <nav aria-label="Main navigation">{nav('overview', 'Overview', '⌂')}{nav('organizations', 'Organizations', '▤')}{nav('projects', 'Projects', '▧')}{nav('jobs', 'Code assessments', '⌘')}{nav('logs', 'Log analysis', '≋')}{nav('malware', 'Malware triage', '◇')}{nav('chain', 'On-chain tracing', '◎')}{nav('scans', 'Scans', '⌕')}{nav('findings', 'Findings', '◈')}{nav('cases', 'Cases', '▤')}{nav('modules', 'Modules', '▦')}{nav('status', 'System status', '◉')}</nav>
       <div className="sidebar-bottom"><div className="local-indicator"><span />LOCAL INSTANCE</div><p>Assessment data stays on this device.</p><div className="profile"><div className="avatar">{email.slice(0, 1).toUpperCase()}</div><div className="profile-name"><strong>{email}</strong><small>Local operator</small></div><button className="icon-button" onClick={logout} disabled={busy} aria-label="Sign out" title="Sign out">↗</button></div></div>
     </aside>
     <main className="main-content">
@@ -157,6 +158,7 @@ export function App() {
         {busy && <div className="loading-line" aria-label="Loading"><span /></div>}
         {section === 'overview' && overview && <DashboardScoresAlerts onUnauthorized={signOut} onNavigate={(target) => { setSection(target); setPage(0); setFilter(''); setDetail(null); }} />}
         {section === 'overview' && <OverviewPanel data={overview} onScans={() => setSection('scans')} onFindings={() => setSection('findings')} onOpen={(id) => setDetail({ kind: 'scan', id })} />}
+        {section === 'organizations' && <OrganizationsWorkspace onUnauthorized={signOut} />}
         {section === 'scans' && <ScanTable data={scanPage} page={page} onPage={setPage} onOpen={(id) => setDetail({ kind: 'scan', id })} />}
         {section === 'findings' && <FindingTable data={findingPage} page={page} onPage={setPage} onOpen={(id) => setDetail({ kind: 'finding', id })} />}
         {section === 'jobs' && <CodeJobsWorkspace onUnauthorized={signOut} onOpenScan={(id) => { setSection('scans'); setDetail({ kind: 'scan', id }); }} onCreateCase={(id) => { setCaseScanId(id); setSection('cases'); }} />}

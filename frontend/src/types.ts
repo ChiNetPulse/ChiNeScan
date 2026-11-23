@@ -63,6 +63,11 @@ export type Finding = {
   what_would_raise_it?: string | null;
 };
 export type Page<T> = { items: T[]; total: number; total_stored?: number; limit: number; offset: number };
+export type Organization = { id: string; name: string; slug: string; status: string; owner_user_id: string; role: string; membership_id?: string; created_at: string; updated_at: string };
+export type OrganizationMember = { id: string; organization_id: string; user_id: string; role: string; status: string; email_normalized: string; display_name: string; created_at: string; updated_at: string };
+export type Client = { id: string; organization_id: string; name: string; description: string | null; status: string; created_at: string; updated_at: string };
+export type Engagement = { id: string; organization_id: string; client_id: string | null; name: string; description: string; status: string; created_at: string; updated_at: string };
+export type EngagementAssignment = { id: string; organization_id: string; engagement_id: string; user_id: string; role: string; status: string; email_normalized?: string; display_name?: string; created_at: string; updated_at: string };
 export type Overview = {
   scan_count: number;
   finding_count: number;

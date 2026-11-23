@@ -39,7 +39,7 @@ def test_malware_backend_revision_upgrades_existing_records_without_rewrite(tmp_
 
             assert (
                 MigrationContext.configure(connection).get_current_revision()
-                == "0004_dashboard_alerts"
+                == "0005_identity_organizations"
             )
     finally:
         repository.close()

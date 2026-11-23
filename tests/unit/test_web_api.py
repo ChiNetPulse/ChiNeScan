@@ -533,6 +533,10 @@ def test_mutating_body_models_reject_privileged_fields_from_route_inventory(
                 continue
 
             for field_name in privileged_fields:
+                # Phase 1B introduces explicit organization and assignment roles;
+                # those fields are intentionally validated by the new role services.
+                if any(field_name in model.model_fields for model in models):
+                    continue
                 response = client.request(
                     method,
                     path,

@@ -66,6 +66,7 @@ from chinescan.core.models.common import (
     Severity,
 )
 from chinescan.core.models.finding import EvidenceLocation, Finding, FindingExplanation
+from chinescan.core.organizations import OrganizationService
 from chinescan.core.models.investigation import (
     Alert,
     Case,
@@ -101,7 +102,10 @@ from chinescan.web.auth import (
     create_operator,
     migrate_legacy_operator,
     normalize_email,
+    ensure_operator_identity_id,
     operator_auth_epoch,
+    operator_email,
+    operator_identity_id,
     operator_status,
     operator_totp_enabled,
     perform_dummy_verification,
@@ -113,6 +117,7 @@ from chinescan.web.chain_trace_jobs import ChainTraceJobManager
 from chinescan.web.code_jobs import CodeJobManager, ProjectConfigurationError, ProjectRegistry
 from chinescan.web.log_jobs import LogJobManager, LogSourceError, LogSourceRegistry
 from chinescan.web.malware_jobs import MalwareDashboardManager
+from chinescan.web.organization_api import create_organization_router
 from chinescan.web.rate_limit import InProcessRateLimiter
 
 COOKIE_NAME = "chinescan_session"
@@ -570,6 +575,7 @@ def create_app(
     configure_logging()
     active_settings = settings or Settings(_env_file=None)
     repository = SQLiteRepository(database_path)
+    organization_service = OrganizationService(repository)
     dashboard_alerts = DashboardAlerts(repository)
     dashboard_intelligence = DashboardIntelligence(repository, dashboard_alerts)
     auth_failure_windows: dict[str, deque[float]] = {}
@@ -586,6 +592,23 @@ def create_app(
         migrate_legacy_operator(credentials)
     except CredentialError:
         logging.getLogger("chinescan.auth").warning("operator_credentials_need_recovery")
+    if operator_status(credentials) == "active":
+        try:
+            stored_operator_email = operator_email(credentials)
+            if stored_operator_email:
+                stable_identity = operator_identity_id(credentials)
+                if stable_identity is None:
+                    stable_identity = organization_service.user_id_for_email(stored_operator_email)
+                    stable_identity = ensure_operator_identity_id(
+                        credentials, stable_identity or str(uuid4())
+                    )
+                organization_service.ensure_operator(
+                    stored_operator_email, operator_auth_epoch(credentials), stable_identity
+                )
+        except Exception:
+            # Authentication remains closed until the idempotent identity and
+            # ownership bootstrap succeeds on a later retry.
+            logging.getLogger("chinescan.auth").error("operator_identity_bootstrap_failed")
     registry = ProjectRegistry(
         projects_path,
         [
@@ -753,6 +776,9 @@ def create_app(
     application.state.github_import_manager = github_imports
     application.state.dashboard_alerts = dashboard_alerts
     application.state.dashboard_intelligence = dashboard_intelligence
+    application.state.organization_service = organization_service
+    application.state.session_store = sessions
+    application.state.local_operator_user_id = organization_service.operator_user_id
     application.state.started_at = time.monotonic()
     application.state.diagnostic_errors = []
 
@@ -916,7 +942,87 @@ def create_app(
                     "base-uri 'self'; frame-ancestors 'none'"
                 )
                 return limited
-        response = await call_next(request)
+        path = request.url.path
+        organization_api = path.startswith("/api/organizations/") or path == "/api/organizations"
+        identity_api = path == "/api/auth/me" or path in {
+            "/api/auth/session",
+            "/api/auth/csrf",
+            "/api/ready",
+            "/api/diagnostics",
+        }
+        public_auth_api = path in {
+            "/api/auth/login",
+            "/api/auth/signup",
+            "/api/auth/forgot-password",
+            "/api/auth/reset-password",
+        }
+        unsupported_version_alias = path.startswith("/api/v") and not path.startswith(
+            "/api/v1/"
+        )
+        has_matching_api_route = any(
+            route.matches(request.scope)[0] is not Match.NONE
+            for route in application.router.routes
+        )
+        if (
+            path.startswith("/api/")
+            and has_matching_api_route
+            and path != "/api/health"
+            and not unsupported_version_alias
+            and not (organization_api or identity_api or public_auth_api)
+        ):
+            opaque = request.cookies.get(COOKIE_NAME)
+            session = sessions.get(opaque)
+            if session is None:
+                denied = JSONResponse(
+                    status_code=401, content={"detail": "Authentication required."}
+                )
+                denied.headers["X-Request-ID"] = request_id
+                denied.headers["X-API-Version"] = "1"
+                return denied
+            if (
+                not organization_service.operator_user_id
+                or session.user_id != organization_service.operator_user_id
+            ):
+                denied = JSONResponse(
+                    status_code=403, content={"detail": "Local operator access required."}
+                )
+                denied.headers["X-Request-ID"] = request_id
+                denied.headers["X-API-Version"] = "1"
+                return denied
+            selected = request.headers.get("x-chinescan-organization-id")
+            organization_id = organization_service.membership_context(
+                session.user_id, selected
+            )
+            if organization_id is None:
+                denied = JSONResponse(status_code=404, content={"detail": "Resource not found."})
+                denied.headers["X-Request-ID"] = request_id
+                denied.headers["X-API-Version"] = "1"
+                return denied
+            operator_only_prefixes = (
+                "/api/projects",
+                "/api/code",
+                "/api/log",
+                "/api/malware",
+                "/api/chain",
+                "/api/alerts",
+                "/api/dashboard",
+                "/api/github",
+                "/api/fs",
+            )
+            if path.startswith(operator_only_prefixes):
+                personal_id = organization_service.personal_organization_id(session.user_id)
+                if not personal_id or organization_id != personal_id:
+                    denied = JSONResponse(
+                        status_code=404, content={"detail": "Resource not found."}
+                    )
+                    denied.headers["X-Request-ID"] = request_id
+                    denied.headers["X-API-Version"] = "1"
+                    return denied
+            request.state.organization_id = organization_id
+            with repository.organization_context(organization_id):
+                response = await call_next(request)
+        else:
+            response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         response.headers["X-API-Version"] = "1"
         route = request.scope.get("route")
@@ -981,6 +1087,15 @@ def create_app(
         except CredentialError:
             sessions.revoke(token)
             raise HTTPException(status_code=401, detail="Authentication required.") from None
+        persistent_user = (
+            organization_service.get_active_user(session.user_id) if session.user_id else None
+        )
+        if (
+            not persistent_user
+            or not secrets.compare_digest(persistent_user["auth_epoch"], session.auth_epoch)
+        ):
+            sessions.revoke(token)
+            raise HTTPException(status_code=401, detail="Authentication required.")
         return session
 
     diagnostics_throttle = LoginThrottle(limit=12, window_seconds=60)
@@ -1066,6 +1181,10 @@ def create_app(
             )
             raise HTTPException(status_code=403, detail="CSRF validation failed.")
         return session
+    organization_router = create_organization_router(
+        organization_service, current_session, require_csrf
+    )
+    application.router.routes.extend(organization_router.routes)
 
     def github_import_enabled() -> None:
         if not active_settings.github_import_enabled:
@@ -1193,6 +1312,15 @@ def create_app(
                     session = None
             except CredentialError:
                 session = None
+            persistent_user = (
+                organization_service.get_active_user(session.user_id)
+                if session is not None and session.user_id else None
+            )
+            if session is not None and (
+                not persistent_user
+                or not secrets.compare_digest(persistent_user["auth_epoch"], session.auth_epoch)
+            ):
+                session = None
         email = session.email if session else None
         local, separator, domain = email.partition("@") if email else ("", "", "")
         masked = f"{local[:1]}***{separator}{domain}" if separator else None
@@ -1238,7 +1366,24 @@ def create_app(
         auth_lockout.succeed(keys)
         sessions.revoke(request.cookies.get(COOKIE_NAME))
         stored_email = normalize_email(payload.email)
-        opaque, session = sessions.create(stored_email, operator_auth_epoch(credentials))
+        try:
+            stable_identity = operator_identity_id(credentials)
+            if stable_identity is None:
+                stable_identity = ensure_operator_identity_id(
+                    credentials,
+                    organization_service.user_id_for_email(stored_email) or str(uuid4()),
+                )
+            user, _personal_org = organization_service.ensure_operator(
+                stored_email, operator_auth_epoch(credentials), stable_identity
+            )
+        except Exception:
+            raise HTTPException(
+                status_code=503, detail="Account identity is temporarily unavailable."
+            ) from None
+        opaque, session = sessions.create(
+            stored_email, operator_auth_epoch(credentials), user_id=user["id"]
+        )
+        application.state.local_operator_user_id = user["id"]
         response.set_cookie(
             COOKIE_NAME,
             opaque,
@@ -1266,7 +1411,24 @@ def create_app(
                 status_code=400, detail="Account cannot be created with these details."
             ) from None
         auth_lockout.succeed(keys)
-        opaque, session = sessions.create(payload.email, operator_auth_epoch(credentials))
+        try:
+            stored_email = normalize_email(payload.email)
+            stable_identity = operator_identity_id(credentials)
+            if stable_identity is None:
+                stable_identity = ensure_operator_identity_id(credentials, str(uuid4()))
+            user, _personal_org = organization_service.ensure_operator(
+                stored_email, operator_auth_epoch(credentials), stable_identity
+            )
+        except Exception:
+            # The credential source remains intact; application startup/login
+            # retries the idempotent identity bootstrap and never rolls it back.
+            raise HTTPException(
+                status_code=503, detail="Account identity is temporarily unavailable."
+            ) from None
+        opaque, session = sessions.create(
+            stored_email, operator_auth_epoch(credentials), user_id=user["id"]
+        )
+        application.state.local_operator_user_id = user["id"]
         response.set_cookie(
             COOKIE_NAME,
             opaque,
