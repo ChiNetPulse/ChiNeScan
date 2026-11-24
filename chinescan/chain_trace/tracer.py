@@ -7,13 +7,21 @@ from chinescan.chain_trace.providers.base import ChainProvider, UnsupportedFamil
 
 
 def trace(
-    provider: ChainProvider, params: TraceParams, labels: dict[tuple[str, str], Label]
+    provider: ChainProvider,
+    params: TraceParams,
+    labels: dict[tuple[str, str], Label],
+    *,
+    control: object | None = None,
 ) -> tuple[list[str], list[Transfer], list[str]]:
     queue = deque([(params.seed, 0)])
     visited: set[str] = set()
     edges: list[Transfer] = []
     gaps: list[str] = list(getattr(provider, "gaps", []))
     while queue:
+        if control is not None:
+            check_cancelled = getattr(control, "check_cancelled", None)
+            if callable(check_cancelled):
+                check_cancelled()
         address, depth = queue.popleft()
         if address in visited:
             continue

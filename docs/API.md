@@ -1,5 +1,42 @@
 # Local dashboard API
 
+## Engagement authorization foundation (Phase 1C)
+
+The authenticated, CSRF-protected engagement policy API is documented in
+[Engagement assets and authorization policy](ENGAGEMENT-AUTHORIZATION.md). It manages assets,
+immutable scope revisions, authorization metadata/private documents, human approvals, and audit
+records. Policy evaluation returns a decision only; it does not launch a scanner or job. The
+separate Phase 1D domain posture execution endpoint is governed. Other existing CLI/local jobs are
+not engagement-governed.
+
+## Governed domain execution (Phase 1D)
+
+The initial execution-governance slice supports only bounded domain posture jobs for active,
+registered domain assets. Jobs are authorized server-side and revalidated before DNS and each HTTP
+request. See [Execution governance](EXECUTION-GOVERNANCE.md) for supported paths and limitations.
+
+## Governed local repository assessment (Phase 1D)
+
+The authenticated, CSRF-protected repository API is rooted at
+`/api/organizations/{organization_id}/engagements/{engagement_id}/repositories`. It lists
+registered local projects as opaque registry IDs and safe display labels, creates repository
+assets, binds a selected project to a published scope and active code-assessment authorization
+with the exact server-provided attestation, reports quota and retention state, and submits,
+cancels, and reads provenance for governed repository jobs through the existing execution API.
+The server accepts no filesystem paths, remote URLs, scanner names, or caller-selected snapshots.
+Responses do not include local project roots, manifest paths, or managed storage paths. Binding
+and project selection require an assigned engagement lead; assessment admission separately
+revalidates membership, assignment, engagement, scope, authorization, attestation, and snapshot.
+Only local registered projects are supported; no remote clone or third-party provider is implied.
+
+The `repository_snapshot_max_bytes` and `repository_snapshot_org_quota_bytes` settings default to
+5 GiB and 10 GiB. Snapshots use a versioned manifest and content digest; snapshots for closed
+engagements become eligible for retention review 90 days after the latest linked engagement
+closure. Hold placement, hold release, and snapshot deletion are authenticated and CSRF protected,
+with explicit deletion confirmation. Complete backups include available snapshot content; a
+database-only copy is not represented as a complete restorable repository assessment state.
+These routes do not redirect existing CLI scans through engagement authorization.
+
 The API is served by `chinescan web serve` on loopback only. OpenAPI and interactive docs are
 disabled in this stage; response models are declared in `chinescan/web/app.py` and the stable
 JSON contract is summarized here. Public authentication routes are loopback and same-origin
@@ -43,6 +80,16 @@ deletion routes.
 
 The operator configures local sources outside the browser in `~/.config/chinescan/log-sources.toml`
 or supplies `chinescan web serve --log-sources-file PATH`. The browser sends only a `source_id`.
+
+For engagement-governed evidence analysis, authenticated members with an active engagement
+assignment can use `GET` and `POST /api/organizations/{organization_id}/engagements/{engagement_id}/log-evidence`;
+configured source IDs and display labels are available through `GET .../log-evidence/sources`.
+Registration accepts a configured `source_id` and label, not a browser-supplied path. `POST
+/api/organizations/{organization_id}/engagements/{engagement_id}/log-evidence/{asset_id}/executions`
+admits the fixed passive `log_analysis` technique through the execution policy service. Evidence
+is copied into private managed snapshots and results are sanitized and provenance-linked. Raw
+evidence and its storage path are not returned by these endpoints. See
+`docs/EXECUTION-GOVERNANCE.md` for snapshot, quota, retention, and recovery behavior.
 Every route below requires the authenticated session; job creation also requires same-origin and
 CSRF validation.
 

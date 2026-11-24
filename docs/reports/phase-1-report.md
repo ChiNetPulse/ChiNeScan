@@ -1806,3 +1806,284 @@ This addendum records the Phase 1B implementation checks in the existing report.
 The first complete Python run using the default long Windows pytest temporary path exposed recovery-verifier assumptions that rejected additive migration `0005`, plus a local GitHub-import fixture crossing its Windows path-length guard. Recovery verification and migration expectations were updated for the new schema; the GitHub-import and recovery cases passed with a short external pytest temporary directory. The final full Python run above passed. The full frontend build includes the TypeScript check and CSP validation. No Rust files or shared Rust interfaces were changed, and no external targets or scanners were invoked.
 
 The reconciliation report is generated transactionally in `organization_bootstrap_reports` when the existing operator is bootstrapped. Tests verified the report with synthetic databases, including an empty legacy database and a mapped synthetic record. No user production database was opened or migrated during verification, so no production reconciliation counts are claimed here.
+
+
+## Phase 1C implementation verification addendum — 2026-11-23
+
+Phase 1C adds organization-owned engagement assets, immutable published scope revisions, authorization metadata and private SQLite document blobs, one-use digest-bound approvals, an auditable policy decision service, API routes, and an organization workspace extension. This milestone records policy and approvals only; existing local CLI and job execution pathways are not routed through engagement policy and do not inherit commercial engagement authorization.
+
+| Command | Exit | Exact result |
+| --- | ---: | --- |
+| `py -3.12 -m pytest -q --basetemp C:\cs-pytest-phase1c-final-complete` | 0 | `751 passed, 5 deselected, 4 warnings in 488.03s`. This is the historical initial Phase 1C implementation run, before the final remediation/regression gate; it is not the final post-remediation result. |
+| `py -3.12 -m pytest -q tests/unit/test_engagement_security.py --basetemp C:\cs-pytest-phase1c-focused` | 0 | `9 passed, 3 warnings in 25.68s`; covers canonical targets, strict CIDR, inclusion/exclusion, immutable published scope, authorization expiry/revision, cross-organization references, document privacy and digest, separate approver, active reviewer revocation, target binding, expiry, one-use consumption/replay, CSRF, and policy-only API behavior. |
+| `py -3.12 -m pytest -q tests/unit/test_migration.py tests/unit/test_engagement_security.py --basetemp C:\cs-pytest-phase1c-focused` | 0 | `9 passed, 3 warnings in 14.30s` at the time of that check; migration coverage upgrades from `0005_identity_organizations`, validates SQLite foreign-key enforcement, exercises empty downgrade/re-upgrade, and the service tests then present. The subsequent complete run covers the final migration tests. |
+| `npm test -- --run` (from `frontend`) | 0 | `Test Files 18 passed (18); Tests 75 passed (75)`. |
+| `npm run build` (from `frontend`) | 0 | TypeScript build and Vite production build succeeded; strict-CSP source and built-asset check passed. Existing Vite chunk warning remains (`TerminalBackdropScene` about 535 kB). |
+| `py -3.12 -m ruff check . --statistics` | 1 | `15 errors`: 10 E501, 2 I001, 2 F401, 1 UP017; same total as the accepted Phase 1B baseline. Phase 1C Python implementation files pass focused Ruff checks. |
+| `py -3.12 -m ruff format --check . --output-format concise` | 1 | `9 files would be reformatted, 221 files already formatted`. Files: `chinescan/core/config/settings.py`, `chinescan/core/storage/sqlite.py`, `chinescan/integrations/artex/client.py`, `chinescan/integrations/artex/models.py`, `chinescan/web/app.py`, `migrations/env.py`, `scripts/make_cover.py`, `tests/unit/test_artex_integration.py`, and `tests/unit/test_organizations.py`. The recovery-file Phase 1C formatting delta was corrected without broad formatting. The remaining SQLite finding points at the pre-existing Phase 1B `users = Table(...)` formatting at line 51; app.py's reported line is existing middleware, not the new registration. The baseline report counted 8 but did not identify its file list, so the one-file count difference cannot be attributed conclusively from that record. ARTEX/config files were not formatted. |
+| `py -3.12 -m mypy chinescan` | 1 | One existing ARTEX finding remains: `chinescan/integrations/artex/client.py:40`, `HTTPSConnection` receives `str | None` instead of `str`; 99 source files checked. Focused mypy on the Phase 1C service/API/recovery modules passed. |
+| `py -3.12 -m alembic heads` | 0 | `0006_engagement_scope_policy (head)`. |
+| `git diff --check` | 0 | No whitespace errors. |
+
+The first frontend run exposed an ambiguous test label after the new policy-check form added a second “Target” field. The test now selects the asset form's first matching label; the final full frontend run passed. The first full Python run exposed a route-inventory test exhausting the configured mutation rate limit after the API route count increased. The test fixture now uses a high test-only `job_start_rate_limit`; the isolated test passed and the final complete suite passed. No production/configured database or real credential file was opened or migrated. Migration and policy tests use disposable temporary databases and synthetic credentials. No external scanner, target, ARTEX service, or production service was contacted.
+
+Phase 1C changed `chinescan/web/app.py` only to initialize and register the engagement security API alongside the existing organization router. Existing ARTEX import/configuration/handlers are preserved as pre-existing dirty work and are not part of the Phase 1C change. No Phase 1C scanner or job execution boundary is claimed. PostgreSQL is untested and unsupported for this phase.
+
+## Phase 1C final remediation and regression verification — 2026-11-23
+
+This final gate follows the initial implementation verification above and records the post-remediation result. The historical `751 passed` result remains unchanged as the initial run; it is not presented as the final result.
+
+| Check | Result |
+| --- | --- |
+| Full Python suite | `759 passed, 5 deselected, 0 failed` using a unique short Windows temporary directory. The previously path-length-sensitive GitHub import test passed in this full run. |
+| Frontend tests | `75 passed`. |
+| TypeScript checks | Passed. |
+| Frontend production build | Passed. |
+| Strict-CSP checks | Passed. |
+| Alembic migration head | `0006_engagement_scope_policy`. |
+
+## Phase 1D execution-governance implementation addendum — 2026-11-23
+
+Phase 1D implementation adds a durable, tenant-bound execution job path for the existing domain posture assessment only. Admission resolves the target from an active engagement domain asset and evaluates the Phase 1C policy service inside the same SQLite `BEGIN IMMEDIATE` transaction that creates the job. The immutable execution context records the requester, organization, engagement, assignment roles, asset/target, technique/classification, scope revision, authorization, optional approval, digest, policy decision, and validity window. A process-local worker claims jobs transactionally, revalidates policy before execution and immediately before DNS/HTTP actions, and records completion, failure, or authorization block events. The new SQLite migration is `0007_governed_execution_jobs`.
+
+This is a narrow policy-enforced execution slice, not completion of every Phase 1D acceptance criterion. No currently exposed operation is classified as sensitive, so no approved operation is consumed in the worker; standalone policy evaluation remains unable to consume approval. There is no atomic sensitive-operation dispatch consuming an approval, no general scanner/provider adapter contract, and no evidence-to-job provenance for other engines. Existing CLI code/log/malware workflows remain local analysis; the chain-trace/provider path is not engagement-governed. ARTEX remains health/status-only. Multi-user production, distributed workers, PostgreSQL, and commercial assessment readiness are not established.
+
+| Check | Exact result |
+| --- | --- |
+| Full Python suite | `767 passed, 5 deselected, 0 failed, 4 warnings in 429.16s` using Python 3.12 and a short external pytest temporary directory. |
+| Focused governance/storage/recovery/domain/migration tests | `59 passed, 3 warnings` (run before the final full-suite run). |
+| Focused post-suite policy/API/migration/domain tests | `99 passed, 3 warnings in 99.47s`; run after the final governance typing/style adjustment using a short external temporary directory. |
+| Frontend tests | `18 test files passed; 75 tests passed`. |
+| TypeScript and production build | `npm run build` passed, including `tsc -b`, Vite production build, and strict-CSP source/built-asset checks. Existing large-chunk warning remains for `TerminalBackdropScene`. |
+| Alembic | `0007_governed_execution_jobs (head)`. |
+| Ruff lint | Phase 1D governance, API, probe, service, CLI and touched test files pass focused Ruff checks. `chinescan/web/app.py` still reports import ordering plus the unused ARTEX `ArtexHealth` import in its pre-existing shared import block; it was not auto-fixed to avoid unrelated ARTEX changes. |
+| Ruff format check | `7 files already formatted` for the Phase 1D governance, API, probe, service, CLI and touched tests; no formatter was run. |
+| Mypy | Focused check reports only the existing ARTEX client error at `chinescan/integrations/artex/client.py:40`; no Phase 1D errors remain in the checked files. |
+| Syntax and migration | AST parsing passed for seven changed Python implementation/migration files; Alembic reports `0007_governed_execution_jobs (head)`. |
+| Git diff checks | Cached and uncached `git diff --check` passed; the cached Phase 1C patch hash remains `92829555c0434a556d46be41106cd83c42f597cf52fe31c07c9792dc24cbf5cc`. |
+
+The full Python run emitted four warnings: Starlette's `httpx` test-client deprecation, two Pydantic `json_encoders` deprecations, and a test fixture warning for a deliberately duplicated ZIP entry. No real target, external scanner, ARTEX service, configured production database, or credential file was accessed. The staged Phase 1C patch was not modified by the Phase 1D implementation. Phase 1D changes remain uncommitted and unstaged; unrelated ARTEX and configuration work remains preserved.
+
+## Phase 1D adapter-contract continuation — 2026-11-23
+
+The continuation adds `chinescan.core.execution_adapters`: a frozen Pydantic execution context verified against the persisted job row; an explicit allowlist registry keyed by target type and technique; capability declarations for classification and external-operation support; parameter validation; structured results and safe coded failures; and a worker control interface for cancellation, progress, and exact-target/technique policy revalidation. The built-in domain posture worker now dispatches through this contract. It persists the structured adapter result summary on the tenant-owned job and records progress as assessment audit events. Cancellation is cooperative and currently signaled on worker shutdown; no user-facing cancellation endpoint exists. The registry is an internal trusted-code boundary, not a sandbox for third-party Python plugins.
+
+The other existing assessment engines were inspected and remain outside the governed adapter registry: code and dependency/security subprocess tools operate on local repository paths; log analysis is local; malware analysis is static local triage; chain trace can query public data providers under its existing explicit network option but has no engagement-target binding; reporting and administration are not assessment execution. No additional engine was integrated because doing so as an engagement assessment would require target semantics and policy binding not present in its current workflow. ARTEX remains health/status-only.
+
+| Check | Result |
+| --- | --- |
+| Full Python suite | `775 passed, 5 deselected, 0 failed, 4 warnings in 432.13s` using `py -3.12` and unique short external `--basetemp`. |
+| Focused adapter/domain/policy/migration/recovery/storage tests | `67 passed, 3 warnings in 44.54s`. |
+| Adapter contract lint and format checks | Focused Ruff checks passed; five adapter/governance/probe/service/test files already formatted. |
+| Targeted mypy | Passed for adapter, governance, domain probe, and domain service modules. |
+| Migration | `0007_governed_execution_jobs (head)`; disposable migration tests passed in the full suite, including `result_summary` schema presence. |
+| Frontend | No frontend code changed in this continuation. The preceding Phase 1D frontend checks remain `75 passed`; TypeScript, production build, and strict-CSP checks passed before this backend-only continuation. |
+| Git preservation | No staging or commit occurred. The original 21-file staged Phase 1C candidate remains at hash `92829555c0434a556d46be41106cd83c42f597cf52fe31c07c9792dc24cbf5cc`. |
+
+This continuation improves adapter reuse but does not complete Phase 1D acceptance: there is still no genuinely supported sensitive operation, approval-to-dispatch consumption through an adapter, generic scanner/provider integration, user-facing job cancellation, or evidence provenance for non-domain engines. The built-in adapter is the only operational governed adapter; the adapter protocol alone does not govern other engines. Commercial assessment execution, hostile third-party plugin execution, multi-worker deployment, and PostgreSQL production support remain unsupported.
+
+## Phase 1D approval-to-execution continuation — 2026-11-23
+
+The worker now binds an approved sensitive operation to one durable execution job at admission without consuming the approval. The existing Phase 1C atomic approval consumer is reused at the worker-provided `authorize_external_action` boundary. In the same SQLite `BEGIN IMMEDIATE` transaction, the worker re-evaluates current policy and approval validity, performs the existing conditional one-use approval update, records the job's consumption timestamp, and writes the execution-consumption audit event. A unique partial index prevents an approval from being bound to more than one job. Later action callbacks for the same job revalidate policy and the consumed approval without consuming it again. If dispatch fails after consumption, the approval remains consumed and the job failure is retained; approvals are not restored. Jobs that never reach the action callback are blocked with their approval still unused.
+
+The validated bindings are requester, organization, engagement, normalized target and asset type, technique, policy-derived action class, current published scope revision, current authorization record, operation request digest, approval expiry and decision, one-use state, and distinct currently authorized approver. Membership, engagement, scope and authorization are reevaluated before claim, before execution, and at every adapter action callback. Tests use only synthetic test adapters for the sensitive classification. No production operation or adapter currently requires approval; the built-in domain posture operation remains controlled-active and completed without an approval ID or consumption marker. Preview, queue admission, polling, progress reporting, and a job that never reaches the action callback do not consume an approval.
+
+This remains a trusted in-process adapter boundary, not a sandbox: adapter implementations must call the supplied control before every external operation. A future sensitive adapter must be reviewed to ensure it cannot issue an external operation by bypassing that callback. Existing CLI scanners and process-local job managers outside the governed domain-posture path are not governed by this policy service. ARTEX remains health/status-only. This continuation does not establish multi-worker, PostgreSQL, or commercial execution readiness.
+
+| Check | Exact result |
+| --- | --- |
+| Full Python suite | `787 passed, 5 deselected, 0 failed, 4 warnings in 742.49s` using `py -3.12 -m pytest -q --basetemp C:\cs-approval-4c91a7e2 --tb=short`. |
+| Focused execution, approval, migration, recovery tests | `62 passed`; a separately run concurrent-worker test also passed (`1 passed`). The focused groups use disposable SQLite fixtures and synthetic identities/adapters. |
+| Ruff lint | Passed for the touched governance, adapter, SQLite, recovery, migration, and approval test files. |
+| Ruff format check | Not clean: four existing/mixed files would be reformatted (`execution_governance.py`, `storage/recovery.py`, `storage/sqlite.py`, `test_engagement_security.py`). No formatter was run. The adapter module and migration were already formatted. |
+| Mypy | Passed for `chinescan/core/execution_governance.py` and `chinescan/core/execution_adapters.py`. |
+| Migration and diff checks | `0007_governed_execution_jobs (head)`; cached and uncached `git diff --check` passed. |
+
+The four full-suite warnings were Starlette's `httpx` test-client deprecation, two Pydantic `json_encoders` deprecations, and a deliberately duplicated ZIP-entry warning in the malware-analysis test. No configured database or real credentials were accessed, no external scanner or target was contacted, and no frontend files were changed. No files were staged or committed by this continuation.
+
+## Phase 1D governed execution cancellation continuation — 2026-11-23
+
+Governed execution jobs now support an authenticated cancellation lifecycle. The API records the requesting user and timestamp only after checking current organization membership, job ownership, and cancellation permission; inaccessible or unauthorized jobs use the same not-found response. Repeated pending requests are idempotent, queued jobs become cancelled immediately, and terminal jobs return a stable conflict. Claimed and running jobs retain their current state until the process-local worker observes the durable request through the adapter control at a safe checkpoint. The adapter contract exposes a consistent cooperative cancellation check, and the UI displays cancellation eligibility, pending/observed state, and request errors. Cancellation does not forcibly terminate arbitrary adapter code.
+
+The existing job state model is retained (`queued`, `claimed`, `running`, `completed`, `failed`, `blocked`, `cancelled`). Migration `0008_execution_cancellation` adds nullable request timestamp, request actor, and worker-observation timestamp columns. No new scanner, external provider, or distributed queue was added. Existing policy revalidation remains in place. A sensitive test-only adapter confirms that cancellation before its first approved action leaves approval unused, while cancellation after the action leaves the approval consumed. The built-in domain posture adapter remains ordinary controlled-active work and does not consume approval. Existing CLI work outside governed domain posture remains outside this policy service; ARTEX remains health/status-only.
+
+| Check | Exact result |
+| --- | --- |
+| Full Python suite | `793 passed, 5 deselected, 0 failed, 4 warnings in 450.03s` using `py -3.12 -m pytest -q --basetemp C:\cs-cxl-20261123-a --tb=short`. |
+| Focused cancellation, execution, approval, migration, recovery and storage tests | `73 passed, 61 warnings in 107.36s`. Warnings include existing Pydantic/Starlette deprecations and Windows pytest temporary-directory cleanup warnings from parallel filesystem tests. |
+| Frontend tests | `18 test files passed; 75 tests passed`. |
+| TypeScript | `npm run typecheck` passed. |
+| Production build and strict CSP | `npm run build` passed, including Vite and strict-CSP checks. Existing large-chunk warning for the terminal backdrop remains. |
+| Ruff and mypy | Focused Ruff checks passed for touched backend, migration and test files. Targeted mypy passed for execution governance, adapters, and API modules. |
+| Migration | `0008_execution_cancellation (head)`; upgrade/recovery schema tests passed against disposable SQLite databases. |
+| Diff checks | Cached and uncached `git diff --check` passed. No staging or commit occurred. |
+
+The worker and its active cancellation signals remain process-local. Cancellation is cooperative and takes effect when adapter code reaches a control checkpoint; it cannot forcibly stop arbitrary code or establish multi-worker delivery. This does not establish distributed-worker, PostgreSQL, multi-user production, or commercial execution readiness, and no existing CLI scanner/job path outside the governed domain-posture workflow is newly governed.
+
+## Phase 1D evidence-to-execution provenance continuation — 2026-11-23
+
+Governed execution results now retain an append-only link to their originating job, organization, and engagement. New supported result records created while a governed adapter runs under its validated execution context are linked transactionally with ownership and an audit event; pre-existing/imported records are not retroactively attributed. Finding-embedded evidence retains provenance through its originating finding, including when the finding is later attached to a case. Provenance reads are exposed through an authenticated engagement/job endpoint and the engagement security workspace, which displays the immutable execution snapshot and result record references without exposing authorization-document contents. Migration `0009_execution_result_provenance` snapshots the authorization document SHA-256 with the job, creates guarded append-only provenance storage, and is recognized by backup/recovery validation. Failure and cancellation preserve already-created result links while the terminal job outcome remains failed or cancelled.
+
+This is not a separate evidence custody system: current evidence remains embedded in finding records, and arbitrary local/imported evidence is intentionally not assigned a governed job origin. Only result records created through the governed adapter repository context are automatically linked. Existing CLI scanners and process-local job managers outside the governed domain-posture workflow remain outside this policy boundary. The in-process adapter remains trusted code, and this does not establish multi-worker, PostgreSQL, multi-user production, or commercial assessment readiness. ARTEX remains health/status-only.
+
+| Check | Exact result |
+| --- | --- |
+| Full Python suite | `798 passed, 5 deselected, 0 failed, 4 warnings in 573.81s` using `py -3.12 -m pytest -q --basetemp C:\cs-prov-full-20261123 --tb=short`. |
+| Focused provenance, execution, migration, recovery, and storage tests | `78 passed, 3 warnings in 178.89s` using disposable databases. |
+| Frontend tests | `18 test files passed; 76 tests passed`. The new provenance assertion was adjusted to match the rendered label split across text nodes; no application behavior changed. |
+| TypeScript | `npm run typecheck` passed. |
+| Production build and strict CSP | `npm run build` passed, including the strict-CSP source and built-asset check. The existing large terminal-backdrop chunk warning remains. |
+| Ruff and mypy | Focused Ruff checks passed; targeted mypy passed for execution adapters, governance, storage/recovery, and execution API modules. |
+| Migration and diff checks | `0009_execution_result_provenance (head)`; cached and uncached `git diff --check` passed. |
+
+Warnings were the existing Starlette `httpx` test-client deprecation, two Pydantic `json_encoders` deprecations, and a duplicate ZIP-entry warning in the malware-analysis fixture. No configured database, real credentials, external scanner, or target was accessed. No files were staged or committed for this continuation.
+
+## Phase 1D governed local repository assessment continuation — final verification (2026-11-23)
+
+Migration `0010_governed_repository_assets` adds a repository asset and tenant-bound binding,
+attestation, snapshot, quota-reservation, and immutable execution-job context schema. Binding is
+limited to an assigned active engagement lead, an operator-registered local project, an active
+authorization that explicitly permits repository code assessment, and the current published
+scope revision. The lead records the versioned server statement
+`repository-code-authorization-v1`, bound to their stable user ID, organization, engagement,
+repository asset, authorization, scope revision, exact text, and timestamp. The record is an
+accountability attestation, not independent proof of ownership or legal permission.
+
+The snapshot store uses canonical sorted manifests with per-file SHA-256, file size, manifest and
+exclusion-policy versions, and a snapshot digest. It rejects linked/reparse entries, excludes
+`.git`, nested repositories, and common generated/dependency trees, and enforces configured size,
+file-count, and depth limits while inventorying/copying. Organization quota reservations are
+serialized with SQLite `BEGIN IMMEDIATE`; content-addressed committed bytes are counted once per
+digest. Defaults are 5 GiB per snapshot and 10 GiB per organization. Snapshot retention is 90 days
+after the latest closure among linked engagements; active engagements, nonterminal jobs, and
+legal/investigation holds block explicit deletion. Deletion preserves metadata, digest, provenance,
+and audit history.
+
+The built-in `builtin.repository-code-assessment` adapter is passive and local-only, invokes the
+existing bounded `CodeScanService` with the built-in rules on a verified managed snapshot, and
+does not use `CodeJobManager`, execute project code, install dependencies, or perform network
+lookups. Admission and worker revalidation use the existing policy service; snapshot content and
+manifest integrity are checked before/after scanning. Results and partial results receive the
+existing append-only execution provenance. Existing CLI code scans and local job-manager behavior
+remain separate. This does not govern the other existing scanner, log, malware, or chain-trace
+paths and does not establish commercial execution or multi-worker readiness.
+
+SQLite backup/recovery now bundles available referenced snapshot content beside the database.
+Verification rejects missing or corrupt referenced content; database-only copies are not treated as
+complete recoverable repository assessments. Restore preserves the snapshot bundle beside the
+restored database. The configured database and credential file were not opened or migrated during
+verification.
+
+| Check | Exact result |
+| --- | --- |
+| Full Python suite | `810 passed, 5 deselected, 0 failed, 4 warnings in 703.11s`; command: `py -3.12 -m pytest -q --tb=short --basetemp "C:\cs-final2-2122426221"`. This final run includes the repository-migration upgrade/downgrade lifecycle test. The earlier 809-test run is retained in the execution history and did not include that test. |
+| Focused repository, recovery, migration suite | `30 passed, 0 failed, 3 warnings`; exercised migration, snapshot binding/execution, quotas, linked-file rejection, retention/holds, and complete/incomplete backup restore paths. The subsequently added migration lifecycle test also passed independently (`1 passed`) and is included in the final full suite. |
+| Additional scanner/execution/organization regression tests | `42 passed, 0 failed, 3 warnings`; checked local scanner compatibility, approval/cancellation/provenance response compatibility, organization closure, and schema version. |
+| Frontend tests | `18 test files passed; 76 tests passed`. |
+| TypeScript | `npm run typecheck` passed; also run as part of `npm run build`. |
+| Production build and strict CSP | `npm run build` passed; Vite build and strict-CSP source/built-asset check passed. Vite emitted the existing large terminal-backdrop chunk warning. |
+| Static analysis | Focused mypy found one diagnostic at `chinescan/core/engagement_security.py:1351` (outside the new repository modules); the changed repository/execution adapter modules added no remaining mypy diagnostics. Ruff on the selected changed backend, migration, and test files reported 281 findings; no formatter or automatic fix was run. |
+| Migration | `0010_governed_repository_assets (head)`; migration and recovery tests used temporary SQLite databases. |
+| Diff checks | `git diff --check` and `git diff --cached --check` passed. No staging or commit occurred. |
+
+The final full-suite warnings were Starlette's `httpx` TestClient deprecation, two Pydantic
+`json_encoders` deprecations, and a synthetic ZIP duplicate-name warning from an existing malware
+archive test. An earlier full run before the final regression corrections had failures; after
+correcting them, the complete final Python suite above passed.
+
+## Phase 1D repository storage hardening continuation — 2026-11-23
+
+The Windows snapshot-storage review found that resolving the configured storage path before
+checking its components could hide a symbolic link or reparse point in the supplied path. The
+storage helper now rejects parent traversal and checks the caller-supplied path components for
+links/reparse points before canonical resolution. A regression test covers a linked parent.
+An unused ACL-test import and newly added migration-test line-length findings were also removed;
+no broad formatting was run. The prior `_asset_id_for_target` type correction was retained: its
+`cast` reflects the nullable string primary-key query result, runtime behavior is unchanged, and no
+type-ignore suppression was introduced.
+
+Windows ACL provisioning is invoked by `RepositorySnapshotStore` during managed-root
+initialization and by recovery when publishing restored snapshots. It removes inherited root ACEs,
+grants the current operator, SYSTEM, and Administrators, then re-reads and verifies the root ACL;
+new child directories and files inherit only those principals. Linked roots fail closed. Verification
+is based on DACL inspection with `icacls`, not a Windows token-level `AccessCheck` simulation. The
+live Windows test and an additional disposable live check passed; the observed root ACL contained
+only the current operator, SYSTEM, and Administrators, and the child file inherited those entries.
+
+Migration verification used disposable SQLite databases. In addition to empty-schema upgrade,
+downgrade, and re-upgrade, a new test seeds representative organizations, users, memberships,
+engagements, a pre-existing domain asset, and a generic record at revision `0009`. Upgrade to
+`0010_governed_repository_assets` preserved those rows; SQLite foreign keys were enabled; a
+repository binding that paired an asset with a different organization's engagement was rejected;
+a valid same-tenant binding succeeded. Downgrade remains refused when repository history exists.
+
+| Check | Exact result |
+| --- | --- |
+| Full Python suite | `821 passed, 5 deselected, 0 failed, 4 warnings in 663.50s`; command: `py -3.12 -m pytest -q --tb=short --basetemp "C:\cs-hardening-final-1692785144"`. |
+| Focused repository, recovery, migration, adapter, scanner, and ACL suite | `63 passed, 0 failed, 3 warnings in 56.61s`; run after the reparse-path correction. |
+| Migration and Windows ACL tests after adding seeded `0009` migration coverage | `16 passed, 0 failed`; includes live Windows ACL behavior and migration preservation/tenant-FK verification. |
+| Seeded migration test | `1 passed`; disposable `0009` database upgraded to `0010`, preserved prior rows, rejected a cross-tenant binding, and accepted a valid binding. |
+| Mypy | `py -3.12 -m mypy chinescan/core/engagement_security.py chinescan/core/repository_assessment.py chinescan/core/execution_adapters.py chinescan/core/storage/security.py` passed with no issues. |
+| Ruff | Ruff `0.17.3`; project config selects `E,F,I,UP,B`, line length 100, Python 3.12. Ruff passed on `storage/security.py` and `test_storage_security.py`. In `test_migration.py`, the new test's findings were corrected; three older `E501` findings at lines 43, 47, and 52 remain. The prior 281-finding aggregate has no checked-in per-file baseline report, so it cannot reliably classify all findings across the mixed dirty tree. No global suppression or Ruff configuration change was made. |
+| Migration graph and diff checks | `0010_governed_repository_assets (head)`; cached and uncached `git diff --check` passed. |
+
+The four full-suite warnings were the existing Starlette `httpx` TestClient deprecation, two Pydantic
+`json_encoders` deprecations, and a synthetic duplicate ZIP-entry warning in a malware test. No
+frontend files changed in this hardening continuation, so the earlier frontend result remains the
+applicable verification: 76 tests passed, with TypeScript, production build, and strict CSP passed.
+The configured database and credentials were not accessed. One synthetic ACL-check directory at
+`C:\cs-acl-live-svx2sthz` could not be removed because the shell safety policy rejected the
+recursive cleanup command; it is outside the repository and contains only disposable test data.
+No files were staged or committed.
+
+## Phase 1E-D / Phase 1 approval-lifecycle clarification — 2026-11-24
+
+The Phase 1D checkpoints above are historical records of what was implemented and verified at those checkpoints. In particular, the earlier statements that no production operation required approval and that chain-provider lookups were not engagement-governed remain accurate for their respective dates. They are not claims about the later Phase 1D approval-to-execution continuation or Phase 1E-D implementation.
+
+In the current implementation, an approved sensitive request is bound to one durable execution job at admission, but admission does not consume it. The partial unique index `uq_execution_job_approval_binding` prevents that approval from being bound to a second job, and the job's `approval_consumed_at` remains NULL until the adapter reaches its external-action boundary. For `chain_provider_lookup`, the worker invokes `ExecutionControl.authorize_external_action()` through the governed chain provider adapter's pre-request callback. Current policy and approval bindings are revalidated immediately before the provider request.
+
+At that boundary, approval state transition, the job's `approval_consumed_at` marker, and the `execution.approval_consumed` audit event are written in one SQLite `BEGIN IMMEDIATE` transaction. This is a SQLite transaction guarantee, not a distributed transaction or a multi-worker readiness claim. A sensitive job that does not reach the boundary cannot complete successfully. Cancellation or failure before the boundary leaves approval unconsumed; after consumption it remains consumed even if the provider request or later adapter work fails.
+
+Current operation classes are distinct: `chain_provider_lookup` is sensitive and requires a one-use human approval; `http_probe` / domain posture is controlled-active and revalidates authorization and scope at its action boundary without individual approval; repository code assessment, log evidence analysis, malware static triage, and local chain-trace import are passive local operations with no external network action. ARTEX remains health/status-only. Other existing scanner and CLI pathways are not thereby governed, and commercial execution, multi-user production, PostgreSQL, and distributed-worker readiness are not established. See [Engagement authorization guidance](../ENGAGEMENT-AUTHORIZATION.md), [execution governance](../EXECUTION-GOVERNANCE.md), and [governed chain trace](../GOVERNED-CHAIN-TRACE.md).
+
+### Approval-test evidence correction
+
+An earlier reconciliation note reported `22 passed` in `tests/unit/test_engagement_security.py`, but its accompanying list did not establish that count. The following narrowly scoped rerun supersedes that count; it selected 27 tests total, all of which passed: 26 from `test_engagement_security.py` and one from `test_log_evidence.py`. The verbose output recorded every passing test name. No unrelated project-approval tests were included.
+
+Command: `py -3.12 -m pytest -vv tests/unit/test_engagement_security.py tests/unit/test_log_evidence.py -k "approval or sensitive" --tb=short -o filterwarnings=ignore` — **27 passed, 29 deselected in 83.95s**.
+
+The 26 passing engagement-security cases were:
+
+- `test_malformed_approval_timestamp_returns_422`
+- `test_scope_authorization_policy_exclusion_and_approval_is_one_use`
+- `test_policy_api_cannot_consume_approval_without_execution`
+- `test_atomic_approval_consumption_allows_only_one_concurrent_consumer`
+- `test_organization_and_assignment_revocation_invalidate_approval`
+- `test_approval_is_bound_to_target_and_expiry`
+- `test_approval_digest_and_requester_mismatch_are_denied`
+- `test_approval_is_invalidated_when_a_new_scope_is_published`
+- `test_approval_cannot_be_reused_for_a_different_permitted_technique`
+- `test_cross_organization_api_ids_cannot_read_assets_authorizations_approvals_or_documents`
+- `test_sensitive_approval_is_consumed_once_at_adapter_action_boundary`
+- `test_sensitive_job_without_action_boundary_does_not_consume_approval`
+- `test_sensitive_missing_approval_is_not_queued_or_consumed`
+- `test_sensitive_approval_remains_consumed_after_adapter_failure`
+- `test_sensitive_approval_cannot_be_bound_to_two_concurrent_jobs`
+- `test_concurrent_workers_claim_sensitive_job_and_consume_once`
+- `test_sensitive_execution_is_blocked_after_requester_membership_revocation`
+- `test_sensitive_execution_is_blocked_after_authorization_context_changes[authorization_revoked]`
+- `test_sensitive_execution_is_blocked_after_authorization_context_changes[scope_revised]`
+- `test_durable_cancellation_stops_sensitive_adapter_and_preserves_approval_state[False]`
+- `test_durable_cancellation_stops_sensitive_adapter_and_preserves_approval_state[True]`
+- `test_queued_sensitive_cancellation_leaves_approval_unused`
+- `test_approval_consumption_outcome_is_exposed_as_job_provenance`
+- `test_sensitive_job_rejects_invalidated_approval_before_action[expired]`
+- `test_sensitive_job_rejects_invalidated_approval_before_action[revoked]`
+- `test_sensitive_job_rejects_invalidated_approval_before_action[digest_mismatch]`
+
+The one passing governed chain-provider integration case in `test_log_evidence.py` was `test_governed_chain_provider_consumes_approval_before_fixed_root_lookup`. It uses an injected fake transport, not a real provider request. The older `22` figure is therefore superseded by this recorded 27-test run; no claim is made that the earlier count can be reconstructed from its incomplete table.
+
+The separately referenced “Stage 6” artifact was not found in tracked project files or the repository file search, so its tracked-versus-temporary status could not be established. No replacement document was created. Its acceptance summary should use the current approval lifecycle above and the verified test evidence in this section.
+
+\n
+\n

@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.middleware.base import RequestResponseEndpoint
+from starlette.routing import Match
 
 from chinescan.chain_trace.export import export_graph
 from chinescan.chain_trace.registry import load_registry, normalize_address
@@ -67,6 +68,21 @@ from chinescan.core.models.common import (
 )
 from chinescan.core.models.finding import EvidenceLocation, Finding, FindingExplanation
 from chinescan.core.organizations import OrganizationService
+from chinescan.core.engagement_security import EngagementSecurityService
+from chinescan.core.execution_governance import ExecutionGovernanceService, GovernedDomainWorker
+from chinescan.core.repository_assessment import RepositoryAssessmentService, RepositorySnapshotStore
+from chinescan.core.execution_adapters import (
+    GovernedLogAnalysisAdapter,
+    GovernedMalwareStaticTriageAdapter,
+    RepositoryCodeAssessmentAdapter,
+    build_default_adapter_registry,
+)
+from chinescan.core.log_evidence import LogEvidenceStore
+from chinescan.core.chain_trace_execution import (
+    GovernedChainImportAdapter,
+    GovernedChainProviderAdapter,
+)
+from chinescan.core.malware_evidence import MalwareEvidenceStore
 from chinescan.core.models.investigation import (
     Alert,
     Case,
@@ -90,6 +106,7 @@ from chinescan.core.reporting import (
 from chinescan.core.storage.sqlite import SQLiteRepository
 from chinescan.malware_analysis.managed import (
     ManagedSampleError,
+    SampleRegistry,
     create_backend,
     safe_display_name,
 )
@@ -118,6 +135,11 @@ from chinescan.web.code_jobs import CodeJobManager, ProjectConfigurationError, P
 from chinescan.web.log_jobs import LogJobManager, LogSourceError, LogSourceRegistry
 from chinescan.web.malware_jobs import MalwareDashboardManager
 from chinescan.web.organization_api import create_organization_router
+from chinescan.web.engagement_security_api import create_engagement_security_router
+from chinescan.web.execution_api import create_chain_execution_router, create_execution_router
+from chinescan.web.log_evidence_api import create_log_evidence_router
+from chinescan.web.malware_evidence_api import create_malware_evidence_router
+from chinescan.web.repository_execution_api import create_repository_router
 from chinescan.web.rate_limit import InProcessRateLimiter
 
 COOKIE_NAME = "chinescan_session"
@@ -576,6 +598,9 @@ def create_app(
     active_settings = settings or Settings(_env_file=None)
     repository = SQLiteRepository(database_path)
     organization_service = OrganizationService(repository)
+    engagement_security_service = EngagementSecurityService(repository, organization_service)
+    execution_governance = ExecutionGovernanceService(engagement_security_service)
+    governed_domain_worker = GovernedDomainWorker(repository, execution_governance)
     dashboard_alerts = DashboardAlerts(repository)
     dashboard_intelligence = DashboardIntelligence(repository, dashboard_alerts)
     auth_failure_windows: dict[str, deque[float]] = {}
@@ -633,6 +658,8 @@ def create_app(
         ],
     )
     malware_jobs: MalwareDashboardManager | None = None
+    sample_registry: SampleRegistry | None = None
+    malware_evidence_store: MalwareEvidenceStore | None = None
     malware_diagnostic = (
         "Execution unavailable: configure managed storage and an operator registry."
     )
@@ -671,6 +698,65 @@ def create_app(
         allow_soft_denied=active_settings.allow_soft_denied,
         managed_import_directory=github_managed_directory,
     )
+    repository_snapshot_store = RepositorySnapshotStore(
+        repository,
+        Path(database_path).expanduser().resolve(strict=False).parent / "repository-snapshots",
+        max_snapshot_bytes=active_settings.repository_snapshot_max_bytes,
+        organization_quota_bytes=active_settings.repository_snapshot_org_quota_bytes,
+        max_files=active_settings.max_files,
+        max_depth=active_settings.max_depth,
+    )
+    repository_assessment_service = RepositoryAssessmentService(
+        repository, engagement_security_service, project_service, repository_snapshot_store
+    )
+    repository_adapter = RepositoryCodeAssessmentAdapter(
+        repository,
+        repository_snapshot_store,
+        ScanBounds(
+            max_files=active_settings.max_files,
+            max_total_bytes=active_settings.max_total_bytes,
+            max_file_bytes=active_settings.max_file_bytes,
+            max_depth=active_settings.max_depth,
+            per_file_seconds=active_settings.per_file_seconds,
+            job_deadline_seconds=active_settings.job_deadline_seconds,
+            excluded_paths=tuple(active_settings.code_excluded_paths),
+        ),
+    )
+    log_evidence_store = LogEvidenceStore(
+        repository,
+        Path(database_path).expanduser().resolve(strict=False).parent / "log-evidence-snapshots",
+        allowed_roots=list(active_settings.allowed_roots),
+        max_snapshot_bytes=active_settings.log_evidence_max_bytes,
+        organization_quota_bytes=active_settings.log_evidence_org_quota_bytes,
+    )
+    log_analysis_adapter = GovernedLogAnalysisAdapter(repository, log_evidence_store)
+    chain_label_paths = (str(active_settings.chain_labels_path),) if active_settings.chain_labels_path else ()
+    chain_import_adapter = GovernedChainImportAdapter(
+        repository, log_evidence_store, tuple(chain_label_paths)
+    )
+    chain_provider_adapter = GovernedChainProviderAdapter(
+        repository,
+        max_requests=active_settings.chain_trace_max_requests,
+        deadline_seconds=active_settings.chain_trace_deadline_seconds,
+        label_paths=tuple(chain_label_paths),
+    )
+    execution_governance.adapters = build_default_adapter_registry(
+        repository,
+        repository_adapter,
+        log_analysis_adapter,
+        chain_import_adapter=chain_import_adapter,
+        chain_provider_adapter=chain_provider_adapter,
+    )
+    execution_governance.repository_scan_bounds = {
+        "max_files": active_settings.max_files,
+        "max_total_bytes": active_settings.max_total_bytes,
+        "max_file_bytes": active_settings.max_file_bytes,
+        "max_depth": active_settings.max_depth,
+        "per_file_seconds": active_settings.per_file_seconds,
+        "job_deadline_seconds": active_settings.job_deadline_seconds,
+        "excluded_paths": list(active_settings.code_excluded_paths),
+    }
+    governed_domain_worker.adapters = execution_governance.adapters
     log_location_service = LogLocationService(repository, project_service)
     log_jobs = LogJobManager(
         repository, db_lock, log_registry, project_locations=log_location_service
@@ -739,10 +825,21 @@ def create_app(
         )
     except (ManagedSampleError, OSError, ValueError):
         malware_diagnostic = "Managed storage or operator registry configuration is unavailable."
+    if malware_jobs is not None and sample_registry is not None:
+        malware_evidence_store = MalwareEvidenceStore(
+            repository,
+            malware_jobs.manager.store,
+            engagement_security_service,
+            organization_quota_bytes=active_settings.malware_evidence_org_quota_bytes,
+        )
+        execution_governance.adapters.register(
+            GovernedMalwareStaticTriageAdapter(repository, malware_evidence_store)
+        )
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
         jobs.start()
+        governed_domain_worker.start()
         chain_jobs.start()
         log_jobs.start()
         project_malware_jobs.start()
@@ -752,6 +849,7 @@ def create_app(
         try:
             yield
         finally:
+            governed_domain_worker.stop()
             if malware_jobs is not None:
                 malware_jobs.stop()
             log_jobs.stop()
@@ -768,15 +866,22 @@ def create_app(
     application.state.project_registry = registry
     application.state.chain_job_manager = chain_jobs
     application.state.project_service = project_service
+    application.state.repository_assessment_service = repository_assessment_service
+    application.state.repository_snapshot_store = repository_snapshot_store
+    application.state.log_evidence_store = log_evidence_store
     application.state.log_location_service = log_location_service
     application.state.log_source_registry = log_registry
     application.state.log_job_manager = log_jobs
     application.state.malware_job_manager = malware_jobs
+    application.state.malware_evidence_store = malware_evidence_store
     application.state.project_malware_job_manager = project_malware_jobs
     application.state.github_import_manager = github_imports
     application.state.dashboard_alerts = dashboard_alerts
     application.state.dashboard_intelligence = dashboard_intelligence
     application.state.organization_service = organization_service
+    application.state.engagement_security_service = engagement_security_service
+    application.state.execution_governance = execution_governance
+    application.state.governed_domain_worker = governed_domain_worker
     application.state.session_store = sessions
     application.state.local_operator_user_id = organization_service.operator_user_id
     application.state.started_at = time.monotonic()
@@ -1181,10 +1286,48 @@ def create_app(
             )
             raise HTTPException(status_code=403, detail="CSRF validation failed.")
         return session
+
     organization_router = create_organization_router(
         organization_service, current_session, require_csrf
     )
     application.router.routes.extend(organization_router.routes)
+
+    engagement_security_router = create_engagement_security_router(
+        engagement_security_service, current_session, require_csrf
+    )
+    application.router.routes.extend(engagement_security_router.routes)
+
+    execution_router = create_execution_router(
+        execution_governance, governed_domain_worker, current_session, require_csrf
+    )
+    application.router.routes.extend(execution_router.routes)
+
+    chain_execution_router = create_chain_execution_router(
+        execution_governance, governed_domain_worker, current_session, require_csrf
+    )
+    application.router.routes.extend(chain_execution_router.routes)
+
+    log_evidence_router = create_log_evidence_router(
+        log_evidence_store, engagement_security_service, log_registry,
+        execution_governance, current_session, require_csrf,
+    )
+    application.router.routes.extend(log_evidence_router.routes)
+
+    repository_router = create_repository_router(
+        repository_assessment_service, execution_governance, governed_domain_worker,
+        current_session, require_csrf,
+    )
+    application.router.routes.extend(repository_router.routes)
+    if malware_evidence_store is not None and sample_registry is not None:
+        malware_evidence_router = create_malware_evidence_router(
+            malware_evidence_store,
+            engagement_security_service,
+            sample_registry,
+            execution_governance,
+            current_session,
+            require_csrf,
+        )
+        application.router.routes.extend(malware_evidence_router.routes)
 
     def github_import_enabled() -> None:
         if not active_settings.github_import_enabled:

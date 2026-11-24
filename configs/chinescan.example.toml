@@ -2,6 +2,10 @@ database_path = "~/.local/share/chinescan/chinescan.sqlite3"
 log_level = "INFO"
 # Optional; required before Stage B1 managed malware intake. Choose a dedicated local path.
 # malware_managed_directory = "D:/chinescan-managed-samples"
+malware_evidence_org_quota_bytes = 1073741824
+# Governed local repository snapshot limits (90-day post-closure retention is fixed).
+repository_snapshot_max_bytes = 5368709120
+repository_snapshot_org_quota_bytes = 10737418240
 # Filesystem browsing is disabled until local roots are explicitly approved.
 # Use single-quoted TOML strings for Windows paths to preserve backslashes.
 # allowed_roots = ['C:\src']

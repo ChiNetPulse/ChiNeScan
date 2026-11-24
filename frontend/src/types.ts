@@ -68,6 +68,15 @@ export type OrganizationMember = { id: string; organization_id: string; user_id:
 export type Client = { id: string; organization_id: string; name: string; description: string | null; status: string; created_at: string; updated_at: string };
 export type Engagement = { id: string; organization_id: string; client_id: string | null; name: string; description: string; status: string; created_at: string; updated_at: string };
 export type EngagementAssignment = { id: string; organization_id: string; engagement_id: string; user_id: string; role: string; status: string; email_normalized?: string; display_name?: string; created_at: string; updated_at: string };
+export type EngagementAsset = { id: string; asset_type: 'domain' | 'ip' | 'cidr' | 'url'; target: string; status: string; description: string | null };
+export type RepositoryAsset = { id: string; organization_id: string; engagement_id: string; description: string | null; status: string; binding_id: string | null; snapshot_id: string | null; snapshot_sha256: string | null; size_bytes: number | null; manifest_version: number | null; scanner_version: string | null; snapshot_created_at: string | null; snapshot_status: string | null; delete_after: string | null; legal_hold: boolean | number | null; attestation_id: string | null; authorization_id: string | null; scope_revision_id: string | null; attestation_version: string | null; attested_at: string | null };
+export type RegisteredLocalProject = { project_registry_id: string; display_label: string };
+export type RepositoryQuota = { used_bytes: number; reserved_bytes: number; organization_limit_bytes: number; snapshot_limit_bytes: number; available_bytes: number };
+export type RepositoryRetention = { snapshot_id: string; status: string; size_bytes: number; created_at: string; delete_after: string | null; legal_hold: boolean; retention_state: 'held' | 'engagement_active' | 'retained' | 'job_active' | 'eligible' };
+export type ScopeRuleRecord = { asset_id: string; effect: 'include' | 'exclude'; match_mode: string; techniques: string[]; target_snapshot: string; asset_type_snapshot: string };
+export type ScopeRevisionRecord = { id: string; revision: number; status: 'draft' | 'published'; created_by: string; approved_by: string | null; change_summary: string; rules: ScopeRuleRecord[] };
+export type AuthorizationRecord = { id: string; authorization_reference: string; authorizing_party: string; permitted_techniques: string[]; effective_at: string; expires_at: string; status: 'active' | 'revoked'; scope_revision_id: string; document: { id: string; filename: string; sha256: string; size_bytes: number } | null };
+export type ApprovalRecord = { id: string; target: string; technique: string; action_class: string; decision: string; expires_at: string; requester_user_id: string; approver_user_id: string | null; request_digest: string };
 export type Overview = {
   scan_count: number;
   finding_count: number;
@@ -103,6 +112,7 @@ export type ProjectDetail = ProjectSummary & { recent_jobs: CodeJob[]; malware_j
 export type FsDirectory = { directory_id: string; name: string; selectable: boolean };
 export type FsPage = { directory_id: string; name: string; selectable: boolean; breadcrumbs: FsDirectory[]; items: FsDirectory[]; next_cursor: string | null; truncated: boolean };
 export type LogSource = { source_id: string; display_name: string };
+export type LogEvidence = { asset_id: string; snapshot_id: string; label: string; source_format: string; sha256: string; size_bytes: number; file_count: number; manifest_version?: number; created_at?: string; status: 'available' | 'missing' | 'corrupt' | 'deleted'; legal_hold?: boolean | number; deletion_eligible?: boolean; target?: string; retention?: string };
 export type LogSourceRegistryStatus = { status: 'ok' | 'missing' | 'unreadable' | 'invalid' | 'empty'; reason: string };
 export type LogJob = { job_id: string; source_id: string; source_name: string; status: 'queued' | 'running' | 'succeeded' | 'partial' | 'failed' | 'interrupted'; created_at: string; started_at: string | null; finished_at: string | null; scan_id: string | null; event_count: number; alert_count: number; error_count: number; error: string | null; error_code?: string | null; diagnostics: string[]; project_id?: string | null; location_ids?: string[]; skipped_counts?: Record<string, number> };
 export type LogEvent = { event_id: string; occurred_at: string; kind: string; summary: string; source: string; source_ip: string | null; destination_ip: string | null; user: string | null; host: string | null; process: string | null; url: string | null; event_outcome: string | null; mitre_attack_techniques: string[] };
@@ -112,3 +122,27 @@ export type MalwareSample = { registry_id: string | null; display_name: string; 
 export type MalwareJob = { job_id: string; sample_id: string; status: 'queued' | 'running' | 'succeeded' | 'failed' | 'interrupted'; created_at: string; started_at: string | null; finished_at: string | null; analysis_id: string | null; warning: string | null; analysis_status: 'complete' | 'partial' | null };
 export type MalwareAnalysis = { analysis_id: string; sample_id: string; profile: string; status: 'complete' | 'partial'; created_at: string; size_bytes: number; hashes: Record<string, string>; file_type: string; architecture: string | null; printable_string_count: number; indicator_count: number; indicators: Array<{ kind: string; value: string }>; warnings: string[]; archive_findings?: Array<{ id: string; rule_id: string; severity: string; confidence: number; entry_path: string; explanation: string }>; engines: Record<string, Record<string, string | boolean>>; entropy_bits_per_byte: number | null; section_entropy: Array<{ section: string; entropy_bits_per_byte: number }>; timestamp_utc: string | null; imports: string[]; suspicious_api_combinations: string[]; verdict: 'clean-no-indicators' | 'suspicious' | 'likely-malicious'; verdict_evidence: string[]; verdict_caveat: string; evidence_note: string };
 export type MalwareCapability = { execution_available: boolean; diagnostic: string; historical_views_available: boolean };
+export type ExecutionJob = {
+  id: string; organization_id: string; engagement_id: string; requester_user_id: string;
+  asset_id: string; target: string; asset_type: string; technique: string;
+  action_class: string; scope_revision_id: string; authorization_id: string;
+  approval_id: string | null; policy_decision_id: string; request_digest: string;
+  status: 'queued' | 'claimed' | 'running' | 'completed' | 'blocked' | 'cancelled' | 'failed';
+  created_at: string; expires_at: string; started_at: string | null; finished_at: string | null;
+  scan_id: string | null; error_code: string | null;
+  cancellation_requested_at: string | null; cancellation_requested_by: string | null;
+  cancellation_observed_at: string | null;
+};
+export type ExecutionProvenance = {
+  execution: {
+    job_id: string; organization_id: string; engagement_id: string; requester_user_id: string;
+    target: string; target_type: string; technique: string; action_class: string;
+    scope_revision_id: string; authorization_id: string; authorization_document_sha256: string | null;
+    request_digest: string; approval_id: string | null;
+    approval_consumption_outcome: 'not_required' | 'consumed' | 'not_consumed';
+    approval_consumed_at: string | null; created_at: string; started_at: string | null;
+    finished_at: string | null; outcome: ExecutionJob['status']; scan_id: string | null;
+  };
+  execution_context: Record<string, unknown>;
+  results: Array<{ record_type: 'scan' | 'finding' | 'evidence' | 'artifact' | 'report'; record_id: string; linked_at: string }>;
+};

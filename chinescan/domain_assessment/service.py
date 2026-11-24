@@ -12,7 +12,13 @@ from chinescan.core.models.finding import Finding
 from chinescan.core.models.investigation import AuthorizationRecord, Scan, Target
 from chinescan.core.storage.repository import Repository
 from chinescan.domain_assessment.authorization import AuthorizationGrant
-from chinescan.domain_assessment.probe import DomainProbe, NetworkDomainProbe, ProbeResult
+from chinescan.domain_assessment.probe import (
+    DomainProbe,
+    ExecutionCancelled,
+    ExecutionStopped,
+    NetworkDomainProbe,
+    ProbeResult,
+)
 
 
 @dataclass(frozen=True)
@@ -87,6 +93,7 @@ class DomainAssessmentService:
             ).model_dump(mode="json"),
         )
 
+        stopped: ExecutionStopped | ExecutionCancelled | None = None
         try:
             probe_result = self.probe.assess(grant.target, grant.profile)
             findings = tuple(_finding(grant.target, item) for item in probe_result.findings)
@@ -94,6 +101,18 @@ class DomainAssessmentService:
             failures = {
                 f"probe_{index}": error for index, error in enumerate(probe_result.errors, 1)
             }
+        except ExecutionStopped as exc:
+            stopped = exc
+            probe_result = ProbeResult(errors=("Assessment blocked by current authorization",))
+            findings = ()
+            status = "blocked"
+            failures = {"authorization": "Assessment blocked by current authorization"}
+        except ExecutionCancelled as exc:
+            stopped = exc
+            probe_result = ProbeResult(errors=("Assessment cancelled",))
+            findings = ()
+            status = "cancelled"
+            failures = {"cancellation": "Assessment cancelled"}
         except Exception:
             probe_result = ProbeResult(errors=("Domain probe failed unexpectedly",))
             findings = ()
@@ -118,6 +137,8 @@ class DomainAssessmentService:
         )
         for finding in findings:
             self.repository.save("finding", finding.finding_id, finding.model_dump(mode="json"))
+        if stopped is not None:
+            raise stopped
         return DomainScanResult(
             scan_id,
             grant.target,

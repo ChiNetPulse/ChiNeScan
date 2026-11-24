@@ -7,7 +7,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from getpass import getpass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 import typer
@@ -15,9 +15,23 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from chinescan import __version__
 from chinescan.core.cases import CaseWorkflow, CaseWorkflowError
+from chinescan.core.chain_trace_execution import (
+    CHAIN_IMPORT_TECHNIQUE,
+    CHAIN_PROVIDER_TECHNIQUE,
+    GovernedChainImportAdapter,
+    GovernedChainProviderAdapter,
+)
 from chinescan.core.config.io import init_config, load_settings, validate_config
 from chinescan.core.config.settings import Settings
+from chinescan.core.engagement_security import EngagementSecurityService
 from chinescan.core.errors import ConfigurationError, StorageError
+from chinescan.core.execution_adapters import (
+    GovernedLogAnalysisAdapter,
+    GovernedMalwareStaticTriageAdapter,
+    RepositoryCodeAssessmentAdapter,
+    build_default_adapter_registry,
+)
+from chinescan.core.execution_governance import ExecutionGovernanceService, GovernedDomainWorker
 from chinescan.core.fs_policy import (
     FilesystemBrowserService,
     RootValidation,
@@ -25,6 +39,8 @@ from chinescan.core.fs_policy import (
     policy_paths,
 )
 from chinescan.core.github_import import GitHubImportService
+from chinescan.core.log_evidence import LogEvidenceError, LogEvidenceStore
+from chinescan.core.malware_evidence import MalwareEvidenceError, MalwareEvidenceStore
 from chinescan.core.log_locations import LogLocationService
 from chinescan.core.logging.redaction import redact
 from chinescan.core.malware_ack import MalwareAcknowledgementError, MalwareAcknowledgements
@@ -38,6 +54,7 @@ from chinescan.core.orchestration.code_scan import (
     ScanBounds,
     ScannerError,
 )
+from chinescan.core.organizations import OrganizationService
 from chinescan.core.projects import ProjectError, ProjectFileRegistry, ProjectService
 from chinescan.core.report_store import ReportStoreError, save_scan_reports
 from chinescan.core.reporting import (
@@ -46,6 +63,12 @@ from chinescan.core.reporting import (
     render_case_report,
     render_report,
     scan_data,
+)
+from chinescan.core.repository_assessment import (
+    REPOSITORY_TECHNIQUE,
+    RepositoryAssessmentService,
+    RepositorySnapshotError,
+    RepositorySnapshotStore,
 )
 from chinescan.core.storage.recovery import (
     RecoveryError,
@@ -57,13 +80,12 @@ from chinescan.core.storage.recovery import (
 from chinescan.core.storage.sqlite import SQLiteRepository
 from chinescan.core.trends import scan_history_trends
 from chinescan.core.verdict import VERDICT_CAVEAT
-from chinescan.domain_assessment.authorization import AuthorizationError, authorize_target
-from chinescan.domain_assessment.probe import NetworkDomainProbe, ProbeSettings
-from chinescan.domain_assessment.service import DomainAssessmentService
+from chinescan.domain_assessment.probe import ProbeSettings
 from chinescan.log_analysis.ingest import LogIngestionError
 from chinescan.log_analysis.service import LogAnalysisService
 from chinescan.malware_analysis.analyzer import AnalysisError, analyze_file
 from chinescan.malware_analysis.engines import EngineResult, run_clamav, run_yara
+from chinescan.malware_analysis.managed import ManagedSampleError, create_backend
 from chinescan.scanners.external import (
     GitleaksScanner,
     NpmAuditScanner,
@@ -82,11 +104,16 @@ from chinescan.web.auth import (
     migrate_legacy_operator,
     migrate_operator_email_for_reset,
     normalize_email,
+    operator_email,
+    operator_identity_id,
     operator_identity_summary,
     operator_status,
+    operator_totp_enabled,
     set_operator_password,
     start_totp_enrollment,
     timestamped_credential_backup,
+    verify_operator,
+    verify_operator_totp,
 )
 
 
@@ -1113,6 +1140,406 @@ def logs_ingest(
         raise typer.Exit(code=1)
 
 
+def _authenticate_persistent_operator(credential_file: Path | None) -> tuple[str, str]:
+    credentials = _operator_credential_path(credential_file)
+    email = operator_email(credentials)
+    password = getpass("Operator password: ")
+    authenticated = bool(email) and verify_operator(credentials, email or "", password)
+    if authenticated and operator_totp_enabled(credentials):
+        authenticated = verify_operator_totp(credentials, getpass("TOTP or recovery code: "))
+    if not authenticated:
+        raise CredentialError("Operator authentication failed.")
+    user_id = operator_identity_id(credentials)
+    if user_id is None or email is None:
+        raise CredentialError(
+            "Persistent operator identity is unavailable; complete web bootstrap first."
+        )
+    return user_id, normalize_email(email)
+
+
+def log_evidence_register(
+    source: Path = typer.Argument(..., help="Local evidence source inside an allowed root."),  # noqa: B008
+    organization_id: str = typer.Option(..., "--organization-id"),
+    engagement_id: str = typer.Option(..., "--engagement-id"),
+    label: str = typer.Option(..., "--label"),
+    credential_file: Path | None = typer.Option(None, "--credential-file"),  # noqa: B008
+    output_format: str = typer.Option("human", "--format"),  # noqa: B008
+) -> None:
+    """Register and snapshot local log evidence for a governed engagement."""
+    if output_format not in {"human", "json"}:
+        raise typer.BadParameter("must be 'human' or 'json'")
+    try:
+        user_id, normalized_email = _authenticate_persistent_operator(credential_file)
+    except CredentialError as exc:
+        typer.echo(str(redact(str(exc))), err=True)
+        raise typer.Exit(code=2) from exc
+    settings = _settings()
+    repository = SQLiteRepository(settings.database_path)
+    try:
+        organizations = OrganizationService(repository)
+        user = organizations.get_active_user(user_id)
+        if not user or user.get("email_normalized") != normalized_email:
+            typer.echo(
+                "Persistent operator identity is unavailable or requires web bootstrap.", err=True
+            )
+            raise typer.Exit(code=2)
+        security = EngagementSecurityService(repository, organizations)
+        snapshot_root = (
+            settings.database_path.expanduser().resolve(strict=False).parent
+            / "log-evidence-snapshots"
+        )
+        store = LogEvidenceStore(
+            repository,
+            snapshot_root,
+            allowed_roots=list(settings.allowed_roots),
+            max_snapshot_bytes=settings.log_evidence_max_bytes,
+            organization_quota_bytes=settings.log_evidence_org_quota_bytes,
+        )
+        result = store.register(user_id, organization_id, engagement_id, source, label, security)
+        if result is None:
+            typer.echo(
+                "Engagement or evidence registration is unavailable to this operator.", err=True
+            )
+            raise typer.Exit(code=2)
+    except LogEvidenceError as exc:
+        typer.echo(f"Log evidence registration failed: {exc.code}.", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        repository.close()
+    if output_format == "json":
+        typer.echo(json.dumps(result, sort_keys=True))
+    else:
+        typer.echo(
+            f"Registered evidence asset {result['asset_id']} ({result['file_count']} file(s))."
+        )
+        typer.echo(f"Snapshot: {result['snapshot_id']}; SHA-256: {result['sha256']}")
+
+
+def governed_log_analysis(
+    organization_id: str = typer.Option(..., "--organization-id"),
+    engagement_id: str = typer.Option(..., "--engagement-id"),
+    asset_id: str = typer.Option(..., "--asset-id"),
+    idempotency_key: str | None = typer.Option(None, "--idempotency-key"),  # noqa: B008
+    credential_file: Path | None = typer.Option(None, "--credential-file"),  # noqa: B008
+    output_format: str = typer.Option("human", "--format"),  # noqa: B008
+) -> None:
+    """Run passive log analysis against registered immutable engagement evidence."""
+    if output_format not in {"human", "json"}:
+        raise typer.BadParameter("must be 'human' or 'json'")
+    try:
+        user_id, normalized_email = _authenticate_persistent_operator(credential_file)
+    except CredentialError as exc:
+        typer.echo(str(redact(str(exc))), err=True)
+        raise typer.Exit(code=2) from exc
+    settings = _settings()
+    repository = SQLiteRepository(settings.database_path)
+    try:
+        organizations = OrganizationService(repository)
+        user = organizations.get_active_user(user_id)
+        if not user or user.get("email_normalized") != normalized_email:
+            typer.echo(
+                "Persistent operator identity is unavailable or requires web bootstrap.", err=True
+            )
+            raise typer.Exit(code=2)
+        security = EngagementSecurityService(repository, organizations)
+        snapshot_root = (
+            settings.database_path.expanduser().resolve(strict=False).parent
+            / "log-evidence-snapshots"
+        )
+        evidence = LogEvidenceStore(
+            repository,
+            snapshot_root,
+            allowed_roots=list(settings.allowed_roots),
+            max_snapshot_bytes=settings.log_evidence_max_bytes,
+            organization_quota_bytes=settings.log_evidence_org_quota_bytes,
+        )
+        adapter = GovernedLogAnalysisAdapter(repository, evidence)
+        governance = ExecutionGovernanceService(
+            security, adapters=build_default_adapter_registry(repository, log_adapter=adapter)
+        )
+        job = governance.create_governed_job(
+            user_id, organization_id, engagement_id, asset_id,
+            technique="log_analysis", approval_id=None,
+            idempotency_key=idempotency_key or str(uuid4()),
+        )
+        if job.get("decision") != "ALLOW":
+            typer.echo(
+                f"Governed log analysis blocked: {job.get('reason_code', 'POLICY_DENIED')} — "
+                f"{job.get('explanation', 'Policy did not authorize this operation.')}.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if not job.get("id") or job.get("status") != "queued":
+            typer.echo("Governed execution admission returned an invalid job.", err=True)
+            raise typer.Exit(code=2)
+        job_id = str(job["id"])
+        outcome = GovernedDomainWorker(repository, governance).run_one(job_id)
+        result = governance.get_job(user_id, organization_id, job_id)
+    except LogEvidenceError as exc:
+        typer.echo(f"Governed log evidence unavailable: {exc.code}.", err=True)
+        raise typer.Exit(code=2) from exc
+    except (ValueError, OverflowError) as exc:
+        typer.echo(f"Governed log analysis could not be admitted: {redact(str(exc))}.", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        repository.close()
+    if result is None or outcome is None:
+        typer.echo("Governed log execution could not be dispatched.", err=True)
+        raise typer.Exit(code=1)
+
+
+def governed_chain_trace(
+    organization_id: str = typer.Option(..., "--organization-id"),
+    engagement_id: str = typer.Option(..., "--engagement-id"),
+    asset_id: str = typer.Option(..., "--asset-id"),
+    operation: str = typer.Option(..., "--operation", help="import or provider"),
+    chain: str | None = typer.Option(None, "--chain"),
+    seed: str | None = typer.Option(None, "--seed"),
+    depth: int = typer.Option(2, "--depth", min=1, max=6),
+    approval_id: str | None = typer.Option(None, "--approval-id"),
+    idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
+    credential_file: Path | None = typer.Option(None, "--credential-file"),  # noqa: B008
+    output_format: str = typer.Option("human", "--format"),  # noqa: B008
+) -> None:
+    """Run a governed local chain import or approved configured provider lookup."""
+    if operation not in {"import", "provider"}:
+        raise typer.BadParameter("operation must be 'import' or 'provider'")
+    if output_format not in {"human", "json"}:
+        raise typer.BadParameter("format must be 'human' or 'json'")
+    if operation == "import" and (not chain or not seed or approval_id):
+        raise typer.BadParameter("import requires --chain and --seed and does not use --approval-id")
+    if operation == "provider" and (chain or seed or not approval_id):
+        raise typer.BadParameter("provider requires --approval-id and uses the registered chain target")
+    try:
+        user_id, normalized_email = _authenticate_persistent_operator(credential_file)
+    except CredentialError as exc:
+        typer.echo(str(redact(str(exc))), err=True)
+        raise typer.Exit(code=2) from exc
+    settings = _settings()
+    repository = SQLiteRepository(settings.database_path)
+    try:
+        organizations = OrganizationService(repository)
+        user = organizations.get_active_user(user_id)
+        if not user or user.get("email_normalized") != normalized_email:
+            typer.echo("Persistent operator identity is unavailable.", err=True)
+            raise typer.Exit(code=2)
+        security = EngagementSecurityService(repository, organizations)
+        log_store = LogEvidenceStore(
+            repository,
+            settings.database_path.expanduser().resolve(strict=False).parent / "log-evidence-snapshots",
+            allowed_roots=list(settings.allowed_roots),
+            max_snapshot_bytes=settings.log_evidence_max_bytes,
+            organization_quota_bytes=settings.log_evidence_org_quota_bytes,
+        )
+        label_paths = (str(settings.chain_labels_path),) if settings.chain_labels_path else ()
+        import_adapter = GovernedChainImportAdapter(repository, log_store, tuple(label_paths))
+        provider_adapter = GovernedChainProviderAdapter(
+            repository,
+            max_requests=settings.chain_trace_max_requests,
+            deadline_seconds=settings.chain_trace_deadline_seconds,
+            label_paths=tuple(label_paths),
+        )
+        governance = ExecutionGovernanceService(
+            security,
+            adapters=build_default_adapter_registry(
+                repository,
+                chain_import_adapter=import_adapter,
+                chain_provider_adapter=provider_adapter,
+            ),
+        )
+        technique = CHAIN_IMPORT_TECHNIQUE if operation == "import" else CHAIN_PROVIDER_TECHNIQUE
+        chain_request = {"chain": chain, "seed": seed, "depth": depth} if operation == "import" else None
+        try:
+            job = governance.create_governed_job(
+                user_id,
+                organization_id,
+                engagement_id,
+                asset_id,
+                technique=technique,
+                approval_id=approval_id,
+                idempotency_key=idempotency_key or str(uuid4()),
+                chain_request=chain_request,
+            )
+        except (OverflowError, ValueError) as exc:
+            typer.echo("Governed chain trace could not be admitted.", err=True)
+            raise typer.Exit(code=2) from exc
+        if job.get("decision") != "ALLOW" or job.get("status") != "queued":
+            typer.echo(
+                f"Governed chain trace blocked: {job.get('reason_code', 'POLICY_DENIED') }.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        outcome = GovernedDomainWorker(repository, governance).run_one(str(job["id"]))
+        result = governance.get_job(user_id, organization_id, str(job["id"]))
+    except (LogEvidenceError, ValueError) as exc:
+        typer.echo(f"Governed chain trace failed: {redact(str(exc))}.", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        repository.close()
+    if result is None or outcome is None:
+        typer.echo("Governed chain trace was not dispatched.", err=True)
+        raise typer.Exit(code=1)
+    if output_format == "json":
+        typer.echo(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
+    else:
+        typer.echo(f"Governed chain trace {result['id']}: {result['status']}")
+        typer.echo(f"Result: {result.get('scan_id') or 'unavailable'}")
+    if result["status"] != "completed":
+        raise typer.Exit(code=1)
+    if output_format == "json":
+        typer.echo(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
+    else:
+        typer.echo(f"Governed log analysis {result['id']}: {result['status']}")
+        typer.echo(f"Asset: {asset_id}; result: {result.get('scan_id') or 'unavailable'}")
+    if result["status"] != "completed":
+        raise typer.Exit(code=1)
+
+
+def _malware_governance_components(
+    repository: SQLiteRepository,
+    settings: Settings,
+    credential_file: Path | None,
+) -> tuple[MalwareEvidenceStore, Any, Any]:
+    registry_path = Path.home() / ".config" / "chinescan" / "malware-samples.toml"
+    credentials = _operator_credential_path(credential_file)
+    backend, registry = create_backend(
+        repository,
+        settings,
+        registry_path,
+        additional_protected_paths=[
+            credentials,
+            Path.home() / ".config" / "chinescan" / "projects.toml",
+            Path.home() / ".config" / "chinescan" / "log-sources.toml",
+        ],
+    )
+    security = EngagementSecurityService(repository, OrganizationService(repository))
+    evidence = MalwareEvidenceStore(
+        repository,
+        backend.store,
+        security,
+        organization_quota_bytes=settings.malware_evidence_org_quota_bytes,
+    )
+    return evidence, registry, security
+
+
+def malware_evidence_register(
+    source_registry_id: str = typer.Option(..., "--registry-id"),
+    organization_id: str = typer.Option(..., "--organization-id"),
+    engagement_id: str = typer.Option(..., "--engagement-id"),
+    classification: str = typer.Option("malware_suspected", "--classification"),
+    credential_file: Path | None = typer.Option(None, "--credential-file"),  # noqa: B008
+    output_format: str = typer.Option("human", "--format"),  # noqa: B008
+) -> None:
+    """Register one operator-allowlisted sample without accepting a filesystem path."""
+    if output_format not in {"human", "json"}:
+        raise typer.BadParameter("must be 'human' or 'json'")
+    try:
+        user_id, normalized_email = _authenticate_persistent_operator(credential_file)
+    except CredentialError as exc:
+        typer.echo(str(redact(str(exc))), err=True)
+        raise typer.Exit(code=2) from exc
+    repository = SQLiteRepository(_settings().database_path)
+    try:
+        settings = _settings()
+        organizations = OrganizationService(repository)
+        user = organizations.get_active_user(user_id)
+        if not user or user.get("email_normalized") != normalized_email:
+            raise MalwareEvidenceError("persistent_identity_unavailable")
+        evidence, registry, _security = _malware_governance_components(
+            repository, settings, credential_file
+        )
+        result = evidence.register(
+            user_id,
+            organization_id,
+            engagement_id,
+            source_registry_id,
+            registry,
+            classification=classification,
+        )
+        if result is None:
+            raise MalwareEvidenceError("malware_registration_denied")
+    except MalwareEvidenceError as exc:
+        typer.echo(f"Malware evidence registration failed: {exc.code}.", err=True)
+        raise typer.Exit(code=2) from exc
+    except (ManagedSampleError, OSError, ValueError) as exc:
+        typer.echo("Malware evidence registration failed: source_unavailable.", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        repository.close()
+    if output_format == "json":
+        typer.echo(json.dumps(result, sort_keys=True))
+    else:
+        typer.echo(
+            f"Registered malware evidence {result['asset_id']} ({result['size_bytes']} bytes)."
+        )
+        typer.echo(f"Snapshot SHA-256: {result['sha256']}")
+
+
+def governed_malware_triage(
+    organization_id: str = typer.Option(..., "--organization-id"),
+    engagement_id: str = typer.Option(..., "--engagement-id"),
+    asset_id: str = typer.Option(..., "--asset-id"),
+    idempotency_key: str | None = typer.Option(None, "--idempotency-key"),  # noqa: B008
+    credential_file: Path | None = typer.Option(None, "--credential-file"),  # noqa: B008
+    output_format: str = typer.Option("human", "--format"),  # noqa: B008
+) -> None:
+    """Run static triage against registered, immutable engagement evidence."""
+    if output_format not in {"human", "json"}:
+        raise typer.BadParameter("must be 'human' or 'json'")
+    try:
+        user_id, normalized_email = _authenticate_persistent_operator(credential_file)
+    except CredentialError as exc:
+        typer.echo(str(redact(str(exc))), err=True)
+        raise typer.Exit(code=2) from exc
+    settings = _settings()
+    repository = SQLiteRepository(settings.database_path)
+    try:
+        organizations = OrganizationService(repository)
+        user = organizations.get_active_user(user_id)
+        if not user or user.get("email_normalized") != normalized_email:
+            raise MalwareEvidenceError("persistent_identity_unavailable")
+        evidence, _registry, security = _malware_governance_components(
+            repository, settings, credential_file
+        )
+        adapter = GovernedMalwareStaticTriageAdapter(repository, evidence)
+        governance = ExecutionGovernanceService(
+            security, adapters=build_default_adapter_registry(repository, malware_adapter=adapter)
+        )
+        job = governance.create_governed_job(
+            user_id,
+            organization_id,
+            engagement_id,
+            asset_id,
+            technique="malware_static_triage",
+            approval_id=None,
+            idempotency_key=idempotency_key or str(uuid4()),
+        )
+        if job.get("decision") != "ALLOW" or job.get("status") != "queued":
+            code = job.get("reason_code", "POLICY_DENIED")
+            typer.echo(f"Governed malware triage blocked: {code}.", err=True)
+            raise typer.Exit(code=2)
+        outcome = GovernedDomainWorker(repository, governance).run_one(str(job["id"]))
+        result = governance.get_job(user_id, organization_id, str(job["id"]))
+    except MalwareEvidenceError as exc:
+        typer.echo(f"Governed malware triage failed: {exc.code}.", err=True)
+        raise typer.Exit(code=2) from exc
+    except (ManagedSampleError, OSError, ValueError) as exc:
+        typer.echo("Governed malware triage failed: policy_or_evidence_unavailable.", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        repository.close()
+    if result is None or outcome is None:
+        typer.echo("Governed malware job was not dispatched.", err=True)
+        raise typer.Exit(code=1)
+    if output_format == "json":
+        typer.echo(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
+    else:
+        typer.echo(f"Governed malware triage {result['id']}: {result['status']}")
+        typer.echo(f"Evidence asset: {asset_id}; result: {result.get('scan_id') or 'unavailable'}")
+    if result["status"] != "completed":
+        raise typer.Exit(code=1)
+
+
 def malware_analyze(
     sample: Path = typer.Argument(..., help="Local file for bounded static analysis."),  # noqa: B008
     output_format: str = typer.Option("human", "--format", help="Output format: human or json."),  # noqa: B008
@@ -1179,24 +1606,31 @@ def domain_assess(
     request_interval_seconds: float = typer.Option(
         0.0, "--request-interval", help="Minimum seconds between requests (0 to 5)."
     ),  # noqa: B008
+    organization_id: str | None = typer.Option(
+        None, "--organization-id", help="Authorized organization ID."
+    ),  # noqa: B008
+    engagement_id: str | None = typer.Option(
+        None, "--engagement-id", help="Authorized engagement ID."
+    ),  # noqa: B008
+    asset_id: str | None = typer.Option(
+        None, "--asset-id", help="Registered in-scope domain asset ID."
+    ),  # noqa: B008
+    approval_id: str | None = typer.Option(
+        None, "--approval-id", help="Approval bound to this exact operation."
+    ),  # noqa: B008
+    idempotency_key: str | None = typer.Option(
+        None, "--idempotency-key", help="Stable key for safe CLI retries."
+    ),  # noqa: B008
+    credential_file: Path | None = typer.Option(  # noqa: B008
+        None, "--credential-file", help="Operator credentials file."
+    ),  # noqa: B008
     output_format: str = typer.Option("human", "--format", help="Output format: human or json."),  # noqa: B008
 ) -> None:
-    """Assess one hostname only after explicit, auditable authorization."""
+    """Assess a registered engagement domain only after backend policy authorization."""
     if output_format not in {"human", "json"}:
         raise typer.BadParameter("must be 'human' or 'json'")
     try:
-        grant = authorize_target(
-            target,
-            profile=profile,
-            operator=operator,
-            assert_ownership=i_own_this_target,
-            authorization_file=authorization_file,
-        )
-    except AuthorizationError as exc:
-        typer.echo(str(redact(str(exc))), err=True)
-        raise typer.Exit(code=2) from exc
-    try:
-        probe_settings = ProbeSettings(
+        ProbeSettings(
             timeout_seconds=timeout_seconds,
             max_addresses=max_addresses,
             request_interval_seconds=request_interval_seconds,
@@ -1204,27 +1638,264 @@ def domain_assess(
     except ValueError as exc:
         typer.echo(str(redact(str(exc))), err=True)
         raise typer.Exit(code=2) from exc
-    scan_options: dict[str, str | int | float | bool] = probe_settings.as_dict()
+    if not organization_id or not engagement_id or not asset_id:
+        typer.echo(
+            "Refusing external assessment without --organization-id, "
+            "--engagement-id, and --asset-id.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if (
+        profile != "light"
+        or timeout_seconds != 3.0
+        or max_addresses != 5
+        or request_interval_seconds != 0.0
+    ):
+        typer.echo("Only the server-governed light profile is currently supported.", err=True)
+        raise typer.Exit(code=2)
+    if operator or i_own_this_target or authorization_file:
+        typer.echo(
+            "Local ownership assertions and authorization files do not authorize "
+            "engagement execution.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     repository = SQLiteRepository(_settings().database_path)
     try:
-        result = DomainAssessmentService(
-            repository,
-            NetworkDomainProbe(probe_settings),
-            scan_options=scan_options,
-        ).assess(grant)
+        organization_service = OrganizationService(repository)
+        try:
+            credentials = _operator_credential_path(credential_file)
+            email = operator_email(credentials)
+            password = getpass("Operator password: ")
+            authenticated = bool(email) and verify_operator(credentials, email or "", password)
+            if authenticated and operator_totp_enabled(credentials):
+                authenticated = verify_operator_totp(
+                    credentials, getpass("TOTP or recovery code: ")
+                )
+        except CredentialError as exc:
+            typer.echo(str(redact(str(exc))), err=True)
+            raise typer.Exit(code=2) from exc
+        if not authenticated:
+            typer.echo("Operator authentication failed.", err=True)
+            raise typer.Exit(code=2)
+        principal = organization_service.user_id_for_email(email) if email else None
+        if not principal:
+            typer.echo(
+                "Persistent operator identity is unavailable; run web bootstrap first.", err=True
+            )
+            raise typer.Exit(code=2)
+        governance = ExecutionGovernanceService(
+            EngagementSecurityService(repository, organization_service)
+        )
+        try:
+            job = governance.create_domain_job(
+                principal,
+                organization_id,
+                engagement_id,
+                asset_id,
+                approval_id=approval_id,
+                idempotency_key=idempotency_key or str(uuid4()),
+                requested_target=target,
+            )
+        except ValueError as exc:
+            typer.echo(str(redact(str(exc))), err=True)
+            raise typer.Exit(code=2) from exc
+        if "decision" in job and job.get("decision") != "ALLOW":
+            typer.echo(
+                f"Execution blocked: {job.get('reason_code', 'POLICY_DENIED')} — "
+                f"{job.get('explanation', 'Policy did not authorize this operation.')}",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        outcome = GovernedDomainWorker(repository, governance).run_one(str(job["id"]))
+        result = governance.get_job(principal, organization_id, str(job["id"]))
     finally:
         repository.close()
+    if not result or not outcome:
+        typer.echo("Execution job could not be dispatched.", err=True)
+        raise typer.Exit(code=1)
     if output_format == "json":
-        typer.echo(json.dumps(result.summary(), ensure_ascii=False, sort_keys=True))
+        typer.echo(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
     else:
-        typer.echo(f"Domain assessment {result.scan_id}: {result.target} ({result.status})")
-        typer.echo(f"Authorization record: {result.authorization_id}; profile: {result.profile}")
-        typer.echo(f"Resolved public addresses: {len(result.probe.addresses)}")
-        typer.echo(f"HTTP status: {result.probe.http_status or 'unavailable'}")
-        typer.echo(f"Candidate findings: {len(result.findings)}")
-        for error in result.probe.errors:
-            typer.echo(str(redact(error)), err=True)
-    if result.status != "complete":
+        typer.echo(
+            f"Governed domain execution {result['id']}: {result['status']} ({result['target']})"
+        )
+        typer.echo(
+            f"Policy decision: {result['policy_decision_id']}; "
+            f"scan: {result.get('scan_id') or 'unavailable'}"
+        )
+    if result["status"] != "completed":
+        raise typer.Exit(code=1)
+
+
+def _repository_execution_bounds(settings: Settings) -> tuple[ScanBounds, dict[str, object]]:
+    values: dict[str, object] = {
+        "max_files": settings.max_files,
+        "max_total_bytes": settings.max_total_bytes,
+        "max_file_bytes": settings.max_file_bytes,
+        "max_depth": settings.max_depth,
+        "per_file_seconds": settings.per_file_seconds,
+        "job_deadline_seconds": settings.job_deadline_seconds,
+        "excluded_paths": list(settings.code_excluded_paths),
+    }
+    return (
+        ScanBounds(
+            max_files=settings.max_files,
+            max_total_bytes=settings.max_total_bytes,
+            max_file_bytes=settings.max_file_bytes,
+            max_depth=settings.max_depth,
+            per_file_seconds=settings.per_file_seconds,
+            job_deadline_seconds=settings.job_deadline_seconds,
+            excluded_paths=tuple(settings.code_excluded_paths),
+        ),
+        values,
+    )
+
+
+def governed_code_scan(
+    organization_id: str = typer.Option(..., "--organization-id"),
+    engagement_id: str = typer.Option(..., "--engagement-id"),
+    asset_id: str = typer.Option(..., "--asset-id"),
+    idempotency_key: str | None = typer.Option(
+        None, "--idempotency-key", help="Stable key for safe CLI retries."
+    ),  # noqa: B008
+    credential_file: Path | None = typer.Option(  # noqa: B008
+        None, "--credential-file", help="Operator credentials file."
+    ),  # noqa: B008
+    output_format: str = typer.Option("human", "--format", help="Output format: human or json."),  # noqa: B008
+) -> None:
+    """Run a governed code assessment against an engagement-bound repository snapshot."""
+    if output_format not in {"human", "json"}:
+        raise typer.BadParameter("must be 'human' or 'json'")
+
+    try:
+        credentials = _operator_credential_path(credential_file)
+        email = operator_email(credentials)
+        password = getpass("Operator password: ")
+        authenticated = bool(email) and verify_operator(credentials, email or "", password)
+        if authenticated and operator_totp_enabled(credentials):
+            authenticated = verify_operator_totp(
+                credentials, getpass("TOTP or recovery code: ")
+            )
+    except CredentialError as exc:
+        typer.echo(str(redact(str(exc))), err=True)
+        raise typer.Exit(code=2) from exc
+    if not authenticated:
+        typer.echo("Operator authentication failed.", err=True)
+        raise typer.Exit(code=2)
+
+    stable_user_id = operator_identity_id(credentials)
+    if stable_user_id is None:
+        typer.echo(
+            "Persistent operator identity is unavailable; complete web bootstrap first.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    settings = _settings()
+    repository = SQLiteRepository(settings.database_path)
+    try:
+        organizations = OrganizationService(repository)
+        user = organizations.get_active_user(stable_user_id)
+        if (
+            user is None
+            or email is None
+            or user.get("email_normalized") != normalize_email(email)
+        ):
+            typer.echo(
+                "Persistent operator identity is unavailable or requires web bootstrap.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+        security = EngagementSecurityService(repository, organizations)
+        snapshot_root = (
+            settings.database_path.expanduser().resolve(strict=False).parent
+            / "repository-snapshots"
+        )
+        snapshots = RepositorySnapshotStore(
+            repository,
+            snapshot_root,
+            max_snapshot_bytes=settings.repository_snapshot_max_bytes,
+            organization_quota_bytes=settings.repository_snapshot_org_quota_bytes,
+            max_files=settings.max_files,
+            max_depth=settings.max_depth,
+        )
+        repository_assessment = RepositoryAssessmentService(
+            repository, security, _project_service(repository), snapshots
+        )
+        asset = repository_assessment.get_asset(
+            stable_user_id, organization_id, engagement_id, asset_id
+        )
+        if asset is None or not asset.get("binding_id") or not asset.get("attestation_id"):
+            typer.echo(
+                "Repository asset is unavailable, unbound, or not accessible.", err=True
+            )
+            raise typer.Exit(code=2)
+
+        bounds, bounds_context = _repository_execution_bounds(settings)
+        adapter = RepositoryCodeAssessmentAdapter(repository, snapshots, bounds)
+        governance = ExecutionGovernanceService(
+            security,
+            adapters=build_default_adapter_registry(repository, adapter),
+            repository_scan_bounds=bounds_context,
+        )
+        try:
+            job = governance.create_governed_job(
+                stable_user_id,
+                organization_id,
+                engagement_id,
+                asset_id,
+                technique=REPOSITORY_TECHNIQUE,
+                approval_id=None,
+                idempotency_key=idempotency_key or str(uuid4()),
+                repository_binding_id=asset["binding_id"],
+                repository_attestation_id=asset["attestation_id"],
+            )
+        except OverflowError as exc:
+            typer.echo("Governed execution queue is full.", err=True)
+            raise typer.Exit(code=2) from exc
+        except ValueError as exc:
+            typer.echo(str(redact(str(exc))), err=True)
+            raise typer.Exit(code=2) from exc
+
+        if "decision" in job and job.get("decision") != "ALLOW":
+            typer.echo(
+                f"Governed execution blocked: {job.get('reason_code', 'POLICY_DENIED')} — "
+                f"{job.get('explanation', 'Policy did not authorize this operation.')}",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+        # An admitted job is represented by its durable job row (id/status), not
+        # by an ALLOW decision envelope. Reject unexpected service responses.
+        if not job.get("id") or job.get("status") not in {
+            "queued", "running", "completed", "failed", "cancelled"
+        }:
+            typer.echo("Governed execution admission returned an invalid job.", err=True)
+            raise typer.Exit(code=2)
+
+        job_id = str(job["id"])
+        if job.get("status") == "queued":
+            outcome = GovernedDomainWorker(repository, governance).run_one(job_id)
+        else:
+            outcome = {"id": job_id, "status": job.get("status", "unknown")}
+        result = governance.get_job(stable_user_id, organization_id, job_id)
+    except RepositorySnapshotError as exc:
+        typer.echo(f"Repository snapshot unavailable: {exc.code}.", err=True)
+        raise typer.Exit(code=2) from exc
+    finally:
+        repository.close()
+
+    if result is None or outcome is None:
+        typer.echo("Governed execution job could not be dispatched.", err=True)
+        raise typer.Exit(code=1)
+    if output_format == "json":
+        typer.echo(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
+    else:
+        typer.echo(f"Governed code assessment {result['id']}: {result['status']}")
+        typer.echo(f"Asset: {asset_id}; result: {result.get('scan_id') or 'unavailable'}")
+    if result["status"] != "completed":
         raise typer.Exit(code=1)
 
 
@@ -1254,6 +1925,7 @@ def database_backup(
         result = backup_database(
             settings.database_path,
             output,
+            malware_evidence_root=settings.malware_managed_directory,
         )
     except RecoveryError as exc:
         _recovery_error(exc)
@@ -1334,6 +2006,7 @@ def database_restore(
             backup_directory,
             output,
             active_database_path=settings.database_path,
+            malware_evidence_root=settings.malware_managed_directory,
         )
     except RecoveryError as exc:
         _recovery_error(exc)
@@ -1684,7 +2357,7 @@ projects_app.add_typer(project_logs_app, name="logs")
 projects_app.add_typer(project_malware_app, name="malware")
 
 
-def _project_service() -> ProjectService:
+def _project_service(repository: SQLiteRepository | None = None) -> ProjectService:
     settings = _settings()
     hard, soft = policy_paths(settings)
     legacy = ProjectFileRegistry(
@@ -1697,7 +2370,7 @@ def _project_service() -> ProjectService:
         ],
     )
     return ProjectService(
-        SQLiteRepository(settings.database_path),
+        repository or SQLiteRepository(settings.database_path),
         FilesystemBrowserService(settings.allowed_roots, hard, soft, settings.allow_soft_denied),
         legacy,
         allowed_roots=settings.allowed_roots,

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, UnauthorizedError } from '../api';
 import type { Client, Engagement, EngagementAssignment, Organization, OrganizationMember } from '../types';
+import { EngagementSecurityWorkspace } from './EngagementSecurityWorkspace';
+import { EngagementLogEvidenceWorkspace } from './EngagementLogEvidenceWorkspace';
 
 export function OrganizationsWorkspace({ onUnauthorized }: { onUnauthorized: () => void }) {
   const [items, setItems] = useState<Organization[]>([]);
@@ -162,6 +164,12 @@ export function OrganizationsWorkspace({ onUnauthorized }: { onUnauthorized: () 
           <button disabled={busy || members.length === 0}>Assign member</button>
         </form>
       </div>}
+      {selected && selectedEngagement && <EngagementSecurityWorkspace
+        organizationId={selected.id} engagementId={selectedEngagement} onUnauthorized={onUnauthorized}
+      />}
+      {selected && selectedEngagement && <EngagementLogEvidenceWorkspace
+        organizationId={selected.id} engagementId={selectedEngagement} onUnauthorized={onUnauthorized}
+      />}
     </section>
   </div>;
 }

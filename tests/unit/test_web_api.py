@@ -76,6 +76,7 @@ def _fixture(
     *,
     ttl: int = 1800,
     test_only_project_operation_rate_limit: int | None = None,
+    settings: Settings | None = None,
 ):
     database = tmp_path / "records.sqlite3"
     credential = tmp_path / "private" / "operator.json"
@@ -113,6 +114,8 @@ def _fixture(
         "session_ttl_seconds": ttl,
         "serve_frontend": False,
     }
+    if settings is not None:
+        app_options["settings"] = settings
     if test_only_project_operation_rate_limit is not None:
         app_options["test_only_project_operation_rate_limit"] = (
             test_only_project_operation_rate_limit
@@ -495,7 +498,10 @@ def test_mutating_body_models_reject_privileged_fields_from_route_inventory(
 
     from chinescan.core.storage.sqlite import records
 
-    app, client, *_ = _fixture(tmp_path)
+    app, client, *_ = _fixture(
+        tmp_path,
+        settings=Settings(_env_file=None, job_start_rate_limit=1000),
+    )
     try:
         csrf_headers = _import_session(client)
         no_csrf_headers = {"Origin": "http://127.0.0.1"}

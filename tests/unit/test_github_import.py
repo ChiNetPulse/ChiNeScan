@@ -418,8 +418,13 @@ def test_local_bare_repository_import_verifies_sha_and_removes_git(tmp_path, mon
 
 def test_api_preview_then_import_job_is_session_bound_and_path_free(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CHINESCAN_TEST_GITHUB_IMPORT", "1")
-    bare = _bare_repo(tmp_path)
-    application, client, headers = _api_client(tmp_path, test_file_transport=True)
+    short_dir = None
+    target_tmp_path = tmp_path
+    if os.name == "nt":
+        short_dir = tempfile.TemporaryDirectory(prefix="cs_t_", ignore_cleanup_errors=True)
+        target_tmp_path = Path(short_dir.name)
+    bare = _bare_repo(target_tmp_path)
+    application, client, headers = _api_client(target_tmp_path, test_file_transport=True)
     manager = application.state.github_import_manager
     manager.start_worker()
     calls: list[str] = []
@@ -439,6 +444,7 @@ def test_api_preview_then_import_job_is_session_bound_and_path_free(tmp_path, mo
         preview = preview_response.json()
         assert preview["url"] == "https://github.com/test-fixture/repository"
         assert str(tmp_path) not in preview_response.text
+        assert str(target_tmp_path) not in preview_response.text
         assert preview["fetch_depth"] == 1
         assert preview["max_bytes"] == 524_288_000
         assert preview["git_metadata_allowance_bytes"] > 0
@@ -494,6 +500,7 @@ def test_api_preview_then_import_job_is_session_bound_and_path_free(tmp_path, mo
         assert imported_project["origin_url"] == preview["url"]
         assert imported_project["commit_sha"] == terminal["commit_sha"]
         assert str(tmp_path) not in projects.text
+        assert str(target_tmp_path) not in projects.text
         project_id = str(terminal["project_id"])
         assessed = client.post(f"/api/projects/{project_id}/code-jobs", headers=headers)
         assert assessed.status_code == 202, assessed.text
@@ -513,6 +520,7 @@ def test_api_preview_then_import_job_is_session_bound_and_path_free(tmp_path, mo
         )
         assert malware_job.status_code == 202, malware_job.text
         assert str(tmp_path) not in assessed.text + acknowledgement.text + malware_job.text
+        assert str(target_tmp_path) not in assessed.text + acknowledgement.text + malware_job.text
         import_record = next(
             item
             for item in application.state.repository.list_records("github_import_job")
@@ -566,9 +574,13 @@ def test_api_preview_then_import_job_is_session_bound_and_path_free(tmp_path, mo
             )
             assert saved_record["project_removed"] is True
         assert str(tmp_path) not in current.text
+        assert str(target_tmp_path) not in current.text
     finally:
         manager.stop_worker()
         client.close()
+        application.state.repository.close()
+        if short_dir is not None:
+            short_dir.cleanup()
 
 
 def test_file_transport_seam_is_refused_outside_guarded_test_mode(tmp_path, monkeypatch) -> None:

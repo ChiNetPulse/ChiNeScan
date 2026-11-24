@@ -156,7 +156,7 @@ class ScannerError(Exception):
     """Expected scanner execution, availability, or output failure."""
 
 
-def detect_project(target: Path, bounds: ScanBounds | None = None) -> ProjectProfile:
+def detect_project(target: Path, bounds: ScanBounds | None = None, control: object | None = None) -> ProjectProfile:
     """Resolve a local project directory and identify source files and manifests."""
     candidate = target.expanduser()
     if _contains_reparse_point(candidate):
@@ -190,6 +190,8 @@ def detect_project(target: Path, bounds: ScanBounds | None = None) -> ProjectPro
     )
     ignore_specs: list[tuple[Path, GitIgnoreSpec]] = []
     for directory, dirnames, filenames in os.walk(root, followlinks=False, onerror=walk_error):
+        if control is not None:
+            control.check_cancelled()  # type: ignore[attr-defined]
         current = Path(directory)
         gitignore = current / ".gitignore"
         if gitignore.is_file():
@@ -243,6 +245,8 @@ def detect_project(target: Path, bounds: ScanBounds | None = None) -> ProjectPro
         if "package.json" in names or "package-lock.json" in names:
             kinds.add("node")
         for name in sorted(filenames):
+            if control is not None:
+                control.check_cancelled()  # type: ignore[attr-defined]
             path = current / name
             relative = path.relative_to(root).as_posix()
             if name.casefold() == ".gitignore":
@@ -431,7 +435,7 @@ class BuiltinRuleScanner:
     def scan(self, target: Path) -> list[Finding]:
         return self.scan_profile(detect_project(target, self.bounds))
 
-    def scan_profile(self, profile: ProjectProfile) -> list[Finding]:
+    def scan_profile(self, profile: ProjectProfile, control: object | None = None, on_partial: object | None = None) -> list[Finding]:
         from chinescan.core.orchestration.code_rules import (
             analyze_source,
             dependency_findings,
@@ -442,6 +446,13 @@ class BuiltinRuleScanner:
 
         findings: list[Finding] = []
         for env_file in profile.env_file_paths or []:
+            if control is not None:
+                try:
+                    control.check_cancelled()  # type: ignore[attr-defined]
+                except Exception:
+                    if on_partial is not None:
+                        on_partial(findings)  # type: ignore[operator]
+                    raise
             relative_env = env_file.relative_to(profile.root).as_posix()
             findings.append(
                 make_finding(
@@ -470,6 +481,13 @@ class BuiltinRuleScanner:
             )
         scanned_sources: list[Path] = []
         for index, source in enumerate(profile.source_files):
+            if control is not None:
+                try:
+                    control.check_cancelled()  # type: ignore[attr-defined]
+                except Exception:
+                    if on_partial is not None:
+                        on_partial(findings)  # type: ignore[operator]
+                    raise
             if profile.deadline_at is not None and time.monotonic() >= profile.deadline_at:
                 counts = profile.skipped_counts
                 if counts is not None:
@@ -503,6 +521,13 @@ class BuiltinRuleScanner:
                 for part in Path(relative).parts
             ) or Path(relative).name.casefold().startswith(("test_", "test."))
             findings.extend(analyze_source(profile.root, source, text, is_test=is_test))
+            if control is not None:
+                try:
+                    control.check_cancelled()  # type: ignore[attr-defined]
+                except Exception:
+                    if on_partial is not None:
+                        on_partial(findings)  # type: ignore[operator]
+                    raise
             if self.bounds and (
                 time.monotonic() - started > self.bounds.per_file_seconds
                 or (profile.deadline_at is not None and time.monotonic() >= profile.deadline_at)
@@ -527,9 +552,17 @@ class BuiltinRuleScanner:
                     if not item.location or not item.location.startswith(relative + ":")
                 ]
         profile.source_files = tuple(scanned_sources)
+        if control is not None:
+            control.check_cancelled()  # type: ignore[attr-defined]
         findings.extend(migration_rls_findings(profile.root))
+        if control is not None:
+            control.check_cancelled()  # type: ignore[attr-defined]
         findings.extend(edge_function_findings(profile.root))
+        if control is not None:
+            control.check_cancelled()  # type: ignore[attr-defined]
         findings.extend(dependency_findings(profile.root))
+        if control is not None:
+            control.check_cancelled()  # type: ignore[attr-defined]
         self.vibe_coding_risk = vibe_risk(profile)
         return findings
 
@@ -806,12 +839,16 @@ class CodeScanService:
         self.bounds = bounds
         self.project_id = project_id
 
-    def scan(self, target: Path) -> CodeScanResult:
+    def scan(self, target: Path, *, control: object | None = None, scan_id: str | None = None, on_partial: object | None = None) -> CodeScanResult:
         started = datetime.now(UTC)
-        scan_id = str(uuid.uuid4())
+        scan_id = scan_id or str(uuid.uuid4())
         scanner_names = [scanner.name for scanner in self.scanners]
         try:
-            profile = detect_project(target, self.bounds)
+            profile = (
+                detect_project(target, self.bounds)
+                if control is None
+                else detect_project(target, self.bounds, control)
+            )
         except ScannerError as exc:
             message = str(exc)
             if "1 MB limit" in message:
@@ -859,16 +896,24 @@ class CodeScanService:
         ) as pool:
             tasks = {}
             for scanner in self.scanners:
+                if control is not None:
+                    control.check_cancelled()  # type: ignore[attr-defined]
                 if hasattr(scanner, "scan_profile"):
-                    task = pool.submit(scanner.scan_profile, profile)
+                    task = pool.submit(scanner.scan_profile, profile, control, on_partial)
                 else:
                     task = pool.submit(scanner.scan, profile.root)
                 tasks[task] = scanner
             for task in as_completed(tasks):
+                if control is not None:
+                    control.check_cancelled()  # type: ignore[attr-defined]
                 scanner = tasks[task]
                 try:
                     findings.extend(task.result())
                 except Exception as exc:  # isolate third-party adapters from the scan
+                    if on_partial is not None:
+                        on_partial(findings)  # type: ignore[operator]
+                    if control is not None:
+                        control.check_cancelled()  # type: ignore[attr-defined]
                     failures[scanner.name] = (
                         str(exc)
                         if isinstance(exc, ScannerError)
@@ -876,6 +921,10 @@ class CodeScanService:
                     )
 
         normalized_findings = deduplicate_findings(findings)
+        if on_partial is not None:
+            on_partial(normalized_findings)  # type: ignore[operator]
+        if control is not None:
+            control.check_cancelled()  # type: ignore[attr-defined]
         coverage = _coverage_for_project(profile, scanner_names, failures, self.bounds)
         for scanner in self.scanners:
             scanner_coverage = getattr(scanner, "coverage", None)

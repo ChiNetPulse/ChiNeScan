@@ -14,6 +14,7 @@ from chinescan.domain_assessment.authorization import (
 )
 from chinescan.domain_assessment.probe import (
     MAX_ADDRESSES,
+    ExecutionStopped,
     NetworkDomainProbe,
     ProbeResult,
     ProbeSettings,
@@ -25,8 +26,28 @@ from chinescan.domain_assessment.service import DomainAssessmentService
 
 
 def test_normalize_hostname_idna_and_rejects_non_hostnames() -> None:
+    assert normalize_hostname("example.com") == "example.com"
     assert normalize_hostname("BÜCHER.example.") == "xn--bcher-kva.example"
-    for invalid in ("https://example.com", "127.0.0.1", "localhost", "host", "a.local"):
+    unicode_numeric_hosts = (
+        "１２７。１",
+        "０１７７。０。０。１",
+        "１２７．１",
+        "２１３０７０６４３３",
+        "０ｘ７ｆ０００００１",
+    )
+    for invalid in (
+        "https://example.com",
+        "127.0.0.1",
+        "127.1",
+        "127.0.1",
+        "2130706433",
+        "0x7f000001",
+        "0177.0.0.1",
+        "localhost",
+        "host",
+        "a.local",
+        *unicode_numeric_hosts,
+    ):
         with pytest.raises(AuthorizationError):
             normalize_hostname(invalid)
 
@@ -228,6 +249,16 @@ def test_probe_settings_validate_limits_and_enforce_request_spacing(monkeypatch)
     assert len(requests) == 5
     assert len(sleeps) == 4
     assert all(delay > 0 for delay in sleeps)
+
+
+def test_governed_probe_fails_closed_before_dns_when_revalidation_denies(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "chinescan.domain_assessment.probe.socket.getaddrinfo",
+        lambda *_args, **_kwargs: pytest.fail("DNS must not run after policy denial"),
+    )
+    probe = NetworkDomainProbe(before_external_action=lambda: False)
+    with pytest.raises(ExecutionStopped):
+        probe.assess("example.com", "light")
 
 
 def test_head_request_stops_after_headers(monkeypatch) -> None:

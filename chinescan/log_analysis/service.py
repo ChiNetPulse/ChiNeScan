@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TypeVar
 
 from chinescan.core.logging.redaction import redact
 from chinescan.core.models.investigation import Alert, Event, Indicator, Scan, Target, TimelineEntry
@@ -18,6 +20,36 @@ from chinescan.log_analysis.detections import (
 )
 from chinescan.log_analysis.ingest import IngestResult, ingest_path
 from chinescan.log_analysis.ioc_matching import correlate_iocs, extract_event_iocs, load_iocs
+
+LOG_ANALYSIS_VERSION = "chinescan-log-analysis-v1"
+LOG_RULESET_VERSION = "builtin-detections-v1"
+_EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+_T = TypeVar("_T")
+
+
+def _sanitize_text(value: str) -> str:
+    return _EMAIL.sub("[REDACTED:email]", redact(value))
+
+
+def _sanitize(value: object) -> object:
+    if isinstance(value, str):
+        return _sanitize_text(value)
+    if isinstance(value, list):
+        return [_sanitize(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _sanitize(item) for key, item in value.items()}
+    return value
+
+
+def _sanitize_model(model: _T) -> _T:
+    fields = getattr(type(model), "model_fields", None)
+    copier = getattr(model, "model_copy", None)
+    if not isinstance(fields, dict) or copier is None:
+        return model
+    result: _T = copier(update={name: _sanitize(getattr(model, name)) for name in fields})
+    return result
 
 
 @dataclass
@@ -71,10 +103,17 @@ class LogAnalysisService:
         self.repository = repository
 
     def analyze(
-        self, path: Path, *, rules_path: Path | None = None, ioc_path: Path | None = None
+        self,
+        path: Path,
+        *,
+        rules_path: Path | None = None,
+        ioc_path: Path | None = None,
+        safe_target: str | None = None,
+        sanitize_output: bool = False,
+        control: object | None = None,
     ) -> LogAnalysisResult:
         started = datetime.now(UTC)
-        ingestion: IngestResult = ingest_path(path)
+        ingestion: IngestResult = ingest_path(path, control=control)
         errors = list(ingestion.errors)
         indicators, ioc_errors = load_iocs(ioc_path)
         errors.extend(ioc_errors)
@@ -111,7 +150,7 @@ class LogAnalysisService:
 
         finished = datetime.now(UTC)
         scan_id = str(uuid.uuid4())
-        target = str(path.expanduser().resolve())
+        target = safe_target or str(path.expanduser().resolve())
         target_id = str(uuid.uuid5(uuid.NAMESPACE_URL, os.path.normcase(target)))
         timeline = [
             TimelineEntry(
@@ -126,6 +165,23 @@ class LogAnalysisService:
         result = LogAnalysisResult(
             scan_id, target, len(events), alerts, errors, ingestion.source_count
         )
+        if sanitize_output:
+            events = [_sanitize_model(item) for item in events]
+            alerts = [_sanitize_model(item) for item in alerts]
+            timeline = [_sanitize_model(item) for item in timeline]
+            indicators = [
+                _sanitize_model(item)
+                for item in [*correlated.indicators, *extract_event_iocs(events)]
+            ]
+            errors = [_sanitize_text(item) for item in errors]
+            result = LogAnalysisResult(
+                scan_id,
+                safe_target or "governed-log-evidence",
+                len(events),
+                alerts,
+                errors,
+                ingestion.source_count,
+            )
         if self.repository is not None:
             self._persist(
                 scan_id=scan_id,
@@ -136,7 +192,11 @@ class LogAnalysisService:
                 events=events,
                 alerts=alerts,
                 timeline=timeline,
-                indicators=[*correlated.indicators, *extract_event_iocs(events)],
+                indicators=(
+                    indicators
+                    if sanitize_output
+                    else [*correlated.indicators, *extract_event_iocs(events)]
+                ),
                 errors=errors,
                 sources=sorted({event.source for event in events}),
             )

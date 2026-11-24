@@ -21,6 +21,7 @@ from chinescan.core.models.investigation import (
 )
 from chinescan.core.storage.repository import Repository
 from chinescan.core.verdict import compute_verdict
+from chinescan.domain_assessment.probe import ExecutionCancelled
 
 _WALLET_LEVEL_RULES = {
     "fan_out",
@@ -45,18 +46,34 @@ class ChainTraceService:
         self.provider, self.labels, self.repository = provider, labels, repository
         self.label_gaps = tuple(label_gaps)
 
-    def trace(self, params: TraceParams, authorization: bool) -> tuple[Scan, list[Finding]]:
+    def trace(
+        self,
+        params: TraceParams,
+        authorization: bool,
+        *,
+        operator: str = "local operator",
+        authorization_method: str | None = None,
+        control: object | None = None,
+        target_namespace: str | None = None,
+    ) -> tuple[Scan, list[Finding]]:
         is_offline = bool(getattr(self.provider, "offline", False))
         if not authorization and not is_offline:
             raise ValueError("explicit network authorization is required")
         started = datetime.now(UTC)
         scan_id = str(uuid.uuid4())
-        target_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"chain:{params.chain}:{params.seed}"))
+        target_key = (
+            f"chain:{target_namespace}:{params.chain}:{params.seed}"
+            if target_namespace
+            else f"chain:{params.chain}:{params.seed}"
+        )
+        target_id = str(uuid.uuid5(uuid.NAMESPACE_URL, target_key))
         target = Target(value=params.seed, kind="wallet")
         audit = AuthorizationRecord(
             target=params.seed,
-            method="local_explorer_import" if is_offline else "explicit_chain_network_opt_in",
-            operator="local operator",
+            method=authorization_method or (
+                "local_explorer_import" if is_offline else "explicit_chain_network_opt_in"
+            ),
+            operator=operator,
             authorized_at=started,
             scan_profile="chain_trace",
             scan_id=scan_id,
@@ -76,8 +93,14 @@ class ChainTraceService:
         )
         self.repository.save("scan", scan_id, scan.model_dump(mode="json"))
         try:
-            nodes, edges, gap_codes = trace(self.provider, params, self.labels)
+            nodes, edges, gap_codes = trace(
+                self.provider, params, self.labels, control=control
+            )
+        except ExecutionCancelled:
+            raise
         except Exception:
+            if control is not None:
+                raise
             nodes, edges, gap_codes = [params.seed], [], ["provider_failure"]
         gap_codes.extend(self.label_gaps)
         findings = []

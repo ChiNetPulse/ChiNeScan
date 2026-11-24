@@ -56,7 +56,7 @@ def test_legacy_initial_schema_is_stamped_without_losing_records(tmp_path: Path)
 
             assert (
                 MigrationContext.configure(connection).get_current_revision()
-                == "0005_identity_organizations"
+                    == "0013_governed_chain_trace"
             )
     finally:
         repository.close()
