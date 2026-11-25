@@ -6,3 +6,7 @@ edd521a6d682c551ba61ad9531f23a383879f87b:tests/integration/test_real_scanners.py
 b0fb0a57294676d6a2f5ce9ba6da04722eff21ae:scripts/bench_redaction.py:generic-api-key:21
 b0fb0a57294676d6a2f5ce9ba6da04722eff21ae:tests/unit/test_redaction_parity.py:generic-api-key:68
 f599bbdb138dcffba77619d85644091a40cb6b19:chinescan/core/accounts.py:generic-api-key:28
+# Synthetic test UUID and idempotency keys in Phase 1 / Phase 2 unit test fixtures (no real credentials).
+7520632108a6ddb67768468aa00edddb463d7de3:tests/unit/test_projects_cli.py:generic-api-key:40
+c09d3f150003421136790c42ffa96d570606da79:tests/unit/test_engagement_security.py:generic-api-key:1442
+c09d3f150003421136790c42ffa96d570606da79:tests/unit/test_engagement_security.py:generic-api-key:2411
