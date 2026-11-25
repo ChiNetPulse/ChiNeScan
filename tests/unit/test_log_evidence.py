@@ -601,6 +601,39 @@ def test_governed_log_evidence_api_is_authenticated_tenant_scoped_and_path_free(
             headers=headers,
         )
         assert denied.status_code == 404
+        missing_src = client.post(
+            base,
+            json={"source_id": "missing-source", "label": "Missing"},
+            headers=headers,
+        )
+        assert missing_src.status_code == 404
+        asset_id = registered.json()["asset_id"]
+        exec_bad = client.post(
+            f"{base}/short-id/executions",
+            json={"idempotency_key": "log-exec-bad-id-0001"},
+            headers=headers,
+        )
+        assert exec_bad.status_code == 404
+        exec_denied = client.post(
+            f"{base}/{asset_id}/executions",
+            json={"idempotency_key": "log-exec-denied-id-001"},
+            headers=headers,
+        )
+        assert exec_denied.status_code == 403
+        exec_ok = client.post(
+            f"{base}/{evidence['asset_id']}/executions",
+            json={"idempotency_key": "log-exec-valid-id-0001"},
+            headers=headers,
+        )
+        assert exec_ok.status_code == 202
+        hold_ok = client.post(
+            f"{base}/{asset_id}/hold",
+            json={"reason": "Legal review"},
+            headers=headers,
+        )
+        assert hold_ok.status_code == 204
+        del_missing = client.delete(f"{base}/{uuid4()}", headers=headers)
+        assert del_missing.status_code == 404
     finally:
         client.close()
         app.state.repository.close()

@@ -401,6 +401,7 @@ def test_read_only_role_with_lead_assignment_cannot_manage_engagement_api(
     token, session = client.app.state.session_store.create(
         email, user["auth_epoch"], user_id=user_id
     )
+    client.cookies.clear()
     client.cookies.set("chinescan_session", token)
     headers = {"Origin": "http://127.0.0.1", "X-CSRF-Token": session.csrf_token}
     engagement_url = f"/api/organizations/{organization_id}/engagements/{engagement['id']}"
@@ -592,10 +593,12 @@ def test_legacy_resources_are_restricted_to_local_operator_and_personal_org(tmp_
     token, _session = app.state.session_store.create(
         "not-operator@example.test", "a" * 32, user_id=other_user
     )
+    client.cookies.clear()
     client.cookies.set("chinescan_session", token)
     assert client.get("/api/organizations").status_code == 200
     assert client.get("/api/projects").status_code == 403
     assert client.get("/api/tenant-probe/personal-only").status_code == 403
+    client.cookies.clear()
     client.cookies.set("chinescan_session", operator_cookie)
     assert personal_id
     other_org_headers = {"X-ChineScan-Organization-ID": second_org["id"]}
@@ -678,5 +681,6 @@ def test_migration_report_is_restricted_to_local_operator(tmp_path: Path) -> Non
     token, _session = app.state.session_store.create(
         "report-viewer@example.test", "a" * 32, user_id=other_user
     )
+    client.cookies.clear()
     client.cookies.set("chinescan_session", token)
     assert client.get(report_path).status_code == 403

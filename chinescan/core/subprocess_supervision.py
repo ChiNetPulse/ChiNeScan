@@ -196,7 +196,12 @@ def _terminate_process_tree(process: subprocess.Popen[bytes], job: _ProcessTreeJ
     getpgid = getattr(os, "getpgid", None)
     sigkill = getattr(signal, "SIGKILL", None)
     try:
-        if killpg is not None and getpgid is not None and sigkill is not None:
+        if (
+            killpg is not None
+            and getpgid is not None
+            and sigkill is not None
+            and getattr(process, "pid", None) is not None
+        ):
             killpg(getpgid(process.pid), sigkill)
         else:
             process.kill()

@@ -182,7 +182,7 @@ def test_external_scanner_success_with_controlled_helper_process(tmp_path, monke
 
 
 def test_cancellation_kills_child_and_closes_both_pipes(tmp_path, monkeypatch) -> None:
-    process = _FakeProcess(["scanner"], 0, "", "")
+    process = _FakeProcess(["scanner"], None, "", "")
 
     def interrupted_wait(timeout=None):
         raise KeyboardInterrupt
