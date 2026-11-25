@@ -53,14 +53,21 @@ class SupervisedProcessResult:
     terminated_reason: str | None = None
 
 
+def _kernel32() -> Any | None:
+    if os.name != "nt":
+        return None
+    windll = getattr(ctypes, "windll", None)
+    return getattr(windll, "kernel32", None) if windll is not None else None
+
+
 class _ProcessTreeJob:
     """Best-effort Windows Job Object wrapper for complete child process-tree termination."""
 
     def __init__(self) -> None:
         self._handle: int | None = None
-        if os.name != "nt":
+        kernel32 = _kernel32()
+        if kernel32 is None:
             return
-        kernel32 = ctypes.windll.kernel32
         handle = kernel32.CreateJobObjectW(None, None)
         if not handle:
             return
@@ -107,23 +114,24 @@ class _ProcessTreeJob:
         kernel32.CloseHandle(handle)
 
     def assign(self, process: subprocess.Popen[bytes]) -> bool:
-        if os.name != "nt" or self._handle is None:
+        kernel32 = _kernel32()
+        if kernel32 is None or self._handle is None:
             return False
         proc_handle = getattr(process, "_handle", None)
         if proc_handle is None:
             return False
-        kernel32 = ctypes.windll.kernel32
         return bool(kernel32.AssignProcessToJobObject(self._handle, int(proc_handle)))
 
     def terminate(self) -> bool:
-        if os.name != "nt" or self._handle is None:
+        kernel32 = _kernel32()
+        if kernel32 is None or self._handle is None:
             return False
-        kernel32 = ctypes.windll.kernel32
         return bool(kernel32.TerminateJobObject(self._handle, 1))
 
     def close(self) -> None:
-        if os.name == "nt" and self._handle is not None:
-            ctypes.windll.kernel32.CloseHandle(self._handle)
+        kernel32 = _kernel32()
+        if kernel32 is not None and self._handle is not None:
+            kernel32.CloseHandle(self._handle)
             self._handle = None
 
 
