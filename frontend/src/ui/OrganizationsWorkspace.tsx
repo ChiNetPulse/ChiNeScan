@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, UnauthorizedError } from '../api';
-import type { Client, Engagement, EngagementAssignment, Organization, OrganizationMember } from '../types';
+import { api, setCsrfToken, UnauthorizedError } from '../api';
+import type { Client, Engagement, EngagementAssignment, Organization, OrganizationInvitation, OrganizationMember, TotpStatus } from '../types';
 import { EngagementSecurityWorkspace } from './EngagementSecurityWorkspace';
 import { EngagementLogEvidenceWorkspace } from './EngagementLogEvidenceWorkspace';
 
@@ -10,6 +10,12 @@ export function OrganizationsWorkspace({ onUnauthorized }: { onUnauthorized: () 
   const [clients, setClients] = useState<Client[]>([]);
   const [engagements, setEngagements] = useState<Engagement[]>([]);
   const [members, setMembers] = useState<OrganizationMember[]>([]);
+  const [invitations, setInvitations] = useState<OrganizationInvitation[]>([]);
+  const [latestInviteToken, setLatestInviteToken] = useState('');
+  const [totp, setTotp] = useState<TotpStatus | null>(null);
+  const [pendingSecret, setPendingSecret] = useState('');
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
+  const [accountStatus, setAccountStatus] = useState('');
   const [assignments, setAssignments] = useState<EngagementAssignment[]>([]);
   const [selectedEngagement, setSelectedEngagement] = useState('');
   const [error, setError] = useState('');
@@ -30,10 +36,12 @@ export function OrganizationsWorkspace({ onUnauthorized }: { onUnauthorized: () 
   const loadOrganization = useCallback(async (id: string) => {
     if (!id) return;
     try {
-      const [clientResult, engagementResult, memberResult] = await Promise.all([
+      const [clientResult, engagementResult, memberResult, inviteResult] = await Promise.all([
         api.organizationClients(id), api.organizationEngagements(id), api.organizationMembers(id),
+        api.organizationInvitations(id).catch(() => ({ items: [] as OrganizationInvitation[] })),
       ]);
       setClients(clientResult.items); setEngagements(engagementResult.items); setMembers(memberResult.items);
+      setInvitations(inviteResult.items);
       setSelectedEngagement((current) => engagementResult.items.some((item) => item.id === current)
         ? current : engagementResult.items[0]?.id ?? '');
       setError('');
@@ -43,7 +51,10 @@ export function OrganizationsWorkspace({ onUnauthorized }: { onUnauthorized: () 
     }
   }, [onUnauthorized]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    api.totpStatus().then(setTotp).catch(() => setTotp(null));
+  }, [load]);
   useEffect(() => { setAssignments([]); void loadOrganization(selectedId); }, [selectedId, loadOrganization]);
   useEffect(() => {
     if (!selectedId || !selectedEngagement) { setAssignments([]); return; }
@@ -105,15 +116,34 @@ export function OrganizationsWorkspace({ onUnauthorized }: { onUnauthorized: () 
             </form>
           </> : null}
         </li>)}</ul>
-        <p>Members can be added when their persistent user account already exists. Invitations and signup are not part of Phase 1B.</p>
-        {(selected.role === 'owner' || selected.role === 'admin') && <form style={formStyle} onSubmit={(event) => void submit(event, async (form) => {
-          await api.addOrganizationMember(selected.id, String(form.get('user_id')), String(form.get('role')));
-          await loadOrganization(selected.id);
-        })}>
-          <label>Existing user ID <input name="user_id" required minLength={36} maxLength={36} /></label>
-          <label>Role <select name="role"><option value="member">Member</option><option value="auditor">Auditor</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label>
-          <button disabled={busy}>Add member</button>
-        </form>}
+        <p>Invite new users by email or add existing persistent accounts. Invited accounts activate only with a one-use invitation token.</p>
+        {(selected.role === 'owner' || selected.role === 'admin') && <>
+          <form style={formStyle} onSubmit={(event) => void submit(event, async (form) => {
+            const created = await api.createOrganizationInvitation(selected.id, String(form.get('email')), String(form.get('role')));
+            setLatestInviteToken(created.token || '');
+            await loadOrganization(selected.id);
+          })}>
+            <label>Invite email <input name="email" type="email" required maxLength={254} /></label>
+            <label>Role <select name="role"><option value="member">Member</option><option value="auditor">Auditor</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label>
+            <button disabled={busy}>Send invitation</button>
+          </form>
+          {latestInviteToken && <p role="status">One-time invitation token (copy now, shown once): <code>{latestInviteToken}</code></p>}
+          {invitations.length > 0 && <ul>{invitations.map((inv) => <li key={inv.id}>
+            {inv.email_normalized} · {inv.role} · {inv.status} · expires {inv.expires_at}
+            {inv.status === 'pending' && <button type="button" disabled={busy} onClick={async () => {
+              try { await api.revokeOrganizationInvitation(selected.id, inv.id); await loadOrganization(selected.id); }
+              catch (reason) { if (reason instanceof UnauthorizedError) onUnauthorized(); else setError(reason instanceof Error ? reason.message : 'Could not revoke invitation.'); }
+            }}>Revoke</button>}
+          </li>)}</ul>}
+          <form style={formStyle} onSubmit={(event) => void submit(event, async (form) => {
+            await api.addOrganizationMember(selected.id, String(form.get('user_id')), String(form.get('role')));
+            await loadOrganization(selected.id);
+          })}>
+            <label>Existing user ID <input name="user_id" required minLength={36} maxLength={36} /></label>
+            <label>Role <select name="role"><option value="member">Member</option><option value="auditor">Auditor</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label>
+            <button disabled={busy}>Add member</button>
+          </form>
+        </>}
       </div>}
       {selected && <div style={panelStyle}>
         <h2>Clients</h2>
@@ -170,6 +200,51 @@ export function OrganizationsWorkspace({ onUnauthorized }: { onUnauthorized: () 
       {selected && selectedEngagement && <EngagementLogEvidenceWorkspace
         organizationId={selected.id} engagementId={selectedEngagement} onUnauthorized={onUnauthorized}
       />}
+      <div style={panelStyle}>
+        <h2>Account security</h2>
+        {accountStatus && <p role="status">{accountStatus}</p>}
+        <form style={formStyle} onSubmit={(event) => void submit(event, async (form) => {
+          const res = await api.changePassword(String(form.get('current_password')), String(form.get('new_password')));
+          setCsrfToken(res.csrf_token);
+          setAccountStatus('Password updated and other sessions invalidated.');
+        })}>
+          <label>Current password <input name="current_password" type="password" required /></label>
+          <label>New password <input name="new_password" type="password" required minLength={12} maxLength={128} /></label>
+          <button disabled={busy}>Change password</button>
+        </form>
+        {totp && <div style={{ marginTop: 12 }}>
+          <p>Authenticator TOTP: <strong>{totp.totp_enabled ? 'Enabled' : 'Disabled'}</strong> · Recovery codes remaining: {totp.recovery_codes_remaining}</p>
+          {!totp.totp_enabled && !pendingSecret && <button type="button" disabled={busy} onClick={async () => {
+            try { const res = await api.totpEnroll(); setPendingSecret(res.secret); setAccountStatus(''); }
+            catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not start TOTP enrollment.'); }
+          }}>Enroll authenticator</button>}
+          {pendingSecret && <form style={formStyle} onSubmit={(event) => void submit(event, async (form) => {
+            const res = await api.totpConfirm(String(form.get('code')));
+            setPendingSecret(''); setRecoveryCodes(res.recovery_codes);
+            setTotp(await api.totpStatus()); setAccountStatus('Authenticator enabled.');
+          })}>
+            <span>Secret: <code>{pendingSecret}</code></span>
+            <label>Verification code <input name="code" required minLength={6} maxLength={64} /></label>
+            <button disabled={busy}>Confirm TOTP</button>
+          </form>}
+          {totp.totp_enabled && <form style={formStyle} onSubmit={(event) => void submit(event, async (form) => {
+            const res = await api.totpRegenerateRecoveryCodes(String(form.get('code')));
+            setRecoveryCodes(res.recovery_codes); setTotp(await api.totpStatus());
+            setAccountStatus('Recovery codes regenerated.');
+          })}>
+            <label>TOTP code <input name="code" required minLength={6} maxLength={64} /></label>
+            <button disabled={busy}>Regenerate recovery codes</button>
+            <button type="button" disabled={busy} onClick={async (event) => {
+              const form = event.currentTarget.form;
+              const code = form ? String(new FormData(form).get('code') ?? '') : '';
+              if (!code) { setError('Enter a current TOTP or recovery code.'); return; }
+              try { await api.totpDisable(code); setTotp(await api.totpStatus()); setAccountStatus('Authenticator disabled.'); }
+              catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not disable TOTP.'); }
+            }}>Disable TOTP</button>
+          </form>}
+          {recoveryCodes.length > 0 && <p role="status">One-time recovery codes: <code>{recoveryCodes.join(' ')}</code></p>}
+        </div>}
+      </div>
     </section>
   </div>;
 }

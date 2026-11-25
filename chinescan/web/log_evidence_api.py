@@ -151,7 +151,7 @@ def create_log_evidence_router(
                     "message": "Execution request conflicts with an existing job.",
                 },
             ) from None
-        if result.get("decision") != "ALLOW":
+        if result.get("decision") in {"DENY", "REQUIRE_APPROVAL"} or not result.get("id"):
             code = result.get("reason_code", "policy_denied")
             status = 409 if result.get("decision") == "REQUIRE_APPROVAL" else 403
             raise HTTPException(

@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from chinescan.core.accounts import create_operator, migrate_operator_email_for_reset
+from chinescan.core.errors import StorageError
 from chinescan.core.organizations import OrganizationError
 from chinescan.core.storage.sqlite import (
     organization_memberships,
@@ -92,7 +93,8 @@ def test_bootstrap_is_idempotent_and_preserves_existing_generic_records(tmp_path
     create_operator(credential, "owner@example.test", "synthetic-secure-passphrase-77!")
     app = create_app(tmp_path / "data.sqlite3", credential, serve_frontend=False)
     repository = app.state.repository
-    repository.save("finding", "synthetic-finding", {"title": "kept"})
+    with repository.local_operator_context():
+        repository.save("finding", "synthetic-finding", {"title": "kept"})
     with repository.engine.connect() as connection:
         user_id = connection.execute(select(users.c.id)).scalar_one()
         org_id = connection.execute(select(organizations.c.id)).scalar_one()
@@ -110,7 +112,8 @@ def test_bootstrap_is_idempotent_and_preserves_existing_generic_records(tmp_path
         ).one()
     assert len(user_rows_before) == len(user_rows) == len(org_rows) == 1
     assert owner.organization_id == org_id
-    assert repository.get("finding", "synthetic-finding") == {"title": "kept"}
+    with repository.local_operator_context():
+        assert repository.get("finding", "synthetic-finding") == {"title": "kept"}
     assert app.state.organization_service.migration_report()["records_successfully_mapped"] >= 1
 
 
@@ -138,7 +141,7 @@ def test_web_repository_hides_records_owned_by_another_organization(tmp_path: Pa
                 created_at=datetime.now(UTC).isoformat(),
             )
         )
-    with repository.organization_context(personal["id"]):
+    with repository.member_context(personal["id"], user_id, write=True):
         assert repository.get("finding", "other-tenant-finding") is None
         assert repository.get_many("finding", ["other-tenant-finding"]) == {}
         assert all(
@@ -376,6 +379,65 @@ def test_revoked_reviewer_is_denied_and_reinstatement_requires_active_assignment
     assert service.engagement(reviewer_id, org_id, engagement["id"]) is not None
 
 
+@pytest.mark.parametrize("role", ["viewer", "auditor"])
+def test_read_only_role_with_lead_assignment_cannot_manage_engagement_api(
+    tmp_path: Path, role: str
+) -> None:
+    from chinescan.core.accounts import operator_auth_epoch
+    from chinescan.core.storage.sqlite import engagement_assignments, engagements
+
+    client, _owner_headers = _client(tmp_path)
+    service = client.app.state.organization_service
+    repository = client.app.state.repository
+    owner_id = client.get("/api/auth/me").json()["id"]
+    organization_id = service.accessible_organizations(owner_id)[0]["id"]
+    email = f"{role}-lead@example.test"
+    user_id = str(uuid4())
+    epoch = operator_auth_epoch(tmp_path / "operator.json")
+    user, _personal_org = service.ensure_operator(email, epoch, user_id)
+    service.add_member(owner_id, organization_id, user_id, role)
+    engagement = service.create_engagement(
+        owner_id, organization_id, None, f"{role} assignment test", "Synthetic"
+    )
+    service.update_engagement(owner_id, organization_id, engagement["id"], status="active")
+    service.change_assignment(owner_id, organization_id, engagement["id"], user_id, role="lead")
+
+    token, session = client.app.state.session_store.create(
+        email, user["auth_epoch"], user_id=user_id
+    )
+    client.cookies.set("chinescan_session", token)
+    headers = {"Origin": "http://127.0.0.1", "X-CSRF-Token": session.csrf_token}
+    engagement_url = f"/api/organizations/{organization_id}/engagements/{engagement['id']}"
+    assignments_url = f"{engagement_url}/assignments"
+    try:
+        update_response = client.patch(
+            engagement_url, json={"name": "Unauthorized rename"}, headers=headers
+        )
+        assignment_response = client.patch(
+            f"{assignments_url}/{owner_id}",
+            json={"status": "revoked"},
+            headers=headers,
+        )
+        assert update_response.status_code == 404
+        assert assignment_response.status_code == 404
+        assert client.get(assignments_url).status_code == 404
+        with repository.engine.connect() as connection:
+            stored_name = connection.execute(
+                select(engagements.c.name).where(engagements.c.id == engagement["id"])
+            ).scalar_one()
+            owner_assignment = connection.execute(
+                select(engagement_assignments.c.status).where(
+                    engagement_assignments.c.engagement_id == engagement["id"],
+                    engagement_assignments.c.user_id == owner_id,
+                )
+            ).scalar_one()
+        assert stored_name == f"{role} assignment test"
+        assert owner_assignment == "active"
+    finally:
+        client.app.state.repository.close()
+        client.close()
+
+
 def test_assignment_patch_preserves_revocation_and_audits_explicit_reactivation(
     tmp_path: Path,
 ) -> None:
@@ -415,9 +477,7 @@ def test_operator_email_recovery_preserves_persistent_identity_and_ownership(
     create_operator(credential, "old@example.test", "synthetic-secure-passphrase-77!")
     app = create_app(tmp_path / "data.sqlite3", credential, serve_frontend=False)
     repository = app.state.repository
-    with repository.organization_context(app.state.organization_service.personal_organization_id(
-        app.state.local_operator_user_id
-    )):
+    with repository.local_operator_context():
         repository.save("finding", "identity-bound", {"title": "still owned"})
     user_before = app.state.local_operator_user_id
     org_before = app.state.organization_service.personal_organization_id(user_before)
@@ -520,7 +580,7 @@ def test_legacy_resources_are_restricted_to_local_operator_and_personal_org(tmp_
     operator_id = app.state.local_operator_user_id
     personal_id = service.personal_organization_id(operator_id)
     second_org = service.create_organization(operator_id, "Other", "other-operator-org")
-    with repository.organization_context(personal_id):
+    with repository.local_operator_context():
         repository.save("tenant_probe", "personal-only", {"value": "owned"})
     app.add_api_route(
         "/api/tenant-probe/{record_id}",
@@ -533,7 +593,9 @@ def test_legacy_resources_are_restricted_to_local_operator_and_personal_org(tmp_
         "not-operator@example.test", "a" * 32, user_id=other_user
     )
     client.cookies.set("chinescan_session", token)
-    assert client.get("/api/organizations").status_code == 401
+    assert client.get("/api/organizations").status_code == 200
+    assert client.get("/api/projects").status_code == 403
+    assert client.get("/api/tenant-probe/personal-only").status_code == 403
     client.cookies.set("chinescan_session", operator_cookie)
     assert personal_id
     other_org_headers = {"X-ChineScan-Organization-ID": second_org["id"]}
@@ -592,8 +654,10 @@ def test_malware_worker_claims_only_personal_organization_jobs(tmp_path: Path) -
                 created_at=now,
             )
         )
-    assert repository.worker_organization_id == personal_id
-    assert repository.claim_next_malware_job(now) is None
+    with pytest.raises(StorageError, match="authorized organization context"):
+        repository.claim_next_malware_job(now)
+    with repository.local_operator_context():
+        assert repository.claim_next_malware_job(now) is None
     with repository.engine.connect() as connection:
         status = connection.execute(
             select(records.c.payload["status"].as_string()).where(

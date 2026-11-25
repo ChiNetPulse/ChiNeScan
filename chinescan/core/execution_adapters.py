@@ -8,6 +8,7 @@ This is an internal extension boundary, not a sandbox for untrusted plugins.
 from __future__ import annotations
 
 import re
+import time
 from datetime import UTC, datetime
 from threading import Event
 from typing import Any, Literal, Protocol
@@ -20,6 +21,8 @@ from chinescan.core.engagement_security import _utc
 from chinescan.core.log_evidence import LogEvidenceStore
 from chinescan.core.malware_evidence import (
     ANALYSIS_VERSION as MALWARE_ANALYSIS_VERSION,
+)
+from chinescan.core.malware_evidence import (
     MalwareEvidenceStore,
 )
 from chinescan.core.models.common import ScanVerdict
@@ -30,6 +33,7 @@ from chinescan.core.repository_assessment import (
     SCANNER_VERSION,
     RepositorySnapshotStore,
 )
+from chinescan.core.resource_governance import ExecutionDeadlineExceeded
 from chinescan.core.storage.repository import Repository
 from chinescan.core.storage.sqlite import SQLiteRepository, assessment_audit_events, execution_jobs
 from chinescan.domain_assessment.authorization import AuthorizationGrant
@@ -330,6 +334,9 @@ class ExecutionControl:
         revalidate: Any,
         progress: Any,
         cancellation_check: Any = None,
+        deadline_monotonic: float | None = None,
+        operation_timeout_seconds: float | None = None,
+        max_findings_per_job: int | None = None,
     ) -> None:
         self.context = context
         self._cancellation = cancellation
@@ -337,8 +344,21 @@ class ExecutionControl:
         self._revalidate = revalidate
         self._progress = progress
         self._cancellation_check = cancellation_check
+        self._deadline_monotonic = deadline_monotonic
+        self.operation_timeout_seconds = operation_timeout_seconds
+        self.max_findings_per_job = max_findings_per_job
+
+    def remaining_seconds(self) -> float | None:
+        if self._deadline_monotonic is None:
+            return None
+        return max(0.0, self._deadline_monotonic - time.monotonic())
+
+    def check_deadline(self) -> None:
+        if self._deadline_monotonic is not None and time.monotonic() >= self._deadline_monotonic:
+            raise ExecutionDeadlineExceeded("EXECUTION_DEADLINE_EXCEEDED")
 
     def check_cancelled(self) -> None:
+        self.check_deadline()
         if self._cancellation_check is not None and self._cancellation_check():
             raise ExecutionCancelled("Execution was cancelled.")
         if self._cancellation.is_set():
@@ -509,13 +529,24 @@ class RepositoryCodeAssessmentAdapter:
         target = Target(value=context.target, kind="repository")
         started = datetime.now(UTC)
         saved_findings: set[str] = set()
+        raw_max_findings = getattr(control, "max_findings_per_job", None)
+        max_findings = (
+            raw_max_findings
+            if isinstance(raw_max_findings, int) and raw_max_findings > 0
+            else None
+        )
+        findings_truncated = False
 
         def persist_partial(findings: list[Any]) -> None:
+            nonlocal findings_truncated
             with self.repository.organization_context(context.organization_id):
                 with self.repository.execution_provenance_context(context.model_dump(mode="json")):
                     self.repository.save("target", target_id, target.model_dump(mode="json"))
                     for finding in findings:
                         if finding.finding_id not in saved_findings:
+                            if max_findings is not None and len(saved_findings) >= max_findings:
+                                findings_truncated = True
+                                break
                             self.repository.save("finding", finding.finding_id, finding.model_dump(mode="json"))
                             saved_findings.add(finding.finding_id)
                     partial = Scan(
@@ -564,12 +595,15 @@ class RepositoryCodeAssessmentAdapter:
                 for finding in result.findings:
                     control.check_cancelled()
                     if finding.finding_id not in saved_findings:
+                        if max_findings is not None and len(saved_findings) >= max_findings:
+                            findings_truncated = True
+                            break
                         self.repository.save("finding", finding.finding_id, finding.model_dump(mode="json"))
                         saved_findings.add(finding.finding_id)
                 final_scan = Scan(
                     scan_id=scan_id, target_id=target_id, scanner=SCANNER_VERSION,
                     started_at=result.started_at, finished_at=result.finished_at,
-                    status="partial" if result.failures or (result.coverage and result.coverage.gaps) else "complete",
+                    status="partial" if (result.failures or findings_truncated or (result.coverage and result.coverage.gaps)) else "complete",
                     finding_ids=sorted(saved_findings), failures=result.failures,
                     coverage=result.coverage, code_assessment=result.code_assessment,
                     verdict=result.verdict,
@@ -577,7 +611,7 @@ class RepositoryCodeAssessmentAdapter:
                 )
                 self.repository.save("scan", scan_id, final_scan.model_dump(mode="json"))
         control.report_progress(95, "results_persisted")
-        partial = result.failures or bool(result.coverage and result.coverage.gaps)
+        partial = result.failures or findings_truncated or bool(result.coverage and result.coverage.gaps)
         return AdapterResult(
             adapter_id=self.capabilities.adapter_id,
             status="partial" if partial else "complete",
@@ -658,7 +692,7 @@ class GovernedLogAnalysisAdapter:
                 sanitize_output=True,
                 control=control,
             )
-        except ExecutionCancelled:
+        except (ExecutionCancelled, ExecutionDeadlineExceeded):
             raise
         except Exception as exc:
             raise AdapterFailure("LOG_ANALYSIS_FAILED") from exc
@@ -750,15 +784,19 @@ class GovernedMalwareStaticTriageAdapter:
             raise AdapterFailure("MALWARE_EVIDENCE_INTEGRITY_FAILED")
         control.report_progress(10, "malware_evidence_verified")
         control.check_cancelled()
+        rem = getattr(control, "remaining_seconds", lambda: None)()
+        malware_deadline = 60
+        if rem is not None:
+            malware_deadline = max(1, min(60, int(rem)))
         try:
             result = analyze_file(
                 sample_path,
                 use_native_parser=False,
                 control=control,
-                deadline_seconds=60,
+                deadline_seconds=malware_deadline,
                 filename_hint=snapshot["original_filename"],
             )
-        except ExecutionCancelled:
+        except (ExecutionCancelled, ExecutionDeadlineExceeded):
             raise
         except AnalysisError as exc:
             raise AdapterFailure("MALWARE_STATIC_ANALYSIS_FAILED") from exc

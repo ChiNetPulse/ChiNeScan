@@ -1129,6 +1129,9 @@ def test_governed_worker_dispatches_only_with_bound_context_and_can_cancel(tmp_p
 
         def execute(self, context, _parameters, control) -> AdapterResult:
             assert context.organization_id == org
+            assert app.state.repository._organization_context.get() == org
+            assert app.state.repository._organization_principal_id.get() == owner
+            assert app.state.repository._organization_write_access.get() is True
             assert context.engagement_id == engagement
             assert context.asset_id == asset["id"]
             assert context.target == "app.example.test"
@@ -1496,10 +1499,13 @@ def test_sensitive_approval_remains_consumed_after_adapter_failure(tmp_path: Pat
         idempotency_key="sensitive-failure-request-01",
     )
     result = GovernedDomainWorker(app.state.repository, governance, registry).run_one(job["id"])
+    # Phase 2D: once authorize_external_action() records the action as in_progress,
+    # an AdapterFailure after dispatch leaves external outcome uncertain — the job
+    # transitions to reconciliation_required rather than failed.
     assert result == {
         "id": job["id"],
-        "status": "failed",
-        "error_code": "SYNTHETIC_ACTION_FAILURE",
+        "status": "reconciliation_required",
+        "error_code": "EXTERNAL_OUTCOME_UNCERTAIN",
     }
     with app.state.repository.engine.connect() as connection:
         approval = connection.execute(
@@ -1513,7 +1519,7 @@ def test_sensitive_approval_remains_consumed_after_adapter_failure(tmp_path: Pat
             )
         ).one()
     assert approval.decision == "consumed" and approval.consumed_at is not None
-    assert persisted_job.status == "failed"
+    assert persisted_job.status == "reconciliation_required"
     assert persisted_job.approval_consumed_at == approval.consumed_at
 
 
@@ -1870,6 +1876,133 @@ def test_execution_cancellation_api_is_authenticated_scoped_and_idempotent(tmp_p
     assert events.count("execution.cancellation_completed") == 1
 
 
+def test_approval_decision_api_requires_reviewer_or_lead_assignment(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    app, owner, _existing_reviewer, org, engagement, _asset, _scope, _auth = _setup(tmp_path)
+    credential = tmp_path / "operator.json"
+    from chinescan.core.accounts import operator_auth_epoch
+
+    epoch = operator_auth_epoch(credential)
+    organizations = app.state.organization_service
+    principals: dict[str, tuple[str, str]] = {}
+    for principal_name, email, assignment, role in (
+        ("assessor", "api-assessor@example.test", "assessor", "member"),
+        ("observer", "api-observer@example.test", "observer", "member"),
+        ("reviewer", "api-reviewer@example.test", "reviewer", "member"),
+        ("viewer-reviewer", "api-viewer-reviewer@example.test", "reviewer", "viewer"),
+    ):
+        user_id = str(uuid4())
+        user, _personal_org = organizations.ensure_operator(email, epoch, user_id)
+        organizations.add_member(owner, org, user_id, role)
+        organizations.change_assignment(
+            owner, org, engagement, user_id, role=assignment
+        )
+        principals[principal_name] = (user_id, user["auth_epoch"])
+
+    request = app.state.engagement_security_service.create_approval_request(
+        owner, org, engagement, "domain", "app.example.test", "exploit_verification"
+    )
+    assert request is not None
+    client = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50111))
+    url = (
+        f"/api/organizations/{org}/engagements/{engagement}/approvals/"
+        f"{request['id']}/decision"
+    )
+    try:
+        for principal_name in ("assessor", "observer", "viewer-reviewer"):
+            user_id, auth_epoch = principals[principal_name]
+            token, session = app.state.session_store.create(
+                f"api-{principal_name}@example.test", auth_epoch, user_id=user_id
+            )
+            client.cookies.set("chinescan_session", token)
+            response = client.post(
+                url,
+                json={"decision": "approved", "reason": "Not assigned to review."},
+                headers={
+                    "Origin": "http://127.0.0.1",
+                    "X-CSRF-Token": session.csrf_token,
+                },
+            )
+            assert response.status_code == 404
+            with app.state.repository.engine.connect() as connection:
+                state = connection.execute(
+                    select(approval_requests.c.decision).where(
+                        approval_requests.c.id == request["id"]
+                    )
+                ).scalar_one()
+            assert state == "pending"
+
+        reviewer_id, auth_epoch = principals["reviewer"]
+        token, session = app.state.session_store.create(
+            "api-reviewer@example.test", auth_epoch, user_id=reviewer_id
+        )
+        client.cookies.set("chinescan_session", token)
+        allowed = client.post(
+            url,
+            json={"decision": "approved", "reason": "Reviewed by assigned reviewer."},
+            headers={
+                "Origin": "http://127.0.0.1",
+                "X-CSRF-Token": session.csrf_token,
+            },
+        )
+        assert allowed.status_code == 200, allowed.text
+        assert allowed.json()["decision"] == "approved"
+    finally:
+        client.close()
+        app.state.repository.close()
+
+
+def test_viewer_with_assessor_assignment_cannot_submit_execution_job(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    app, owner, _reviewer, org, engagement, asset, _scope, _auth = _setup(tmp_path)
+    user_id = str(uuid4())
+    from chinescan.core.accounts import operator_auth_epoch
+
+    epoch = operator_auth_epoch(tmp_path / "operator.json")
+    stamp = datetime.now(UTC).isoformat()
+    with app.state.repository.engine.begin() as connection:
+        connection.execute(
+            insert(users).values(
+                id=user_id,
+                email_normalized="viewer-assessor@example.test",
+                display_name="Viewer Assessor",
+                status="active",
+                auth_epoch=epoch,
+                created_at=stamp,
+                updated_at=stamp,
+            )
+        )
+    app.state.organization_service.add_member(owner, org, user_id, "viewer")
+    app.state.organization_service.change_assignment(
+        owner, org, engagement, user_id, role="assessor"
+    )
+    token, session = app.state.session_store.create(
+        "viewer-assessor@example.test", epoch, user_id=user_id
+    )
+    client = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50112))
+    try:
+        with app.state.repository.engine.connect() as connection:
+            before = connection.execute(select(execution_jobs.c.id)).all()
+        response = client.post(
+            f"/api/organizations/{org}/engagements/{engagement}/executions/domain",
+            json={"asset_id": asset["id"], "idempotency_key": "viewer-denied-job-0001"},
+            cookies={"chinescan_session": token},
+            headers={
+                "Origin": "http://127.0.0.1",
+                "X-CSRF-Token": session.csrf_token,
+            },
+        )
+        assert response.status_code in {403, 404}
+        with app.state.repository.engine.connect() as connection:
+            after = connection.execute(select(execution_jobs.c.id)).all()
+        assert after == before
+    finally:
+        client.close()
+        app.state.repository.close()
+
+
 @pytest.mark.parametrize("consume_before_cancel", [False, True])
 def test_durable_cancellation_stops_sensitive_adapter_and_preserves_approval_state(
     tmp_path: Path, consume_before_cancel: bool
@@ -1945,7 +2078,14 @@ def test_durable_cancellation_stops_sensitive_adapter_and_preserves_approval_sta
         assert requested and requested["outcome"] == "requested"
         continue_adapter.set()
         outcome = future.result(timeout=10)
-    assert outcome == {"id": job["id"], "status": "cancelled"}
+    # Phase 2D: when approval was consumed and an action was recorded as in_progress
+    # before the cancellation was observed, the outcome is uncertain — the job
+    # transitions to reconciliation_required rather than cancelled.
+    # When no action was started (consume_before_cancel=False), cancelled is returned.
+    if consume_before_cancel:
+        assert outcome == {"id": job["id"], "status": "reconciliation_required"}
+    else:
+        assert outcome == {"id": job["id"], "status": "cancelled"}
     assert external_actions == (["first"] if consume_before_cancel else [])
     with app.state.repository.engine.connect() as connection:
         persisted_job = connection.execute(
@@ -1956,7 +2096,10 @@ def test_durable_cancellation_stops_sensitive_adapter_and_preserves_approval_sta
                 approval_requests.c.id == approval["id"]
             )
         ).one()
-    assert persisted_job["status"] == "cancelled"
+    if consume_before_cancel:
+        assert persisted_job["status"] == "reconciliation_required"
+    else:
+        assert persisted_job["status"] == "cancelled"
     assert persisted_job["cancellation_requested_by"] == owner
     assert persisted_job["cancellation_requested_at"] is not None
     assert persisted_job["cancellation_observed_at"] is not None
@@ -2178,12 +2321,12 @@ def test_governed_result_records_keep_immutable_job_provenance(
             ("finding", finding_id),
         }
 
-    case, warnings = CaseWorkflow(repository).create_from_scan(
-        scan_id, title="Governed finding review"
-    )
-    assert not warnings
-    assert finding_id in case.finding_ids
-    with repository.organization_context(org):
+    with repository.member_context(org, owner, write=True):
+        case, warnings = CaseWorkflow(repository).create_from_scan(
+            scan_id, title="Governed finding review"
+        )
+        assert not warnings
+        assert finding_id in case.finding_ids
         finding = repository.get("finding", finding_id)
         assert finding is not None
         finding["description"] = "Reviewed without changing origin."
@@ -2195,7 +2338,7 @@ def test_governed_result_records_keep_immutable_job_provenance(
     backup = tmp_path / f"backup-{result_status}"
     backup_result = backup_database(repository.path, backup)
     assert backup_result.verification.verified
-    assert verify_backup(backup).migration_revision == "0013_governed_chain_trace"
+    assert verify_backup(backup).migration_revision == "0015_durable_job_leases_actions"
     restored_path = tmp_path / f"restored-{result_status}.sqlite3"
     restore_backup(backup, restored_path, active_database_path=repository.path)
     restored = type(repository)(restored_path)
@@ -2279,7 +2422,7 @@ def test_preexisting_finding_is_not_attributed_and_provenance_is_tenant_bound(
     assert asset
     repository = app.state.repository
     finding_id, scan_id = str(uuid4()), str(uuid4())
-    with repository.organization_context(org):
+    with repository.member_context(org, owner, write=True):
         repository.save(
             "finding",
             finding_id,
@@ -2418,7 +2561,9 @@ def test_approval_consumption_outcome_is_exposed_as_job_provenance(tmp_path: Pat
     assert provenance["execution"]["approval_consumed_at"] is not None
 
 
-@pytest.mark.parametrize("invalid_state", ["expired", "revoked", "digest_mismatch"])
+@pytest.mark.parametrize(
+    "invalid_state", ["expired", "revoked", "digest_mismatch", "reviewer_role_downgrade"]
+)
 def test_sensitive_job_rejects_invalidated_approval_before_action(
     tmp_path: Path, invalid_state: str
 ) -> None:
@@ -2469,17 +2614,24 @@ def test_sensitive_job_rejects_invalidated_approval_before_action(
         idempotency_key=f"sensitive-invalid-{invalid_state}",
     )
     assert job["status"] == "queued"
-    with app.state.repository.engine.begin() as connection:
-        changes = {
-            "expired": {"expires_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat()},
-            "revoked": {"decision": "denied"},
-            "digest_mismatch": {"request_digest": "0" * 64},
-        }[invalid_state]
-        connection.execute(
-            update(approval_requests)
-            .where(approval_requests.c.id == request["id"])
-            .values(**changes)
+    if invalid_state == "reviewer_role_downgrade":
+        app.state.organization_service.update_membership(
+            owner, org, reviewer, role="viewer"
         )
+    else:
+        with app.state.repository.engine.begin() as connection:
+            changes = {
+                "expired": {
+                    "expires_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+                },
+                "revoked": {"decision": "denied"},
+                "digest_mismatch": {"request_digest": "0" * 64},
+            }[invalid_state]
+            connection.execute(
+                update(approval_requests)
+                .where(approval_requests.c.id == request["id"])
+                .values(**changes)
+            )
     result = GovernedDomainWorker(app.state.repository, governance, registry).run_one(job["id"])
     assert result == {"id": job["id"], "status": "blocked"}
     with app.state.repository.engine.connect() as connection:

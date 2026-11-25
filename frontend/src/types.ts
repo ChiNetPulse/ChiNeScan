@@ -65,10 +65,12 @@ export type Finding = {
 export type Page<T> = { items: T[]; total: number; total_stored?: number; limit: number; offset: number };
 export type Organization = { id: string; name: string; slug: string; status: string; owner_user_id: string; role: string; membership_id?: string; created_at: string; updated_at: string };
 export type OrganizationMember = { id: string; organization_id: string; user_id: string; role: string; status: string; email_normalized: string; display_name: string; created_at: string; updated_at: string };
+export type OrganizationInvitation = { id: string; organization_id: string; email_normalized: string; role: string; invited_by_user_id?: string; status: string; expires_at: string; accepted_at?: string | null; revoked_at?: string | null; created_at: string; token?: string };
+export type TotpStatus = { totp_enabled: boolean; recovery_codes_remaining: number };
 export type Client = { id: string; organization_id: string; name: string; description: string | null; status: string; created_at: string; updated_at: string };
 export type Engagement = { id: string; organization_id: string; client_id: string | null; name: string; description: string; status: string; created_at: string; updated_at: string };
 export type EngagementAssignment = { id: string; organization_id: string; engagement_id: string; user_id: string; role: string; status: string; email_normalized?: string; display_name?: string; created_at: string; updated_at: string };
-export type EngagementAsset = { id: string; asset_type: 'domain' | 'ip' | 'cidr' | 'url'; target: string; status: string; description: string | null };
+export type EngagementAsset = { id: string; asset_type: 'domain' | 'ip' | 'cidr' | 'url' | 'repository' | 'log_evidence' | 'malware_evidence' | 'chain_address'; target: string; status: string; description: string | null };
 export type RepositoryAsset = { id: string; organization_id: string; engagement_id: string; description: string | null; status: string; binding_id: string | null; snapshot_id: string | null; snapshot_sha256: string | null; size_bytes: number | null; manifest_version: number | null; scanner_version: string | null; snapshot_created_at: string | null; snapshot_status: string | null; delete_after: string | null; legal_hold: boolean | number | null; attestation_id: string | null; authorization_id: string | null; scope_revision_id: string | null; attestation_version: string | null; attested_at: string | null };
 export type RegisteredLocalProject = { project_registry_id: string; display_label: string };
 export type RepositoryQuota = { used_bytes: number; reserved_bytes: number; organization_limit_bytes: number; snapshot_limit_bytes: number; available_bytes: number };
@@ -127,11 +129,46 @@ export type ExecutionJob = {
   asset_id: string; target: string; asset_type: string; technique: string;
   action_class: string; scope_revision_id: string; authorization_id: string;
   approval_id: string | null; policy_decision_id: string; request_digest: string;
-  status: 'queued' | 'claimed' | 'running' | 'completed' | 'blocked' | 'cancelled' | 'failed';
+  status: 'queued' | 'claimed' | 'running' | 'completed' | 'blocked' | 'cancelled' | 'failed' | 'reconciliation_required';
   created_at: string; expires_at: string; started_at: string | null; finished_at: string | null;
+  claimed_at?: string | null; worker_id?: string | null; lease_generation?: number; attempt_number?: number;
   scan_id: string | null; error_code: string | null;
+  approval_consumed_at?: string | null; result_summary?: Record<string, unknown> | null;
   cancellation_requested_at: string | null; cancellation_requested_by: string | null;
   cancellation_observed_at: string | null;
+};
+export type ExecutionQuota = {
+  organization_id: string;
+  queued_jobs: number;
+  active_jobs: number;
+  total_reserved_jobs: number;
+  reconciliation_required_jobs: number;
+  limits: {
+    per_org_active_limit: number;
+    per_org_queued_limit: number;
+    default_job_deadline_seconds: number;
+    max_queue_wait_seconds: number;
+  };
+};
+export type GlobalExecutionDiagnostics = {
+  global_queued_jobs: number;
+  global_active_jobs: number;
+  global_reserved_jobs: number;
+  reconciliation_required_jobs: number;
+  active_by_workload: Record<string, number>;
+  workers: Array<{ worker_id: string; status: string; last_heartbeat_at: number | null }>;
+  limits: Record<string, unknown>;
+};
+export type MalwareEvidence = {
+  asset_id: string;
+  snapshot_id: string;
+  original_filename: string;
+  sha256: string;
+  size_bytes: number;
+  status: 'available' | 'missing' | 'corrupt' | 'deleted';
+  classification: string;
+  legal_hold?: boolean | number;
+  created_at?: string;
 };
 export type ExecutionProvenance = {
   execution: {

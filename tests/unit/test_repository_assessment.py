@@ -59,7 +59,8 @@ def _workspace(tmp_path: Path):
         ))
     organizations.add_member(owner_id, org_id, reviewer_id, "member")
     organizations.change_assignment(owner_id, org_id, engagement["id"], reviewer_id, role="reviewer")
-    project = app.state.project_service.create("Local source", source)
+    with repository.local_operator_context():
+        project = app.state.project_service.create("Local source", source)
     asset = app.state.repository_assessment_service.create_asset(owner_id, org_id, engagement["id"], "Synthetic local source")
     scope = service.create_scope_revision(owner_id, org_id, engagement["id"], [{
         "asset_id": asset["id"], "effect": "include", "match_mode": "exact",
@@ -158,6 +159,58 @@ def test_repository_binding_rejects_nonlead_unknown_project_and_raw_path(tmp_pat
             assert connection.execute(select(repository_quota_reservations)).first() is None
     finally:
         app.state.repository.close()
+
+
+@pytest.mark.parametrize("role", ["viewer", "auditor"])
+def test_read_only_lead_assignment_cannot_create_repository_asset_api(
+    tmp_path: Path, role: str
+) -> None:
+    from chinescan.core.accounts import operator_auth_epoch
+    from chinescan.core.storage.sqlite import engagement_assets
+
+    app, owner, org, engagement, _project, _asset, _scope, _authorization = _workspace(tmp_path)
+    repository = app.state.repository
+    email = f"{role}-repository-lead@example.test"
+    user_id = str(uuid4())
+    epoch = operator_auth_epoch(tmp_path / "private-state" / "operator.json")
+    user, _personal_org = app.state.organization_service.ensure_operator(email, epoch, user_id)
+    app.state.organization_service.add_member(owner, org, user_id, role)
+    app.state.organization_service.change_assignment(
+        owner, org, engagement, user_id, role="lead"
+    )
+    token, session = app.state.session_store.create(
+        email, user["auth_epoch"], user_id=user_id
+    )
+    client = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50201))
+    try:
+        client.cookies.set("chinescan_session", token)
+        with repository.engine.connect() as connection:
+            before = connection.execute(
+                select(engagement_assets.c.id).where(
+                    engagement_assets.c.organization_id == org,
+                    engagement_assets.c.engagement_id == engagement,
+                )
+            ).all()
+        response = client.post(
+            f"/api/organizations/{org}/engagements/{engagement}/repositories",
+            json={"description": "Must not be created"},
+            headers={
+                "Origin": "http://127.0.0.1",
+                "X-CSRF-Token": session.csrf_token,
+            },
+        )
+        assert response.status_code == 404
+        with repository.engine.connect() as connection:
+            after = connection.execute(
+                select(engagement_assets.c.id).where(
+                    engagement_assets.c.organization_id == org,
+                    engagement_assets.c.engagement_id == engagement,
+                )
+            ).all()
+        assert after == before
+    finally:
+        client.close()
+        repository.close()
 
 
 def test_repository_snapshot_rejects_linked_entries_and_releases_failed_quota_reservation(tmp_path: Path) -> None:
@@ -328,7 +381,7 @@ def test_backup_includes_snapshot_and_database_only_bundle_is_incomplete(tmp_pat
     destination_dir = tmp_path / "restored-state"
     destination_dir.mkdir()
     restored = restore_backup(bundle, destination_dir / "restored.sqlite3")
-    assert restored.resulting_revision == "0013_governed_chain_trace"
+    assert restored.resulting_revision == "0015_durable_job_leases_actions"
     assert (destination_dir / "repository-snapshots" / org / bound["snapshot_sha256"] / "app.py").is_file()
 
     database_only = tmp_path / "database-only-copy"

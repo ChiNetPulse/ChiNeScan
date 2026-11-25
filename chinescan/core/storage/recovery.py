@@ -250,6 +250,17 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
     malware_evidence_tables = {
         "malware_evidence_snapshots", "malware_evidence_quota_reservations"
     }
+    identity_tables = {
+        "user_credentials",
+        "user_recovery_codes",
+        "user_sessions",
+        "organization_invitations",
+        "auth_lockouts",
+    }
+    durable_job_tables = {
+        "execution_action_attempts",
+        "worker_leases",
+    }
     extras = tables - {"records", "alembic_version"}
     app_extras = extras - {"sqlite_sequence"}
     if (
@@ -262,6 +273,8 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         - repository_tables
         - log_evidence_tables
         - malware_evidence_tables
+        - identity_tables
+        - durable_job_tables
     ):
         return None, "database contains an unsupported table layout"
     columns = connection.execute("PRAGMA table_info(records)").fetchall()
@@ -334,6 +347,19 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         | log_evidence_tables | malware_evidence_tables
     ):
         return revision, "malware evidence tables do not match the supported schema"
+    if revision == "0014_multi_user_identity_sessions" and app_extras != (
+        dashboard_tables | organization_tables | engagement_security_tables
+        | execution_tables | execution_provenance_tables | repository_tables
+        | log_evidence_tables | malware_evidence_tables | identity_tables
+    ):
+        return revision, "identity and session tables do not match the supported schema"
+    if revision == "0015_durable_job_leases_actions" and app_extras != (
+        dashboard_tables | organization_tables | engagement_security_tables
+        | execution_tables | execution_provenance_tables | repository_tables
+        | log_evidence_tables | malware_evidence_tables | identity_tables
+        | durable_job_tables
+    ):
+        return revision, "durable job lease and action tables do not match the supported schema"
     supported_revisions = {
         "0004_dashboard_alerts",
         "0005_identity_organizations",
@@ -345,6 +371,8 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         "0011_governed_log_evidence",
         "0012_governed_malware_evidence",
         "0013_governed_chain_trace",
+        "0014_multi_user_identity_sessions",
+        "0015_durable_job_leases_actions",
     }
     if revision not in supported_revisions and extras:
         return revision, "dashboard alert tables do not match migration revision"
@@ -370,6 +398,8 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         "0011_governed_log_evidence",
         "0012_governed_malware_evidence",
         "0013_governed_chain_trace",
+        "0014_multi_user_identity_sessions",
+        "0015_durable_job_leases_actions",
     }:
         for table_name in organization_tables:
             if not connection.execute(
@@ -385,6 +415,8 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         "0011_governed_log_evidence",
         "0012_governed_malware_evidence",
         "0013_governed_chain_trace",
+        "0014_multi_user_identity_sessions",
+        "0015_durable_job_leases_actions",
     }:
         for table_name in engagement_security_tables:
             if not connection.execute(
@@ -418,6 +450,8 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         "0011_governed_log_evidence",
         "0012_governed_malware_evidence",
         "0013_governed_chain_trace",
+        "0014_multi_user_identity_sessions",
+        "0015_durable_job_leases_actions",
     }:
         required = {
             "id", "organization_id", "engagement_id", "requester_user_id", "asset_id",
@@ -434,7 +468,7 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         }
         if not required <= actual:
             return revision, "execution job table does not match the supported schema"
-        if revision in {"0009_execution_result_provenance", "0010_governed_repository_assets", "0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace"}:
+        if revision in {"0009_execution_result_provenance", "0010_governed_repository_assets", "0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
             job_columns = required | {"authorization_document_sha256"}
             if not job_columns <= actual:
                 return revision, "execution provenance job schema is incomplete"
@@ -449,7 +483,7 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
                 "created_at",
             } <= provenance_columns:
                 return revision, "execution result provenance schema is incomplete"
-            if revision in {"0010_governed_repository_assets", "0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace"}:
+            if revision in {"0010_governed_repository_assets", "0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
                 job_columns |= {
                     "policy_request_digest", "repository_binding_id", "repository_snapshot_id",
                     "repository_snapshot_sha256", "repository_manifest_version",
@@ -468,7 +502,7 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
                     actual_repo = {row["name"] for row in connection.execute(f'PRAGMA table_info("{table_name}")')}
                     if not expected_columns <= actual_repo:
                         return revision, "repository assessment schema is incomplete"
-            if revision in {"0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace"}:
+            if revision in {"0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
                 job_columns |= {
                     "log_evidence_snapshot_id", "log_evidence_sha256",
                     "log_evidence_manifest_version", "log_evidence_source_format",
@@ -491,7 +525,7 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
                     }
                     if not expected_table_columns <= actual_columns:
                         return revision, "log evidence schema is incomplete"
-            if revision in {"0012_governed_malware_evidence", "0013_governed_chain_trace"}:
+            if revision in {"0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
                 job_columns |= {
                     "malware_evidence_snapshot_id", "malware_evidence_sha256",
                     "malware_evidence_manifest_sha256", "malware_evidence_manifest_version",
@@ -515,6 +549,35 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
                     }
                     if not expected_table_columns <= actual_columns:
                         return revision, "malware evidence schema is incomplete"
+            if revision == "0015_durable_job_leases_actions":
+                job_columns |= {
+                    "worker_id",
+                    "lease_generation",
+                    "lease_expires_at",
+                    "heartbeat_at",
+                    "claimed_at",
+                    "attempt_number",
+                    "last_recovery_at",
+                }
+                if not job_columns <= actual:
+                    return revision, "durable job lease schema is incomplete"
+                for table_name, expected_table_columns in {
+                    "execution_action_attempts": {
+                        "id", "job_id", "organization_id", "engagement_id",
+                        "action_sequence", "lease_generation", "worker_id",
+                        "adapter_id", "operation", "authorization_id",
+                        "request_digest", "state",
+                    },
+                    "worker_leases": {
+                        "worker_id", "status", "started_at", "last_heartbeat_at",
+                    },
+                }.items():
+                    actual_columns = {
+                        row["name"]
+                        for row in connection.execute(f'PRAGMA table_info("{table_name}")')
+                    }
+                    if not expected_table_columns <= actual_columns:
+                        return revision, "durable job action schema is incomplete"
     return revision, None
 
 
@@ -1156,7 +1219,7 @@ def verify_backup(backup_directory: Path | str) -> VerificationResult:
     ):
         db_structural, revision, issues, unsupported = _verify_database(database, immutable=True)
         structural.extend(db_structural)
-    if revision in {"0010_governed_repository_assets", "0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace"}:
+    if revision in {"0010_governed_repository_assets", "0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
         declared = manifest.get("repository_snapshots")
         actual = _repository_snapshot_rows(database)
         if not isinstance(declared, list) or declared != actual:
@@ -1175,7 +1238,7 @@ def verify_backup(backup_directory: Path | str) -> VerificationResult:
                         structural.append("repository_snapshot_content_missing_or_corrupt")
                 elif snapshot["status"] in {"missing", "corrupt"}:
                     structural.append("repository_snapshot_content_missing_or_corrupt")
-    if revision in {"0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace"}:
+    if revision in {"0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
         declared = manifest.get("log_evidence_snapshots")
         actual = _log_evidence_rows(database)
         if not isinstance(declared, list) or declared != actual:
@@ -1199,7 +1262,7 @@ def verify_backup(backup_directory: Path | str) -> VerificationResult:
                         structural.append("log_evidence_content_missing_or_corrupt")
                 elif snapshot["status"] not in {"deleted"}:
                     structural.append("log_evidence_content_missing_or_corrupt")
-    if revision in {"0012_governed_malware_evidence", "0013_governed_chain_trace"}:
+    if revision in {"0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
         declared = manifest.get("malware_evidence_snapshots")
         actual_rows = _malware_evidence_rows(database)
         actual = [{key: value for key, value in row.items() if key != "verified_manifest_sha256"} for row in actual_rows]

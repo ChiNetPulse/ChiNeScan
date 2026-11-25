@@ -8,6 +8,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.exc import IntegrityError
 
+from chinescan.core.errors import StorageError
 from chinescan.core.storage.sqlite import SQLiteRepository, metadata
 
 
@@ -45,7 +46,7 @@ def test_repository_asset_migration_upgrades_and_empty_downgrade_is_safe(tmp_pat
             revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert revision == "0013_governed_chain_trace"
+            assert revision == "0015_durable_job_leases_actions"
             checks = inspect(connection).get_check_constraints("engagement_assets")
             assert any("chain_address" in str(item.get("sqltext")) for item in checks)
         command.downgrade(config, "0009_execution_result_provenance")
@@ -60,7 +61,7 @@ def test_repository_asset_migration_upgrades_and_empty_downgrade_is_safe(tmp_pat
             revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert revision == "0013_governed_chain_trace"
+            assert revision == "0015_durable_job_leases_actions"
     finally:
         engine.dispose()
 
@@ -165,7 +166,7 @@ def test_repository_migration_preserves_records_and_enforces_tenant_binding(
             ).scalar_one() == "a.example.test"
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-                ).scalar_one() == "0013_governed_chain_trace"
+                ).scalar_one() == "0015_durable_job_leases_actions"
 
         with engine.begin() as connection:
             connection.execute(
@@ -218,13 +219,18 @@ def test_malware_backend_revision_upgrades_existing_records_without_rewrite(tmp_
 
     repository = SQLiteRepository(database)
     try:
-        assert repository.get("case", "legacy") == {"title": "Keep"}
+        # Migration preserves payloads while unowned legacy data stays hidden.
+        with pytest.raises(StorageError, match="authorized organization context"):
+            repository.get("case", "legacy")
         with repository.engine.connect() as connection:
+            assert json.loads(connection.exec_driver_sql(
+                "SELECT payload FROM records WHERE record_type='case' AND record_id='legacy'"
+            ).scalar_one()) == {"title": "Keep"}
             from alembic.runtime.migration import MigrationContext
 
             assert (
                 MigrationContext.configure(connection).get_current_revision()
-                == "0013_governed_chain_trace"
+                == "0015_durable_job_leases_actions"
             )
     finally:
         repository.close()
@@ -303,7 +309,7 @@ def test_malware_evidence_migration_enforces_tenant_constraints_and_downgrades_e
             )).scalar_one() == 1
             assert connection.execute(text(
                 "SELECT version_num FROM alembic_version"
-            )).scalar_one() == "0013_governed_chain_trace"
+            )).scalar_one() == "0015_durable_job_leases_actions"
         with pytest.raises(RuntimeError, match="history exists"):
             command.downgrade(config, "0011_governed_log_evidence")
         with engine.connect() as connection:

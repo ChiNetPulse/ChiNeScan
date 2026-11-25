@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -30,6 +31,7 @@ def is_reparse_or_link(path: Path) -> bool:
         return True
 
 
+@lru_cache(maxsize=1)
 def get_windows_operator_identity() -> tuple[str, str]:
     """Retrieve current Windows user name and SID via whoami.exe."""
     try:
@@ -37,7 +39,7 @@ def get_windows_operator_identity() -> tuple[str, str]:
             ["whoami.exe", "/user", "/fo", "csv", "/nh"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=15,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -93,7 +95,7 @@ def verify_windows_directory_acl(
             ["icacls.exe", str(directory)],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=15,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -269,7 +271,7 @@ def secure_snapshot_directory(path: Path) -> Path:
             ]
             try:
                 apply_res = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=10, check=False
+                    cmd, capture_output=True, text=True, timeout=15, check=False
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 raise StorageSecurityError(

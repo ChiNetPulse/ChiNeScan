@@ -67,12 +67,13 @@ class CodeJobManager:
         self._stopping = False
 
     def start(self) -> None:
-        with self.lock:
-            for item in self.repository.list_records("code_job"):
-                if item.get("status") in {"queued", "running"}:
-                    _transition(item, "interrupted")
-                    item["error"] = "Server restarted before the job completed."
-                    self.repository.save("code_job", item["job_id"], item)
+        with self.repository.local_operator_context():
+            with self.lock:
+                for item in self.repository.list_records("code_job"):
+                    if item.get("status") in {"queued", "running"}:
+                        _transition(item, "interrupted")
+                        item["error"] = "Server restarted before the job completed."
+                        self.repository.save("code_job", item["job_id"], item)
         self._thread = threading.Thread(target=self._run, name="chinescan-code-jobs", daemon=True)
         self._thread.start()
 
@@ -125,6 +126,10 @@ class CodeJobManager:
             return self.repository.get("code_job", job_id)
 
     def _run(self) -> None:
+        with self.repository.local_operator_context():
+            self._run_local_operator()
+
+    def _run_local_operator(self) -> None:
         while True:
             with self._condition:
                 while not self._queue and not self._stopping:

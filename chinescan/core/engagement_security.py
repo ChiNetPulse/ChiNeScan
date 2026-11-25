@@ -27,13 +27,13 @@ from chinescan.core.storage.sqlite import (
     engagement_assets,
     engagement_assignments,
     engagements,
+    log_evidence_snapshots,
+    malware_evidence_snapshots,
     organization_memberships,
     organizations,
     repository_asset_bindings,
     repository_attestations,
     repository_snapshots,
-    log_evidence_snapshots,
-    malware_evidence_snapshots,
     scope_revisions,
     scope_rules,
     users,
@@ -129,19 +129,33 @@ def normalize_target(asset_type: str, value: str) -> str:
             path = parsed.path or "/"
             return urlunsplit((parsed.scheme.lower(), authority, path, "", ""))
         if asset_type == "repository":
-            match = re.fullmatch(r"repo:([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})", value, re.I)
+            match = re.fullmatch(
+                r"repo:([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
+                value,
+                re.I,
+            )
             if not match:
                 raise ValueError("Repository targets must be opaque server-generated identifiers")
             return f"repo:{match.group(1).lower()}"
         if asset_type == "log_evidence":
-            match = re.fullmatch(r"log:([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})", value, re.I)
+            match = re.fullmatch(
+                r"log:([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
+                value,
+                re.I,
+            )
             if not match:
                 raise ValueError("Log evidence targets must be opaque server-generated identifiers")
             return f"log:{match.group(1).lower()}"
         if asset_type == "malware_evidence":
-            match = re.fullmatch(r"malware:([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})", value, re.I)
+            match = re.fullmatch(
+                r"malware:([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
+                value,
+                re.I,
+            )
             if not match:
-                raise ValueError("Malware evidence targets must be opaque server-generated identifiers")
+                raise ValueError(
+                    "Malware evidence targets must be opaque server-generated identifiers"
+                )
             return f"malware:{match.group(1).lower()}"
         if asset_type == "chain_address":
             from chinescan.chain_trace.registry import CHAINS, normalize_address
@@ -253,7 +267,9 @@ class EngagementSecurityService:
         role = self._membership(connection, user_id, organization_id)
         if role in {"owner", "admin"}:
             return True
-        return "lead" in self._assignment_roles(connection, user_id, organization_id, engagement_id)
+        return role == "member" and "lead" in self._assignment_roles(
+            connection, user_id, organization_id, engagement_id
+        )
 
     def _can_read(
         self, connection: Any, user_id: str, organization_id: str, engagement_id: str
@@ -268,7 +284,8 @@ class EngagementSecurityService:
     def _can_operate(
         self, connection: Any, user_id: str, organization_id: str, engagement_id: str
     ) -> bool:
-        if self._membership(connection, user_id, organization_id) is None:
+        role = self._membership(connection, user_id, organization_id)
+        if role not in {"owner", "admin", "member"}:
             return False
         return bool(
             self._assignment_roles(connection, user_id, organization_id, engagement_id)
@@ -279,9 +296,12 @@ class EngagementSecurityService:
         self, connection: Any, user_id: str, organization_id: str, engagement_id: str
     ) -> bool:
         role = self._membership(connection, user_id, organization_id)
-        return role in {"owner", "admin"} or bool(
-            self._assignment_roles(connection, user_id, organization_id, engagement_id)
-            & {"lead", "reviewer"}
+        return role in {"owner", "admin"} or (
+            role == "member"
+            and bool(
+                self._assignment_roles(connection, user_id, organization_id, engagement_id)
+                & {"lead", "reviewer"}
+            )
         )
 
     def _audit(
@@ -340,7 +360,9 @@ class EngagementSecurityService:
         description: str | None = None,
     ) -> dict[str, Any] | None:
         if asset_type == "repository":
-            raise EngagementSecurityError("Repository assets must use the governed repository binding workflow.")
+            raise EngagementSecurityError(
+                "Repository assets must use the governed repository binding workflow."
+            )
         normalized = normalize_target(asset_type, target)
         if description is not None and len(description) > 2000:
             raise EngagementSecurityError("Asset description is too long.")
@@ -1244,7 +1266,9 @@ class EngagementSecurityService:
                     **base,
                     "decision": "DENY",
                     "reason_code": "LOG_EVIDENCE_UNAVAILABLE",
-                    "explanation": "Registered log evidence is unavailable or failed integrity validation.",
+                    "explanation": (
+                        "Registered log evidence is unavailable or failed integrity validation."
+                    ),
                 }
         elif asset_type == "malware_evidence":
             evidence_asset_id = self._asset_id_for_target(
@@ -1263,7 +1287,9 @@ class EngagementSecurityService:
                     **base,
                     "decision": "DENY",
                     "reason_code": "MALWARE_EVIDENCE_UNAVAILABLE",
-                    "explanation": "Registered malware evidence is unavailable or failed integrity validation.",
+                    "explanation": (
+                        "Registered malware evidence is unavailable or failed integrity validation."
+                    ),
                 }
         digest = operation_digest(
             organization_id=organization_id,
@@ -1365,8 +1391,9 @@ class EngagementSecurityService:
         approver_assignments = self._assignment_roles(
             connection, request["approver_user_id"], organization_id, engagement_id
         )
-        if approver_role not in {"owner", "admin"} and not approver_assignments.intersection(
-            {"lead", "reviewer"}
+        if approver_role not in {"owner", "admin"} and not (
+            approver_role == "member"
+            and approver_assignments.intersection({"lead", "reviewer"})
         ):
             return {
                 **base,
@@ -1420,7 +1447,9 @@ class EngagementSecurityService:
         }
 
     @staticmethod
-    def _asset_id_for_target(connection: Any, organization_id: str, engagement_id: str, target: str) -> str | None:
+    def _asset_id_for_target(
+        connection: Any, organization_id: str, engagement_id: str, target: str
+    ) -> str | None:
         result = connection.execute(
             select(engagement_assets.c.id).where(
                 engagement_assets.c.organization_id == organization_id,
@@ -1647,8 +1676,9 @@ class EngagementSecurityService:
                 assignment_roles = self._assignment_roles(
                     connection, approver_id, organization_id, engagement_id
                 )
-                if role not in {"owner", "admin"} and not assignment_roles.intersection(
-                    {"lead", "reviewer"}
+                if role not in {"owner", "admin"} and not (
+                    role == "member"
+                    and assignment_roles.intersection({"lead", "reviewer"})
                 ):
                     connection.rollback()
                     return None

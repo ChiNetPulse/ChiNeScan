@@ -4,7 +4,7 @@ import hmac
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
-from contextvars import ContextVar, Token
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, cast, overload
 from uuid import uuid4
@@ -17,6 +17,7 @@ from sqlalchemy import (
     JSON,
     CheckConstraint,
     Column,
+    Float,
     ForeignKeyConstraint,
     Index,
     Integer,
@@ -30,6 +31,7 @@ from sqlalchemy import (
     event,
     func,
     inspect,
+    or_,
     select,
 )
 from sqlalchemy.engine import Engine
@@ -758,7 +760,7 @@ execution_jobs = Table(
     Column("request_digest", String(64), nullable=False),
     Column("execution_context", JSON, nullable=False),
     Column("idempotency_key", String(80), nullable=False),
-    Column("status", String(20), nullable=False),
+    Column("status", String(24), nullable=False),
     Column("created_at", String(40), nullable=False),
     Column("expires_at", String(40), nullable=False),
     Column("started_at", String(40)),
@@ -770,6 +772,13 @@ execution_jobs = Table(
     Column("cancellation_requested_by", String(36)),
     Column("cancellation_observed_at", String(40)),
     Column("error_code", String(80)),
+    Column("worker_id", String(64)),
+    Column("lease_generation", Integer, nullable=False, server_default="0"),
+    Column("lease_expires_at", Float),
+    Column("heartbeat_at", Float),
+    Column("claimed_at", String(40)),
+    Column("attempt_number", Integer, nullable=False, server_default="0"),
+    Column("last_recovery_at", String(40)),
     ForeignKeyConstraint(
         ["engagement_id", "organization_id"],
         ["engagements.id", "engagements.organization_id"], ondelete="CASCADE",
@@ -830,7 +839,7 @@ execution_jobs = Table(
         name="uq_execution_job_idempotency",
     ),
     CheckConstraint(
-        "status IN ('queued','claimed','running','completed','blocked','cancelled','failed')",
+        "status IN ('queued','claimed','running','completed','blocked','cancelled','failed','reconciliation_required')",
         name="ck_execution_job_status",
     ),
     CheckConstraint(
@@ -845,6 +854,11 @@ Index(
     execution_jobs.c.created_at,
 )
 Index("ix_execution_jobs_queue", execution_jobs.c.status, execution_jobs.c.created_at)
+Index(
+    "ix_execution_jobs_lease_expiry",
+    execution_jobs.c.status,
+    execution_jobs.c.lease_expires_at,
+)
 Index(
     "uq_execution_job_approval_binding",
     execution_jobs.c.approval_id,
@@ -893,6 +907,134 @@ Index(
     execution_result_provenance.c.engagement_id,
 )
 
+# Phase 2C multi-user identity, persistent sessions, lockouts, and invitations.
+user_credentials = Table(
+    "user_credentials", metadata,
+    Column("user_id", String(36), primary_key=True),
+    Column("password_hash", String(255)),
+    Column("totp_enabled", Integer, nullable=False, server_default="0"),
+    Column("totp_secret", String(64)),
+    Column("totp_last_counter", Integer, nullable=False, server_default="-1"),
+    Column("totp_pending_secret", String(64)),
+    Column("totp_enrollment_expires_at", Integer),
+    Column("totp_verify_failed_at", JSON, nullable=False, server_default="[]"),
+    Column("migrated_operator_epoch", String(64)),
+    Column("password_updated_at", String(40)),
+    Column("created_at", String(40), nullable=False),
+    Column("updated_at", String(40), nullable=False),
+    ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+    CheckConstraint("totp_enabled IN (0, 1)", name="ck_user_credentials_totp_enabled"),
+)
+user_recovery_codes = Table(
+    "user_recovery_codes", metadata,
+    Column("id", String(36), primary_key=True),
+    Column("user_id", String(36), nullable=False, index=True),
+    Column("code_hash", String(255), nullable=False),
+    Column("used_at", String(40)),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+)
+user_sessions = Table(
+    "user_sessions", metadata,
+    Column("id", String(36), primary_key=True),
+    Column("token_hash", String(64), nullable=False, unique=True, index=True),
+    Column("user_id", String(36), nullable=False, index=True),
+    Column("email_normalized", String(254), nullable=False),
+    Column("csrf_token", String(128), nullable=False),
+    Column("auth_epoch", String(64), nullable=False),
+    Column("created_at", Float, nullable=False),
+    Column("last_seen_at", Float, nullable=False),
+    Column("expires_at", Float, nullable=False, index=True),
+    Column("revoked_at", Float),
+    ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+)
+organization_invitations = Table(
+    "organization_invitations", metadata,
+    Column("id", String(36), primary_key=True),
+    Column("organization_id", String(36), nullable=False),
+    Column("email_normalized", String(254), nullable=False),
+    Column("role", String(20), nullable=False),
+    Column("token_hash", String(64), nullable=False, unique=True, index=True),
+    Column("invited_by_user_id", String(36), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("expires_at", String(40), nullable=False, index=True),
+    Column("accepted_by_user_id", String(36)),
+    Column("accepted_at", String(40)),
+    Column("revoked_at", String(40)),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
+    ForeignKeyConstraint(["invited_by_user_id"], ["users.id"], ondelete="RESTRICT"),
+    ForeignKeyConstraint(["accepted_by_user_id"], ["users.id"], ondelete="SET NULL"),
+    CheckConstraint(
+        "role IN ('admin','member','auditor','viewer')", name="ck_org_invitation_role"
+    ),
+    CheckConstraint(
+        "status IN ('pending','accepted','revoked','expired')", name="ck_org_invitation_status"
+    ),
+)
+Index(
+    "ix_org_invitations_org_email",
+    organization_invitations.c.organization_id,
+    organization_invitations.c.email_normalized,
+)
+auth_lockouts = Table(
+    "auth_lockouts", metadata,
+    Column("key_hash", String(64), primary_key=True),
+    Column("failure_count", Integer, nullable=False, server_default="0"),
+    Column("locked_until", Float),
+    Column("updated_at", Float, nullable=False),
+)
+# Phase 2D durable external-action attempts and worker leases.
+execution_action_attempts = Table(
+    "execution_action_attempts", metadata,
+    Column("id", String(36), primary_key=True),
+    Column("job_id", String(36), nullable=False),
+    Column("organization_id", String(36), nullable=False),
+    Column("engagement_id", String(36), nullable=False),
+    Column("action_sequence", Integer, nullable=False),
+    Column("lease_generation", Integer, nullable=False),
+    Column("worker_id", String(64), nullable=False),
+    Column("adapter_id", String(80), nullable=False),
+    Column("operation", String(80), nullable=False),
+    Column("authorization_id", String(36), nullable=False),
+    Column("approval_id", String(36)),
+    Column("request_digest", String(64), nullable=False),
+    Column("state", String(32), nullable=False),
+    Column("started_at", String(40)),
+    Column("completed_at", String(40)),
+    Column("outcome_classification", String(40)),
+    Column("result_reference", String(120)),
+    Column("created_at", String(40), nullable=False),
+    Column("updated_at", String(40), nullable=False),
+    ForeignKeyConstraint(["job_id"], ["execution_jobs.id"], ondelete="RESTRICT"),
+    ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="RESTRICT"),
+    ForeignKeyConstraint(
+        ["engagement_id", "organization_id"],
+        ["engagements.id", "engagements.organization_id"],
+        ondelete="RESTRICT",
+    ),
+    UniqueConstraint("job_id", "action_sequence", name="uq_exec_action_job_seq"),
+    CheckConstraint(
+        "state IN ('not_started','authorized','in_progress','completed',"
+        "'failed_before_dispatch','outcome_uncertain','reconciliation_required')",
+        name="ck_exec_action_state",
+    ),
+)
+Index(
+    "ix_exec_action_job_state",
+    execution_action_attempts.c.job_id,
+    execution_action_attempts.c.state,
+)
+worker_leases = Table(
+    "worker_leases", metadata,
+    Column("worker_id", String(64), primary_key=True),
+    Column("status", String(20), nullable=False),
+    Column("started_at", String(40), nullable=False),
+    Column("last_heartbeat_at", Float, nullable=False),
+    Column("stopped_at", String(40)),
+    CheckConstraint("status IN ('active','stopping','stopped')", name="ck_worker_lease_status"),
+)
+
 for _operation in ("UPDATE", "DELETE"):
     event.listen(
         execution_result_provenance,
@@ -931,16 +1073,112 @@ class SQLiteRepository(Repository):
         self._execution_provenance_context: ContextVar[dict[str, Any] | None] = ContextVar(
             f"chinescan_execution_provenance_{id(self)}", default=None
         )
-        self.worker_organization_id: str | None = None
+        self._organization_principal_id: ContextVar[str | None] = ContextVar(
+            f"chinescan_org_principal_{id(self)}", default=None
+        )
+        self._organization_write_access: ContextVar[bool] = ContextVar(
+            f"chinescan_org_write_{id(self)}", default=False
+        )
+        self._local_operator_organization_id: str | None = None
+        self._bound_authorizations: list[Any] = []
 
     @contextmanager
     def organization_context(self, organization_id: str) -> Iterator[None]:
-        """Scope repository calls to one verified organization for this request context."""
-        token: Token[str | None] = self._organization_context.set(organization_id)
+        """Scope repository calls to an existing active organization."""
+        if not isinstance(organization_id, str) or not organization_id.strip():
+            raise StorageError("A valid organization context is required.")
+        with self.engine.connect() as connection:
+            active = connection.execute(
+                select(organizations.c.id).where(
+                    organizations.c.id == organization_id,
+                    organizations.c.status == "active",
+                )
+            ).scalar_one_or_none()
+        if active is None:
+            raise StorageError("The organization context is unavailable.")
+        previous_organization = self._current_organization_id()
+        token = self._organization_context.set(organization_id)
+        # Adapter helpers may open a nested scope for the same job. Preserve an
+        # already validated principal in that case; changing organizations always
+        # starts with no principal and read-only access.
+        same_scope = previous_organization == organization_id
+        principal_token = (
+            self._organization_principal_id.set(None) if not same_scope else None
+        )
+        write_token = (
+            self._organization_write_access.set(False) if not same_scope else None
+        )
         try:
             yield
         finally:
+            if write_token is not None:
+                self._organization_write_access.reset(write_token)
+            if principal_token is not None:
+                self._organization_principal_id.reset(principal_token)
             self._organization_context.reset(token)
+
+    @contextmanager
+    def member_context(
+        self, organization_id: str, user_id: str, *, write: bool = False
+    ) -> Iterator[None]:
+        """Establish a verified active membership for organization-facing web requests."""
+        if not organization_id or not user_id:
+            raise StorageError("An authenticated organization membership is required.")
+        with self.engine.connect() as connection:
+            membership = connection.execute(
+                select(organization_memberships.c.role)
+                .join(
+                    organizations,
+                    organizations.c.id == organization_memberships.c.organization_id,
+                )
+                .join(users, users.c.id == organization_memberships.c.user_id)
+                .where(
+                    organizations.c.id == organization_id,
+                    organizations.c.status == "active",
+                    organization_memberships.c.user_id == user_id,
+                    organization_memberships.c.status == "active",
+                    users.c.status == "active",
+                )
+            ).scalar_one_or_none()
+        if membership is None:
+            raise StorageError("The organization membership is unavailable.")
+        if write and membership not in {"owner", "admin", "member"}:
+            raise StorageError("The organization role does not allow this action.")
+        with self.organization_context(organization_id):
+            token = self._organization_principal_id.set(user_id)
+            write_token = self._organization_write_access.set(write)
+            try:
+                yield
+            finally:
+                self._organization_write_access.reset(write_token)
+                self._organization_principal_id.reset(token)
+
+    @contextmanager
+    def local_operator_context(self) -> Iterator[None]:
+        """Scope an explicitly bootstrapped local operator to their personal organization."""
+        organization_id = self._local_operator_organization_id
+        if not organization_id:
+            raise StorageError("Local operator authorization is unavailable.")
+        with self.organization_context(organization_id):
+            write_token = self._organization_write_access.set(True)
+            try:
+                yield
+            finally:
+                self._organization_write_access.reset(write_token)
+
+    def bind_local_operator_context(self) -> None:
+        """Bind one repository instance for a single local CLI operation."""
+        context = self.local_operator_context()
+        context.__enter__()
+        self._bound_authorizations.append(context)
+
+    def bind_member_context(
+        self, organization_id: str, user_id: str, *, write: bool = False
+    ) -> None:
+        """Bind one repository instance after CLI identity and membership validation."""
+        context = self.member_context(organization_id, user_id, write=write)
+        context.__enter__()
+        self._bound_authorizations.append(context)
 
     def _current_organization_id(self) -> str | None:
         return self._organization_context.get()
@@ -962,15 +1200,48 @@ class SQLiteRepository(Repository):
         finally:
             self._execution_provenance_context.reset(token)
 
-    def _owned_record(self) -> Any:
-        organization_id = self._current_organization_id() or self.worker_organization_id
+    def _owned_record(self, *, for_write: bool = False) -> Any:
+        organization_id = self._current_organization_id()
         if organization_id is None:
-            return None
-        return select(record_ownership.c.record_id).where(
-            record_ownership.c.record_type == records.c.record_type,
-            record_ownership.c.record_id == records.c.record_id,
-            record_ownership.c.organization_id == organization_id,
-        ).exists()
+            raise StorageError("Repository access requires an authorized organization context.")
+        if for_write and not self._organization_write_access.get():
+            raise StorageError("Repository writes require an authorized write context.")
+        owner = record_ownership.alias("owned_record")
+        conditions = [
+            owner.c.record_type == records.c.record_type,
+            owner.c.record_id == records.c.record_id,
+            owner.c.organization_id == organization_id,
+        ]
+        principal_id = self._organization_principal_id.get()
+        if principal_id is not None:
+            membership = organization_memberships.alias("record_membership")
+            assignment = engagement_assignments.alias("record_assignment")
+            organization_roles = (
+                ("owner", "admin")
+                if for_write
+                else ("owner", "admin", "auditor", "viewer")
+            )
+            organization_admin = select(membership.c.id).where(
+                membership.c.organization_id == owner.c.organization_id,
+                membership.c.user_id == principal_id,
+                membership.c.status == "active",
+                membership.c.role.in_(organization_roles),
+            ).exists()
+            assignment_conditions = [
+                assignment.c.organization_id == owner.c.organization_id,
+                assignment.c.engagement_id == owner.c.engagement_id,
+                assignment.c.user_id == principal_id,
+                assignment.c.status == "active",
+            ]
+            if self._organization_write_access.get():
+                assignment_conditions.append(
+                    assignment.c.role.in_(("lead", "assessor", "reviewer"))
+                )
+            assigned_engagement = select(assignment.c.id).where(
+                *assignment_conditions
+            ).exists()
+            conditions.append(or_(organization_admin, assigned_engagement))
+        return select(owner.c.record_id).where(*conditions).exists()
 
     def _ensure_record_ownership(
         self,
@@ -979,15 +1250,18 @@ class SQLiteRepository(Repository):
         record_id: str,
         *,
         newly_created: bool = False,
+        payload: dict[str, Any] | None = None,
     ) -> None:
-        organization_id = self._current_organization_id() or self.worker_organization_id
+        organization_id = self._current_organization_id()
         if organization_id is None:
-            return
+            raise StorageError("Repository writes require an authorized organization context.")
+        if not self._organization_write_access.get():
+            raise StorageError("Repository writes require an authorized write context.")
         provenance = self._execution_provenance_context.get()
         engagement_id = (
             provenance["engagement_id"]
             if provenance is not None and provenance["organization_id"] == organization_id
-            else None
+            else self._linked_engagement_id(connection, organization_id, record_type, payload)
         )
         exists = connection.execute(select(record_ownership.c.record_type).where(
             record_ownership.c.record_type == record_type,
@@ -1005,6 +1279,43 @@ class SQLiteRepository(Repository):
             "scan", "finding", "evidence", "artifact", "report", "malware_analysis"
         }:
             self._link_execution_result(connection, record_type, record_id, provenance)
+
+    @staticmethod
+    def _linked_engagement_id(
+        connection: Any,
+        organization_id: str,
+        record_type: str,
+        payload: dict[str, Any] | None,
+    ) -> str | None:
+        """Carry a case's engagement scope from its linked records when unambiguous."""
+        if record_type != "case" or not isinstance(payload, dict):
+            return None
+        links = payload.get("links")
+        if not isinstance(links, list):
+            return None
+        linked_ids = [
+            (item.get("record_type"), item.get("record_id"))
+            for item in links
+            if isinstance(item, dict)
+            and isinstance(item.get("record_type"), str)
+            and isinstance(item.get("record_id"), str)
+        ]
+        if not linked_ids:
+            return None
+        scopes: set[str] = set()
+        for linked_type, linked_id in linked_ids:
+            engagement_id = connection.execute(
+                select(record_ownership.c.engagement_id).where(
+                    record_ownership.c.record_type == linked_type,
+                    record_ownership.c.record_id == linked_id,
+                    record_ownership.c.organization_id == organization_id,
+                )
+            ).scalar_one_or_none()
+            if engagement_id:
+                scopes.add(str(engagement_id))
+        if len(scopes) > 1:
+            raise StorageError("A case cannot combine records from different engagements.")
+        return next(iter(scopes), None)
 
     @staticmethod
     def _link_execution_result(
@@ -1107,9 +1418,8 @@ class SQLiteRepository(Repository):
                 records.c.record_type == record_type,
                 records.c.record_id == record_id,
             ]
-            owner = self._owned_record()
-            if owner is not None:
-                conditions.append(owner)
+            owner = self._owned_record(for_write=True)
+            conditions.append(owner)
             existing = connection.execute(
                 select(records.c.record_id).where(*conditions)
             ).first()
@@ -1129,7 +1439,7 @@ class SQLiteRepository(Repository):
                     )
                 )
             self._ensure_record_ownership(
-                connection, record_type, record_id, newly_created=created
+                connection, record_type, record_id, newly_created=created, payload=payload
             )
 
     def consume_malware_acknowledgement(
@@ -1143,7 +1453,7 @@ class SQLiteRepository(Repository):
                     select(records.c.record_id, records.c.payload).where(
                         records.c.record_type == "malware_ack",
                         records.c.record_id == token_hash,
-                        *([self._owned_record()] if self._owned_record() is not None else []),
+                        self._owned_record(for_write=True),
                     )
                 ).first()
                 if row is None:
@@ -1171,7 +1481,7 @@ class SQLiteRepository(Repository):
                         .where(
                             records.c.record_type == "malware_ack",
                             records.c.record_id == token_hash,
-                            *([self._owned_record()] if self._owned_record() is not None else []),
+                            self._owned_record(for_write=True),
                         )
                         .values(payload=payload)
                     )
@@ -1188,9 +1498,8 @@ class SQLiteRepository(Repository):
                 records.c.record_type == record_type,
                 records.c.record_id == record_id,
             ]
-            owner = self._owned_record()
-            if owner is not None:
-                conditions.append(owner)
+            owner = self._owned_record(for_write=True)
+            conditions.append(owner)
             connection.execute(
                 records.delete().where(*conditions)
             )
@@ -1206,9 +1515,8 @@ class SQLiteRepository(Repository):
                     records.c.record_type == record_type,
                     records.c.record_id == record_id,
                 ]
-                owner = self._owned_record()
-                if owner is not None:
-                    conditions.append(owner)
+                owner = self._owned_record(for_write=True)
+                conditions.append(owner)
                 existing = connection.execute(
                     select(records.c.record_id).where(*conditions)
                 ).first()
@@ -1228,7 +1536,7 @@ class SQLiteRepository(Repository):
                         )
                     )
                 self._ensure_record_ownership(
-                    connection, record_type, record_id, newly_created=created
+                    connection, record_type, record_id, newly_created=created, payload=payload
                 )
 
     def save_malware_intake(
@@ -1254,7 +1562,7 @@ class SQLiteRepository(Repository):
                     .where(
                         records.c.record_type == "malware_job",
                         records.c.payload["status"].as_string().in_(("queued", "running")),
-                        *([self._owned_record()] if self._owned_record() is not None else []),
+                        self._owned_record(for_write=True),
                     )
                 ).scalar_one()
                 if int(active) >= active_limit:
@@ -1296,7 +1604,7 @@ class SQLiteRepository(Repository):
                     .where(
                         records.c.record_type == "malware_job",
                         records.c.payload["status"].as_string().in_(("queued", "running")),
-                        *([self._owned_record()] if self._owned_record() is not None else []),
+                        self._owned_record(for_write=True),
                     )
                 ).scalar_one()
                 if int(active) >= active_limit:
@@ -1308,7 +1616,7 @@ class SQLiteRepository(Repository):
                         records.c.record_type == "malware_job",
                         records.c.payload["sample_id"].as_string() == job.get("sample_id"),
                         records.c.payload["status"].as_string().in_(("queued", "running")),
-                        *([self._owned_record()] if self._owned_record() is not None else []),
+                        self._owned_record(for_write=True),
                     )
                 ).scalar_one()
                 if int(duplicate):
@@ -1344,7 +1652,7 @@ class SQLiteRepository(Repository):
                     .where(
                         records.c.record_type == "malware_job",
                         records.c.payload["status"].as_string() == "running",
-                        *([self._owned_record()] if self._owned_record() is not None else []),
+                        self._owned_record(for_write=True),
                     )
                     .limit(1)
                 ).first()
@@ -1356,7 +1664,7 @@ class SQLiteRepository(Repository):
                     .where(
                         records.c.record_type == "malware_job",
                         records.c.payload["status"].as_string() == "queued",
-                        *([self._owned_record()] if self._owned_record() is not None else []),
+                        self._owned_record(for_write=True),
                     )
                     .order_by(records.c.payload["created_at"].as_string().asc())
                     .limit(1)
@@ -1373,7 +1681,7 @@ class SQLiteRepository(Repository):
                         records.c.record_type == "malware_job",
                         records.c.record_id == row.record_id,
                         records.c.payload["status"].as_string() == "queued",
-                        *([self._owned_record()] if self._owned_record() is not None else []),
+                        self._owned_record(for_write=True),
                     )
                     .values(payload=json.loads(json.dumps(job)))
                 )
@@ -1389,8 +1697,7 @@ class SQLiteRepository(Repository):
     def get(self, record_type: str, record_id: str) -> dict[str, Any] | None:
         conditions = [records.c.record_type == record_type, records.c.record_id == record_id]
         owner = self._owned_record()
-        if owner is not None:
-            conditions.append(owner)
+        conditions.append(owner)
         with self.engine.connect() as connection:
             row = connection.execute(
                 select(records.c.payload).where(*conditions)
@@ -1410,8 +1717,7 @@ class SQLiteRepository(Repository):
                     records.c.record_type == record_type,
                     records.c.record_id.in_(batch),
                 ]
-                if owner is not None:
-                    conditions.append(owner)
+                conditions.append(owner)
                 rows = connection.execute(
                     select(records.c.record_id, records.c.payload).where(*conditions)
                 )
@@ -1422,8 +1728,7 @@ class SQLiteRepository(Repository):
         """Return payloads for one record type from the local SQLite store."""
         conditions = [records.c.record_type == record_type]
         owner = self._owned_record()
-        if owner is not None:
-            conditions.append(owner)
+        conditions.append(owner)
         with self.engine.connect() as connection:
             rows = connection.execute(
                 select(records.c.payload).where(*conditions)
@@ -1454,8 +1759,7 @@ class SQLiteRepository(Repository):
             raise ValueError("record sort field is not allowed")
         conditions = [records.c.record_type == record_type]
         owner = self._owned_record()
-        if owner is not None:
-            conditions.append(owner)
+        conditions.append(owner)
         for field, value in (filters or {}).items():
             if field not in allowed.get(record_type, set()):
                 raise ValueError("record filter field is not allowed")
@@ -1501,8 +1805,7 @@ class SQLiteRepository(Repository):
         if group_by is None:
             conditions = [records.c.record_type == record_type]
             owner = self._owned_record()
-            if owner is not None:
-                conditions.append(owner)
+            conditions.append(owner)
             with self.engine.connect() as connection:
                 return int(
                     connection.execute(
@@ -1516,8 +1819,7 @@ class SQLiteRepository(Repository):
         field = func.json_extract(records.c.payload, f"$.{group_by}")
         conditions = [records.c.record_type == record_type]
         owner = self._owned_record()
-        if owner is not None:
-            conditions.append(owner)
+        conditions.append(owner)
         with self.engine.connect() as connection:
             rows = connection.execute(
                 select(field, func.count())
@@ -1527,4 +1829,6 @@ class SQLiteRepository(Repository):
         return {str(key): int(cast(Any, count)) for key, count in rows if key is not None}
 
     def close(self) -> None:
+        while self._bound_authorizations:
+            self._bound_authorizations.pop().__exit__(None, None, None)
         self.engine.dispose()

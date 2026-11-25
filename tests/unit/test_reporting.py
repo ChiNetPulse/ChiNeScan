@@ -237,9 +237,12 @@ def test_generic_language_coverage_gap_is_near_the_report_top() -> None:
     assert report.index("## Coverage gaps at a glance") < report.index("## Fix first")
 
 
-def test_jsonl_iterator_retrieves_more_than_legacy_cap_exactly_once(tmp_path) -> None:
+def test_jsonl_iterator_retrieves_more_than_legacy_cap_exactly_once(
+    tmp_path, authorize_local_repository
+) -> None:
     total = 10_005
     repository = SQLiteRepository(tmp_path / "large.sqlite3")
+    authorize_local_repository(repository)
     scan = Scan(
         scan_id="large-scan",
         target_id="local",
@@ -282,11 +285,14 @@ def test_jsonl_iterator_retrieves_more_than_legacy_cap_exactly_once(tmp_path) ->
     repository.close()
 
 
-def test_jsonl_iterator_streams_beyond_legacy_byte_cap_with_bounded_records(tmp_path) -> None:
+def test_jsonl_iterator_streams_beyond_legacy_byte_cap_with_bounded_records(
+    tmp_path, authorize_local_repository
+) -> None:
     import hashlib
 
     total = 23
     repository = SQLiteRepository(tmp_path / "large-bytes.sqlite3")
+    authorize_local_repository(repository)
     scan = Scan(
         scan_id="large-bytes-scan",
         target_id="local",
@@ -337,10 +343,13 @@ def test_jsonl_iterator_streams_beyond_legacy_byte_cap_with_bounded_records(tmp_
     repository.close()
 
 
-def test_cli_jsonl_is_machine_readable_and_has_completion_marker(tmp_path) -> None:
+def test_cli_jsonl_is_machine_readable_and_has_completion_marker(
+    tmp_path, local_operator_credentials, authorize_local_repository
+) -> None:
     scan, findings = sample_scan()
     database = tmp_path / "cli-jsonl.sqlite3"
     repository = SQLiteRepository(database)
+    authorize_local_repository(repository)
     repository.save("scan", scan.scan_id, scan.model_dump(mode="json"))
     repository.save("finding", findings[0].finding_id, findings[0].model_dump(mode="json"))
     repository.close()
@@ -355,8 +364,11 @@ def test_cli_jsonl_is_machine_readable_and_has_completion_marker(tmp_path) -> No
     assert rows[-1]["returned_findings"] == 1
 
 
-def test_jsonl_stops_without_completion_for_missing_or_unsafe_records(tmp_path) -> None:
+def test_jsonl_stops_without_completion_for_missing_or_unsafe_records(
+    tmp_path, authorize_local_repository
+) -> None:
     repository = SQLiteRepository(tmp_path / "incomplete.sqlite3")
+    authorize_local_repository(repository)
     scan, findings = sample_scan()
     missing_scan = scan.model_copy(update={"finding_ids": ["missing-id"]})
     repository.save("scan", missing_scan.scan_id, missing_scan.model_dump(mode="json"))
@@ -505,13 +517,16 @@ def test_csv_neutralizes_spreadsheet_formulas() -> None:
     assert rows[0]["description"].startswith("'\t=")
 
 
-def test_case_create_show_update_and_compare(tmp_path, monkeypatch) -> None:
+def test_case_create_show_update_and_compare(
+    tmp_path, monkeypatch, local_operator_credentials, authorize_local_repository
+) -> None:
     database = tmp_path / "cases.sqlite3"
     monkeypatch.setenv("CHINESCAN_DATABASE_PATH", str(database))
     scan, findings = sample_scan()
     from chinescan.core.storage.sqlite import SQLiteRepository
 
     repository = SQLiteRepository(database)
+    authorize_local_repository(repository)
     repository.save("scan", scan.scan_id, scan.model_dump(mode="json"))
     repository.save("finding", findings[0].finding_id, findings[0].model_dump(mode="json"))
     later = scan.model_copy(update={"scan_id": "scan-2"})

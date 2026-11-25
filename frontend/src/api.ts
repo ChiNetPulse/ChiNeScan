@@ -1,4 +1,4 @@
-import type { ApprovedFolder, CaseData, CaseSummary, CodeJob, CodeProject, Finding, FolderPreview, ModuleCapability, Overview, Page, Scan, LogSource, LogEvidence, LogSourceRegistryStatus, LogJob, LogAlert, LogEvent, LogTimeline, MalwareAnalysis, MalwareCapability, MalwareJob, MalwareSample, ProjectDetail, ProjectSummary, ProjectLogLocation, ProjectLogSuggestion, ProjectLogJob, ProjectMalwareJob, MalwareHostHint, FsDirectory, FsPage, GitHubImportCapabilities, GitHubImportPreview, GitHubImportJob, ChainInfo, ChainJob, ChainGraph, DashboardAlert, ModuleScore, Organization, OrganizationMember, Client, Engagement, EngagementAssignment, EngagementAsset, ScopeRevisionRecord, AuthorizationRecord, ApprovalRecord, ExecutionJob, ExecutionProvenance, RepositoryAsset, RegisteredLocalProject, RepositoryQuota, RepositoryRetention } from './types';
+import type { ApprovedFolder, CaseData, CaseSummary, CodeJob, CodeProject, Finding, FolderPreview, ModuleCapability, Overview, Page, Scan, LogSource, LogEvidence, LogSourceRegistryStatus, LogJob, LogAlert, LogEvent, LogTimeline, MalwareAnalysis, MalwareCapability, MalwareJob, MalwareSample, ProjectDetail, ProjectSummary, ProjectLogLocation, ProjectLogSuggestion, ProjectLogJob, ProjectMalwareJob, MalwareHostHint, FsDirectory, FsPage, GitHubImportCapabilities, GitHubImportPreview, GitHubImportJob, ChainInfo, ChainJob, ChainGraph, DashboardAlert, ModuleScore, Organization, OrganizationInvitation, OrganizationMember, TotpStatus, Client, Engagement, EngagementAssignment, EngagementAsset, ScopeRevisionRecord, AuthorizationRecord, ApprovalRecord, ExecutionJob, ExecutionProvenance, RepositoryAsset, RegisteredLocalProject, RepositoryQuota, RepositoryRetention, ExecutionQuota, GlobalExecutionDiagnostics, MalwareEvidence } from './types';
 
 export function safeLocalUrl(value: unknown): string | null {
   if (typeof value !== 'string' || value.trim() !== value || !value.startsWith('/') || value.startsWith('//') || value.includes('\\')) return null;
@@ -73,6 +73,15 @@ export const api = {
   governedExecution: (org: string, engagement: string, id: string) => request<ExecutionJob>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/executions/${encodeURIComponent(id)}`),
   governedExecutionProvenance: (org: string, engagement: string, id: string) => request<ExecutionProvenance>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/executions/${encodeURIComponent(id)}/provenance`),
   cancelGovernedExecution: (org: string, engagement: string, id: string) => request<ExecutionJob & { cancellation_outcome: 'requested' | 'completed'; idempotent: boolean }>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/executions/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
+  executionQuota: (org: string, engagement: string) => request<ExecutionQuota>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/executions/quota`),
+  executionResourceDiagnostics: () => request<GlobalExecutionDiagnostics>('/api/diagnostics/execution-resources'),
+  malwareEvidence: (org: string, engagement: string) => request<{ items: MalwareEvidence[] }>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/malware-evidence`),
+  registerMalwareEvidence: (org: string, engagement: string, body: { source_registry_id: string; classification?: string }) => request<MalwareEvidence>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/malware-evidence`, { method: 'POST', body: JSON.stringify(body) }),
+  startGovernedMalwareTriage: (org: string, engagement: string, asset_id: string, idempotency_key: string) => request<ExecutionJob>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/malware-evidence/${encodeURIComponent(asset_id)}/executions`, { method: 'POST', body: JSON.stringify({ idempotency_key }) }),
+  holdMalwareEvidence: (org: string, engagement: string, asset_id: string, reason: string) => request<void>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/malware-evidence/${encodeURIComponent(asset_id)}/hold`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  deleteMalwareEvidence: (org: string, engagement: string, asset_id: string) => request<void>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/malware-evidence/${encodeURIComponent(asset_id)}`, { method: 'DELETE' }),
+  startGovernedChainImport: (org: string, engagement: string, body: { asset_id: string; chain: string; seed: string; depth: number; idempotency_key: string }) => request<ExecutionJob>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/chain-traces/imports`, { method: 'POST', body: JSON.stringify(body) }),
+  startGovernedChainProviderLookup: (org: string, engagement: string, body: { asset_id: string; approval_id: string; idempotency_key: string }) => request<ExecutionJob>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/chain-traces/provider-lookups`, { method: 'POST', body: JSON.stringify(body) }),
   engagementAudit: (org: string, engagement: string) => request<{ items: Array<{ action: string; decision: string | null; reason_code: string | null; occurred_at: string }> }>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/audit`),
   dashboardScores: () => request<ModuleScore[]>('/api/dashboard/scores'),
   alerts: (includeResolved = false) => request<DashboardAlert[]>(`/api/alerts?limit=100&include_resolved=${includeResolved}`),
@@ -95,18 +104,32 @@ export const api = {
   organizationMembers: (id: string) => request<{ items: OrganizationMember[] }>(`/api/organizations/${encodeURIComponent(id)}/members`),
   addOrganizationMember: (id: string, user_id: string, role: string) => request<OrganizationMember>(`/api/organizations/${encodeURIComponent(id)}/members`, { method: 'POST', body: JSON.stringify({ user_id, role }) }),
   updateOrganizationMember: (id: string, user_id: string, changes: { role?: string; status?: string }) => request<OrganizationMember>(`/api/organizations/${encodeURIComponent(id)}/members/${encodeURIComponent(user_id)}`, { method: 'PATCH', body: JSON.stringify(changes) }),
+  organizationInvitations: (id: string) => request<{ items: OrganizationInvitation[] }>(`/api/organizations/${encodeURIComponent(id)}/invitations`),
+  createOrganizationInvitation: (id: string, email: string, role: string) => request<OrganizationInvitation>(`/api/organizations/${encodeURIComponent(id)}/invitations`, { method: 'POST', body: JSON.stringify({ email, role }) }),
+  revokeOrganizationInvitation: (id: string, invitationId: string) => request<{ status: string }>(`/api/organizations/${encodeURIComponent(id)}/invitations/${encodeURIComponent(invitationId)}/revoke`, { method: 'POST', body: '{}' }),
   organizationEngagements: (id: string) => request<{ items: Engagement[] }>(`/api/organizations/${encodeURIComponent(id)}/engagements`),
   createOrganizationEngagement: (id: string, name: string, description: string, client_id: string | null) => request<Engagement>(`/api/organizations/${encodeURIComponent(id)}/engagements`, { method: 'POST', body: JSON.stringify({ name, description, client_id }) }),
   engagementAssignments: (organization_id: string, engagement_id: string) => request<{ items: EngagementAssignment[] }>(`/api/organizations/${encodeURIComponent(organization_id)}/engagements/${encodeURIComponent(engagement_id)}/assignments`),
   createEngagementAssignment: (organization_id: string, engagement_id: string, user_id: string, role: string) => request<EngagementAssignment>(`/api/organizations/${encodeURIComponent(organization_id)}/engagements/${encodeURIComponent(engagement_id)}/assignments`, { method: 'POST', body: JSON.stringify({ user_id, role }) }),
   updateEngagementAssignment: (organization_id: string, engagement_id: string, user_id: string, status: string) => request<EngagementAssignment>(`/api/organizations/${encodeURIComponent(organization_id)}/engagements/${encodeURIComponent(engagement_id)}/assignments/${encodeURIComponent(user_id)}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
   csrf: () => request<{ csrf_token: string }>('/api/auth/csrf'),
-  login: (email: string, password: string) => request<{ email: string; csrf_token: string }>('/api/auth/login', {
-    method: 'POST', body: JSON.stringify({ email, password }),
+  login: (email: string, password: string, totp_code?: string) => request<{ email: string; csrf_token: string }>('/api/auth/login', {
+    method: 'POST', body: JSON.stringify(totp_code ? { email, password, totp_code } : { email, password }),
   }),
   signup: (email: string, password: string) => request<{ email: string; csrf_token: string }>('/api/auth/signup', {
     method: 'POST', body: JSON.stringify({ email, password }),
   }),
+  acceptInvitation: (token: string, password?: string, display_name?: string) => request<{ email: string; csrf_token: string; organization_id: string; role: string }>('/api/auth/invitations/accept', {
+    method: 'POST', body: JSON.stringify({ token, ...(password ? { password } : {}), ...(display_name ? { display_name } : {}) }),
+  }),
+  changePassword: (current_password: string, new_password: string) => request<{ status: string; csrf_token: string }>('/api/auth/password/change', {
+    method: 'POST', body: JSON.stringify({ current_password, new_password }),
+  }),
+  totpStatus: () => request<TotpStatus>('/api/auth/totp'),
+  totpEnroll: () => request<{ secret: string; otpauth_uri: string }>('/api/auth/totp/enroll', { method: 'POST', body: '{}' }),
+  totpConfirm: (code: string) => request<{ totp_enabled: boolean; recovery_codes: string[] }>('/api/auth/totp/confirm', { method: 'POST', body: JSON.stringify({ code }) }),
+  totpDisable: (code: string) => request<{ totp_enabled: boolean }>('/api/auth/totp/disable', { method: 'POST', body: JSON.stringify({ code }) }),
+  totpRegenerateRecoveryCodes: (code: string) => request<{ recovery_codes: string[] }>('/api/auth/totp/recovery-codes', { method: 'POST', body: JSON.stringify({ code }) }),
   forgotPassword: (email: string) => request<{ status: string }>('/api/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) }),
   resetPassword: (email: string, token: string, password: string) => request<{ status: string }>('/api/auth/reset-password', { method: 'POST', body: JSON.stringify({ email, token, password }) }),
   logout: () => request<{ status: string }>('/api/auth/logout', { method: 'POST' }),

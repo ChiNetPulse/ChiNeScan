@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import authorize_test_operator
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
@@ -167,6 +168,7 @@ def _service(
     tmp_path.mkdir(parents=True, exist_ok=True)
     database = tmp_path / "private" / "records.sqlite3"
     repository = SQLiteRepository(database)
+    authorize_test_operator(repository)
     settings = Settings(
         _env_file=None,
         database_path=database,
@@ -521,38 +523,40 @@ def test_api_preview_then_import_job_is_session_bound_and_path_free(tmp_path, mo
         assert malware_job.status_code == 202, malware_job.text
         assert str(tmp_path) not in assessed.text + acknowledgement.text + malware_job.text
         assert str(target_tmp_path) not in assessed.text + acknowledgement.text + malware_job.text
-        import_record = next(
-            item
-            for item in application.state.repository.list_records("github_import_job")
-            if item.get("project_id") == project_id
-        )
+        with application.state.repository.local_operator_context():
+            import_record = next(
+                item
+                for item in application.state.repository.list_records("github_import_job")
+                if item.get("project_id") == project_id
+            )
         clone_path = manager.managed_directory / str(import_record["job_id"])
         assert clone_path.is_dir()
         repository = application.state.repository
-        repository.save(
-            "scan",
-            "scan-fixture-github",
-            {
-                "scan_id": "scan-fixture-github",
-                "project_id": project_id,
-                "finding_ids": ["finding-fixture-github"],
-            },
-        )
-        repository.save(
-            "finding",
-            "finding-fixture-github",
-            {"finding_id": "finding-fixture-github", "project_id": project_id},
-        )
-        repository.save(
-            "code_job",
-            "code-job-fixture-github",
-            {"job_id": "code-job-fixture-github", "project_id": project_id},
-        )
-        repository.save(
-            "case",
-            "case-fixture-github",
-            {"case_id": "case-fixture-github", "scan_ids": ["scan-fixture-github"]},
-        )
+        with repository.local_operator_context():
+            repository.save(
+                "scan",
+                "scan-fixture-github",
+                {
+                    "scan_id": "scan-fixture-github",
+                    "project_id": project_id,
+                    "finding_ids": ["finding-fixture-github"],
+                },
+            )
+            repository.save(
+                "finding",
+                "finding-fixture-github",
+                {"finding_id": "finding-fixture-github", "project_id": project_id},
+            )
+            repository.save(
+                "code_job",
+                "code-job-fixture-github",
+                {"job_id": "code-job-fixture-github", "project_id": project_id},
+            )
+            repository.save(
+                "case",
+                "case-fixture-github",
+                {"case_id": "case-fixture-github", "scan_ids": ["scan-fixture-github"]},
+            )
         removed = client.request(
             "DELETE",
             f"/api/projects/{project_id}",
@@ -567,11 +571,12 @@ def test_api_preview_then_import_job_is_session_bound_and_path_free(tmp_path, mo
             ("code_job", "job_id", "code-job-fixture-github"),
             ("case", "case_id", "case-fixture-github"),
         ):
-            saved_record = next(
-                item
-                for item in repository.list_records(record_type)
-                if item.get(key_name) == record_id
-            )
+            with repository.local_operator_context():
+                saved_record = next(
+                    item
+                    for item in repository.list_records(record_type)
+                    if item.get(key_name) == record_id
+                )
             assert saved_record["project_removed"] is True
         assert str(tmp_path) not in current.text
         assert str(target_tmp_path) not in current.text
@@ -718,7 +723,9 @@ def test_github_api_origin_csrf_auth_and_rate_limit(tmp_path, monkeypatch) -> No
         client.close()
 
 
-def test_cli_import_requires_yes_after_printing_path_free_preview(tmp_path) -> None:
+def test_cli_import_requires_yes_after_printing_path_free_preview(
+    tmp_path, local_operator_credentials
+) -> None:
     config = tmp_path / "github-enabled.toml"
     database = tmp_path / "cli-records.sqlite3"
     config.write_text(
@@ -746,7 +753,9 @@ def test_cli_import_requires_yes_after_printing_path_free_preview(tmp_path) -> N
     assert str(tmp_path) not in result.output
 
 
-def test_cli_preview_matches_api_canonical_url_and_ref(tmp_path) -> None:
+def test_cli_preview_matches_api_canonical_url_and_ref(
+    tmp_path, local_operator_credentials
+) -> None:
     config = tmp_path / "github-enabled.toml"
     config.write_text("github_import_enabled = true\n", encoding="utf-8")
     cli = CliRunner().invoke(

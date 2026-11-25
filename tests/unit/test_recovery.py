@@ -10,10 +10,12 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from conftest import authorize_test_operator
 from typer.testing import CliRunner
 
 from chinescan.cli.app import app
 from chinescan.core.cases import CaseWorkflow
+from chinescan.core.errors import StorageError
 from chinescan.core.models.investigation import (
     Case,
     CaseActivity,
@@ -41,6 +43,7 @@ FIXTURE_ROOT = Path(__file__).parents[2] / "fixtures" / "sample-logs"
 
 def _source(path: Path) -> None:
     repo = SQLiteRepository(path)
+    authorize_test_operator(repo)
     target = Target(value="fixture-host", kind="local")
     repo.save("target", "target-fixture", target.model_dump(mode="json"))
     repo.close()
@@ -59,6 +62,7 @@ def _write_manifest(path: Path, value: dict[str, object]) -> None:
 def test_backup_verify_and_restore_preserve_a_complete_case_recovery_drill(tmp_path: Path) -> None:
     source = tmp_path / "working.sqlite3"
     repository = SQLiteRepository(source)
+    _operator_id, organization_id = authorize_test_operator(repository)
     log_result = LogAnalysisService(repository).analyze(FIXTURE_ROOT)
     workflow = CaseWorkflow(repository)
     case, warnings = workflow.create_from_scan(log_result.scan_id, title="Recovery drill")
@@ -89,28 +93,29 @@ def test_backup_verify_and_restore_preserve_a_complete_case_recovery_drill(tmp_p
     }
     assert "path" not in json.dumps(manifest).lower()
     verified = verify_backup(bundle)
-    assert verified.verified and verified.migration_revision == "0013_governed_chain_trace"
+    assert verified.verified and verified.migration_revision == "0015_durable_job_leases_actions"
 
     restored_path = tmp_path / "restored.sqlite3"
     restored = restore_backup(bundle, restored_path, active_database_path=source)
     assert (
         restored.original_revision
         == restored.resulting_revision
-        == "0013_governed_chain_trace"
+        == "0015_durable_job_leases_actions"
     )
     restored_repository = SQLiteRepository(restored_path)
     try:
-        recovered = CaseWorkflow(restored_repository).get_case(original.case_id)
-        assert recovered.case_id == original.case_id
-        assert recovered.status == CaseStatus.RESOLVED
-        assert recovered.scan_ids == original.scan_ids
-        assert recovered.links == original.links
-        assert recovered.notes == original.notes
-        assert recovered.activities == original.activities
-        for report_format in ("json", "markdown", "html"):
-            report = render_case_report(restored_repository, recovered.case_id, report_format)
-            assert "Recovery drill" in report
-            assert "Retain this local analyst note" in report
+        with restored_repository.organization_context(organization_id):
+            recovered = CaseWorkflow(restored_repository).get_case(original.case_id)
+            assert recovered.case_id == original.case_id
+            assert recovered.status == CaseStatus.RESOLVED
+            assert recovered.scan_ids == original.scan_ids
+            assert recovered.links == original.links
+            assert recovered.notes == original.notes
+            assert recovered.activities == original.activities
+            for report_format in ("json", "markdown", "html"):
+                report = render_case_report(restored_repository, recovered.case_id, report_format)
+                assert "Recovery drill" in report
+                assert "Retain this local analyst note" in report
     finally:
         restored_repository.close()
     assert bundle.is_dir() and verify_backup(bundle).verified
@@ -262,6 +267,7 @@ def test_verifier_reports_dangling_links_and_invalid_payloads_without_repair(
 ) -> None:
     source = tmp_path / "inconsistent.sqlite3"
     repository = SQLiteRepository(source)
+    _operator_id, organization_id = authorize_test_operator(repository)
     case = Case(
         case_id="case-dangling",
         title="Dangling link",
@@ -296,7 +302,8 @@ def test_verifier_reports_dangling_links_and_invalid_payloads_without_repair(
     assert verify_backup(bundle).application_issues == result.verification.application_issues
     restored = SQLiteRepository(source)
     try:
-        assert restored.get("case", "case-dangling")["links"][0]["record_id"] == "missing"
+        with restored.organization_context(organization_id):
+            assert restored.get("case", "case-dangling")["links"][0]["record_id"] == "missing"
     finally:
         restored.close()
 
@@ -339,10 +346,16 @@ def test_restore_upgrades_only_the_copy_and_rejects_existing_or_active_destinati
     destination = tmp_path / "restored-legacy.sqlite3"
     restored = restore_backup(bundle, destination, active_database_path=source)
     assert restored.original_revision == "0001_initial"
-    assert restored.resulting_revision == "0013_governed_chain_trace"
+    assert restored.resulting_revision == "0015_durable_job_leases_actions"
     repo = SQLiteRepository(destination)
     try:
-        assert repo.get("case", "legacy-case")["title"] == "Legacy retained"
+        with pytest.raises(StorageError, match="authorized organization context"):
+            repo.get("case", "legacy-case")
+        with repo.engine.connect() as connection:
+            raw = connection.exec_driver_sql(
+                "SELECT payload FROM records WHERE record_type='case' AND record_id='legacy-case'"
+            ).scalar_one()
+        assert json.loads(raw)["title"] == "Legacy retained"
     finally:
         repo.close()
     with pytest.raises(RecoveryInputError, match="already exists"):
@@ -388,10 +401,17 @@ def test_unversioned_supported_schema_verifies_read_only_and_migrates_restored_c
     destination = tmp_path / "unversioned-restored.sqlite3"
     restored = restore_backup(bundle, destination)
     assert restored.original_revision is None
-    assert restored.resulting_revision == "0013_governed_chain_trace"
+    assert restored.resulting_revision == "0015_durable_job_leases_actions"
     repository = SQLiteRepository(destination)
     try:
-        assert repository.get("target", "unversioned-target")["value"] == "retained"
+        with pytest.raises(StorageError, match="authorized organization context"):
+            repository.get("target", "unversioned-target")
+        with repository.engine.connect() as connection:
+            raw = connection.exec_driver_sql(
+                "SELECT payload FROM records WHERE record_type='target' "
+                "AND record_id='unversioned-target'"
+            ).scalar_one()
+        assert json.loads(raw)["value"] == "retained"
     finally:
         repository.close()
 
@@ -453,9 +473,12 @@ def test_retention_does_not_follow_symlink_to_an_outside_directory(tmp_path: Pat
     assert plan.entries[0].disposition == "skipped"
 
 
-def test_cli_database_commands_and_case_export_never_overwrite(tmp_path: Path, monkeypatch) -> None:
+def test_cli_database_commands_and_case_export_never_overwrite(
+    tmp_path: Path, monkeypatch, local_operator_credentials, authorize_local_repository
+) -> None:
     source = tmp_path / "active.sqlite3"
     repository = SQLiteRepository(source)
+    authorize_local_repository(repository)
     case = Case(case_id="case-cli-recovery", title="CLI recovery")
     repository.save("case", case.case_id, case.model_dump(mode="json"))
     repository.close()
@@ -490,8 +513,26 @@ def test_cli_database_commands_and_case_export_never_overwrite(tmp_path: Path, m
     assert not list(tmp_path.glob(".case.html.*.tmp"))
 
 
+def test_cli_database_backup_requires_explicit_local_operator_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "tenant-data.sqlite3"
+    _source(source)
+    monkeypatch.setenv("CHINESCAN_DATABASE_PATH", str(source))
+    monkeypatch.setenv(
+        "CHINESCAN_OPERATOR_CREDENTIAL_FILE", str(tmp_path / "no-operator.json")
+    )
+    bundle = tmp_path / "unauthorized-backup"
+
+    result = runner.invoke(app, ["db", "backup", "--output", str(bundle)])
+
+    assert result.exit_code == 1
+    assert "Authorized local operator access is required" in result.output
+    assert not bundle.exists()
+
+
 def test_cli_cutover_and_rollback_drill_uses_explicit_paths_and_preserves_divergence(
-    tmp_path: Path,
+    tmp_path: Path, local_operator_credentials,
 ) -> None:
     from scripts.recovery_acceptance import ROLLBACK_NOTE, run_drill
 
@@ -505,8 +546,10 @@ def test_cli_cutover_and_rollback_drill_uses_explicit_paths_and_preserves_diverg
     )
 
     case_id = result["case_id"]
-    original_repository = SQLiteRepository(original)
-    restored_repository = SQLiteRepository(restored)
+    from chinescan.cli.commands import _local_cli_repository
+
+    original_repository = _local_cli_repository(original)
+    restored_repository = _local_cli_repository(restored)
     try:
         original_case = CaseWorkflow(original_repository).get_case(case_id)
         restored_case = CaseWorkflow(restored_repository).get_case(case_id)
@@ -545,12 +588,16 @@ def test_failed_backup_verification_blocks_restore_and_preserves_original(tmp_pa
 
 
 def test_case_export_publication_failure_cleans_temporary_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    local_operator_credentials,
+    authorize_local_repository,
 ) -> None:
     from chinescan.cli import commands
 
     source = tmp_path / "export-failure.sqlite3"
     repository = SQLiteRepository(source)
+    authorize_local_repository(repository)
     case = Case(case_id="case-publish-failure", title="Publish failure")
     repository.save("case", case.case_id, case.model_dump(mode="json"))
     repository.close()

@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from chinescan.core.accounts import Session
 from chinescan.core.execution_governance import ExecutionGovernanceService, GovernedDomainWorker
+from chinescan.core.resource_governance import ResourceLimitError
 
 
 class DomainExecutionRequest(BaseModel):
@@ -69,6 +70,11 @@ def create_execution_router(
                 approval_id=payload.approval_id,
                 idempotency_key=payload.idempotency_key,
             )
+        except ResourceLimitError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": exc.message, "details": exc.details},
+            ) from None
         except OverflowError:
             raise HTTPException(
                 status_code=429,
@@ -95,6 +101,18 @@ def create_execution_router(
                 },
             )
         return result
+
+    @router.get("/quota")
+    def get_execution_quota(
+        organization_id: str,
+        engagement_id: str,
+        session: Session = Depends(current_session),
+    ) -> dict[str, Any]:
+        del engagement_id
+        try:
+            return governance.get_organization_resource_usage(principal(session), organization_id)
+        except PermissionError:
+            raise HTTPException(status_code=404, detail="Organization not found.") from None
 
     @router.get("/{job_id}")
     def get_execution(

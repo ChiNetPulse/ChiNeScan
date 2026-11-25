@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from chinescan.core.storage.sqlite import SQLiteRepository
+from conftest import authorize_test_operator
 from chinescan.web.app import create_app
 from chinescan.web.auth import create_operator
 from chinescan.web.code_jobs import (
@@ -177,6 +178,7 @@ def test_queue_bound_and_restart_interruption(tmp_path: Path) -> None:
     fixture.mkdir()
     config, _ = _registry(tmp_path, fixture)
     repo = SQLiteRepository(tmp_path / "records.sqlite3")
+    authorize_test_operator(repo)
     import threading
 
     manager = CodeJobManager(repo, threading.RLock(), ProjectRegistry(config, []), queue_limit=0)
@@ -198,6 +200,7 @@ def test_completed_code_job_saves_reports(tmp_path: Path) -> None:
     (project / "app.py").write_text("print('fixture')\n", encoding="utf-8")
     config, _ = _registry(tmp_path, project)
     repository = SQLiteRepository(tmp_path / "reports.sqlite3")
+    authorize_test_operator(repository)
     reports_dir = tmp_path / "reports"
     manager = CodeJobManager(
         repository,
@@ -229,6 +232,7 @@ def test_report_store_failure_warns_without_failing_completed_job(tmp_path: Path
     (project / "app.py").write_text("print('fixture')\n", encoding="utf-8")
     config, _ = _registry(tmp_path, project)
     repository = SQLiteRepository(tmp_path / "reports-error.sqlite3")
+    authorize_test_operator(repository)
     reports_file = tmp_path / "not-a-directory"
     reports_file.write_text("fixture", encoding="utf-8")
     manager = CodeJobManager(
@@ -264,6 +268,7 @@ def test_scanner_and_persistence_failures_have_distinct_persisted_outcomes(
     (project / "app.py").write_text("print('fixture')\n", encoding="utf-8")
     config, _ = _registry(tmp_path, project)
     repository = SQLiteRepository(tmp_path / "records.sqlite3")
+    authorize_test_operator(repository)
     manager = CodeJobManager(repository, threading.RLock(), ProjectRegistry(config, []))
 
     def broken_scanner(_scanner, _profile):
@@ -319,6 +324,7 @@ def test_shutdown_waits_for_active_scan_and_persists_terminal_state(
     (project / "app.py").write_text("print('fixture')\n", encoding="utf-8")
     config, _ = _registry(tmp_path, project)
     repository = SQLiteRepository(tmp_path / "records.sqlite3")
+    authorize_test_operator(repository)
     manager = CodeJobManager(repository, threading.RLock(), ProjectRegistry(config, []))
     entered, release = threading.Event(), threading.Event()
     original_scan = CodeScanService.scan

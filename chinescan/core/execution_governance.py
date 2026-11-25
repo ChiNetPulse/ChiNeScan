@@ -8,14 +8,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import func, or_, select, update
 
+from chinescan.chain_trace.registry import CHAINS, normalize_address
+from chinescan.core.chain_trace_execution import (
+    CHAIN_IMPORT_TECHNIQUE,
+    CHAIN_PROVIDER_TECHNIQUE,
+)
 from chinescan.core.engagement_security import (
     EngagementSecurityService,
     _stamp,
@@ -31,15 +38,16 @@ from chinescan.core.execution_adapters import (
 )
 from chinescan.core.organizations import now_iso
 from chinescan.core.repository_assessment import REPOSITORY_TECHNIQUE
-from chinescan.core.chain_trace_execution import (
-    CHAIN_IMPORT_TECHNIQUE,
-    CHAIN_PROVIDER_TECHNIQUE,
+from chinescan.core.resource_governance import (
+    ExecutionDeadlineExceeded,
+    ResourceLimitError,
+    ResourceLimits,
 )
-from chinescan.chain_trace.registry import CHAINS, normalize_address
 from chinescan.core.storage.sqlite import (
     approval_requests,
     authorization_documents,
     engagement_assets,
+    execution_action_attempts,
     execution_jobs,
     execution_result_provenance,
     log_evidence_snapshots,
@@ -47,12 +55,18 @@ from chinescan.core.storage.sqlite import (
     repository_asset_bindings,
     repository_attestations,
     repository_snapshots,
+    worker_leases,
 )
 from chinescan.domain_assessment.probe import ExecutionCancelled, ExecutionStopped
 
 JOB_CONTEXT_TTL = timedelta(minutes=10)
 ACTIVE_JOB_LIMIT = 4
 GLOBAL_ACTIVE_JOB_LIMIT = 16
+DEFAULT_LEASE_DURATION_SECONDS = 30.0
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 10.0
+MIN_LEASE_DURATION_SECONDS = 5.0
+MAX_LEASE_DURATION_SECONDS = 3600.0
+DEFAULT_SHUTDOWN_GRACE_SECONDS = 5.0
 
 
 class ExecutionGovernanceService:
@@ -63,11 +77,13 @@ class ExecutionGovernanceService:
         security: EngagementSecurityService,
         adapters: AdapterRegistry | None = None,
         repository_scan_bounds: dict[str, Any] | None = None,
+        resource_limits: ResourceLimits | None = None,
     ) -> None:
         self.security = security
         self.engine = security.engine
         self.adapters = adapters or build_default_adapter_registry(security.repository)
         self.repository_scan_bounds = dict(repository_scan_bounds or {})
+        self.resource_limits = resource_limits or ResourceLimits()
 
     def create_domain_job(
         self,
@@ -576,11 +592,28 @@ class ExecutionGovernanceService:
                         execution_jobs.c.status.in_(["queued", "claimed", "running"])
                     )
                 ).fetchall()
-                if (
-                    len(active_count) >= ACTIVE_JOB_LIMIT
-                    or len(global_active_count) >= GLOBAL_ACTIVE_JOB_LIMIT
-                ):
-                    raise OverflowError("The governed execution queue is full.")
+                if len(active_count) >= self.resource_limits.per_org_queued_limit:
+                    connection.rollback()
+                    raise ResourceLimitError(
+                        "org_quota_exceeded",
+                        "Organization governed execution queue limit exceeded.",
+                        status_code=429,
+                        details={
+                            "limit": self.resource_limits.per_org_queued_limit,
+                            "current": len(active_count),
+                        },
+                    )
+                if len(global_active_count) >= self.resource_limits.global_queued_limit:
+                    connection.rollback()
+                    raise ResourceLimitError(
+                        "execution_queue_full",
+                        "The governed execution queue is full.",
+                        status_code=429,
+                        details={
+                            "limit": self.resource_limits.global_queued_limit,
+                            "current": len(global_active_count),
+                        },
+                    )
                 connection.execute(execution_jobs.insert().values(**item))
                 if item["action_class"] == "sensitive":
                     self.security._audit(
@@ -878,7 +911,13 @@ class ExecutionGovernanceService:
                 connection.rollback()
                 raise
 
-    def observe_cancellation(self, job_id: str) -> bool:
+    def observe_cancellation(
+        self,
+        job_id: str,
+        *,
+        worker_id: str | None = None,
+        lease_generation: int | None = None,
+    ) -> bool:
         """Atomically record worker observation and complete a persisted cancellation."""
         with self.engine.connect() as connection:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
@@ -894,7 +933,74 @@ class ExecutionGovernanceService:
                     connection.rollback()
                     return False
                 item = dict(row._mapping)
+                if not self._lease_fenced(
+                    item, worker_id, lease_generation, time.time(), check_expiry=False
+                ):
+                    connection.rollback()
+                    return False
+                in_progress = connection.execute(
+                    select(execution_action_attempts).where(
+                        execution_action_attempts.c.job_id == job_id,
+                        execution_action_attempts.c.state.in_(
+                            ["in_progress", "outcome_uncertain", "reconciliation_required"]
+                        ),
+                    )
+                ).first()
                 stamp = item["cancellation_observed_at"] or now_iso()
+                if in_progress is not None:
+                    if in_progress.state == "in_progress":
+                        connection.execute(
+                            update(execution_action_attempts)
+                            .where(
+                                execution_action_attempts.c.id == in_progress.id,
+                                execution_action_attempts.c.state == "in_progress",
+                            )
+                            .values(
+                                state="outcome_uncertain",
+                                outcome_classification="cancelled_during_in_progress",
+                                updated_at=stamp,
+                            )
+                        )
+                    connection.execute(
+                        update(execution_jobs)
+                        .where(
+                            execution_jobs.c.id == job_id,
+                            execution_jobs.c.status == item["status"],
+                        )
+                        .values(
+                            status="reconciliation_required",
+                            cancellation_observed_at=stamp,
+                            finished_at=stamp,
+                            error_code="CANCELLATION_OUTCOME_UNCERTAIN",
+                        )
+                    )
+                    self.security._audit(
+                        connection,
+                        item["organization_id"],
+                        item["engagement_id"],
+                        item["cancellation_requested_by"] or item["requester_user_id"],
+                        "execution.cancellation_outcome_uncertain",
+                        "execution_job",
+                        job_id,
+                        decision="DENY",
+                        reason_code="CANCELLATION_DURING_EXTERNAL_ACTION",
+                        details={"action_id": in_progress.id},
+                    )
+                    connection.commit()
+                    return True
+                connection.execute(
+                    update(execution_action_attempts)
+                    .where(
+                        execution_action_attempts.c.job_id == job_id,
+                        execution_action_attempts.c.state.in_(["not_started", "authorized"]),
+                    )
+                    .values(
+                        state="failed_before_dispatch",
+                        outcome_classification="cancelled_before_dispatch",
+                        completed_at=stamp,
+                        updated_at=stamp,
+                    )
+                )
                 connection.execute(
                     update(execution_jobs)
                     .where(
@@ -1217,14 +1323,111 @@ class ExecutionGovernanceService:
                 item["organization_id"],
                 item["engagement_id"],
             )
-            if approver_role not in {"owner", "admin"} and not approver_assignments.intersection(
-                {"lead", "reviewer"}
+            if approver_role not in {"owner", "admin"} and not (
+                approver_role == "member"
+                and approver_assignments.intersection({"lead", "reviewer"})
             ):
                 return False, "APPROVER_NO_LONGER_AUTHORIZED"
         return True, "EXECUTION_CONTEXT_VALID"
 
-    def authorize_external_action(self, job_id: str, target: str, technique: str) -> bool:
-        """Revalidate an action and consume sensitive approval at its first boundary."""
+    @staticmethod
+    def _validate_lease_bounds(
+        lease_duration_seconds: float, heartbeat_interval_seconds: float | None = None
+    ) -> float:
+        if not (MIN_LEASE_DURATION_SECONDS <= lease_duration_seconds <= MAX_LEASE_DURATION_SECONDS):
+            raise ValueError("Lease duration must be between 5 and 3600 seconds.")
+        if heartbeat_interval_seconds is not None and not (
+            0.05 <= heartbeat_interval_seconds <= lease_duration_seconds / 2.0
+        ):
+            raise ValueError("Heartbeat interval must be <= half of the lease duration.")
+        return float(lease_duration_seconds)
+
+    @staticmethod
+    def _lease_fenced(
+        item: dict[str, Any],
+        worker_id: str | None,
+        lease_generation: int | None,
+        ts: float,
+        *,
+        check_expiry: bool = True,
+    ) -> bool:
+        if worker_id is None and lease_generation is None:
+            return True
+        if worker_id is None or lease_generation is None:
+            return False
+        if item.get("worker_id") != worker_id:
+            return False
+        if int(item.get("lease_generation") or 0) != int(lease_generation):
+            return False
+        if check_expiry:
+            exp = item.get("lease_expires_at")
+            if exp is None or float(exp) <= ts:
+                return False
+        return True
+
+    def register_worker(self, worker_id: str, *, now: float | None = None) -> None:
+        ts = time.time() if now is None else float(now)
+        stamp = now_iso()
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    select(worker_leases.c.worker_id).where(
+                        worker_leases.c.worker_id == worker_id
+                    )
+                ).first()
+                if existing is None:
+                    connection.execute(
+                        worker_leases.insert().values(
+                            worker_id=worker_id,
+                            status="active",
+                            started_at=stamp,
+                            last_heartbeat_at=ts,
+                            stopped_at=None,
+                        )
+                    )
+                else:
+                    connection.execute(
+                        update(worker_leases)
+                        .where(worker_leases.c.worker_id == worker_id)
+                        .values(status="active", last_heartbeat_at=ts, stopped_at=None)
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def mark_worker_stopping(self, worker_id: str, *, now: float | None = None) -> None:
+        ts = time.time() if now is None else float(now)
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(worker_leases)
+                .where(worker_leases.c.worker_id == worker_id)
+                .values(status="stopping", last_heartbeat_at=ts)
+            )
+
+    def unregister_worker(self, worker_id: str, *, now: float | None = None) -> None:
+        ts = time.time() if now is None else float(now)
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(worker_leases)
+                .where(worker_leases.c.worker_id == worker_id)
+                .values(status="stopped", last_heartbeat_at=ts, stopped_at=now_iso())
+            )
+
+    def authorize_external_action(
+        self,
+        job_id: str,
+        target: str,
+        technique: str,
+        *,
+        worker_id: str | None = None,
+        lease_generation: int | None = None,
+        adapter_id: str | None = None,
+        now: float | None = None,
+    ) -> bool:
+        """Revalidate an action, persist durable intent, and consume sensitive approval."""
+        ts = time.time() if now is None else float(now)
         with self.engine.connect() as connection:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             try:
@@ -1238,6 +1441,9 @@ class ExecutionGovernanceService:
                     connection.rollback()
                     return False
                 item = dict(row._mapping)
+                if not self._lease_fenced(item, worker_id, lease_generation, ts):
+                    connection.rollback()
+                    return False
 
                 def block(reason: str, *, approval_failure: bool = False) -> bool:
                     now_text = now_iso()
@@ -1295,10 +1501,130 @@ class ExecutionGovernanceService:
 
                 if target != item["target"] or technique != item["technique"]:
                     return block("EXECUTION_CONTEXT_MISMATCH")
+
+                eff_worker_id = worker_id or item.get("worker_id") or "local-worker"
+                eff_gen = (
+                    int(lease_generation)
+                    if lease_generation is not None
+                    else int(item.get("lease_generation") or 0)
+                )
+                prior_attempts = connection.execute(
+                    select(execution_action_attempts)
+                    .where(execution_action_attempts.c.job_id == job_id)
+                    .order_by(execution_action_attempts.c.action_sequence.desc())
+                ).all()
+                same_gen_active = next(
+                    (
+                        a
+                        for a in prior_attempts
+                        if int(a.lease_generation) == eff_gen
+                        and a.worker_id == eff_worker_id
+                        and a.state in {"authorized", "in_progress"}
+                    ),
+                    None,
+                )
+                unsafe_prior = next(
+                    (
+                        a
+                        for a in prior_attempts
+                        if a is not same_gen_active
+                        and a.state
+                        in {
+                            "authorized",
+                            "in_progress",
+                            "completed",
+                            "outcome_uncertain",
+                            "reconciliation_required",
+                        }
+                    ),
+                    None,
+                )
+                if unsafe_prior is not None:
+                    now_text = now_iso()
+                    connection.execute(
+                        update(execution_jobs)
+                        .where(
+                            execution_jobs.c.id == job_id,
+                            execution_jobs.c.status == "running",
+                        )
+                        .values(
+                            status="reconciliation_required",
+                            finished_at=now_text,
+                            error_code="DUPLICATE_EXTERNAL_ACTION_BLOCKED",
+                        )
+                    )
+                    self.security._audit(
+                        connection,
+                        item["organization_id"],
+                        item["engagement_id"],
+                        item["requester_user_id"],
+                        "execution.duplicate_action_blocked",
+                        "execution_job",
+                        job_id,
+                        decision="DENY",
+                        reason_code="DUPLICATE_EXTERNAL_ACTION_BLOCKED",
+                        details={
+                            "prior_action_id": unsafe_prior.id,
+                            "prior_state": unsafe_prior.state,
+                        },
+                    )
+                    connection.commit()
+                    return False
+
+                def _record_action_intent() -> None:
+                    stamp = now_iso()
+                    if same_gen_active is not None:
+                        if same_gen_active.state == "authorized":
+                            connection.execute(
+                                update(execution_action_attempts)
+                                .where(
+                                    execution_action_attempts.c.id == same_gen_active.id,
+                                    execution_action_attempts.c.state == "authorized",
+                                )
+                                .values(
+                                    state="in_progress",
+                                    started_at=stamp,
+                                    updated_at=stamp,
+                                )
+                            )
+                        return
+                    max_seq = (
+                        connection.execute(
+                            select(func.max(execution_action_attempts.c.action_sequence)).where(
+                                execution_action_attempts.c.job_id == job_id
+                            )
+                        ).scalar_one_or_none()
+                        or 0
+                    )
+                    connection.execute(
+                        execution_action_attempts.insert().values(
+                            id=str(uuid4()),
+                            job_id=job_id,
+                            organization_id=item["organization_id"],
+                            engagement_id=item["engagement_id"],
+                            action_sequence=int(max_seq) + 1,
+                            lease_generation=eff_gen,
+                            worker_id=eff_worker_id,
+                            adapter_id=adapter_id or item.get("adapter_id") or "governed.adapter",
+                            operation=technique,
+                            authorization_id=item["authorization_id"],
+                            approval_id=item["approval_id"],
+                            request_digest=item["request_digest"],
+                            state="authorized",
+                            started_at=None,
+                            completed_at=None,
+                            outcome_classification=None,
+                            result_reference=None,
+                            created_at=stamp,
+                            updated_at=stamp,
+                        )
+                    )
+
                 if item["action_class"] != "sensitive":
                     valid, reason = self._validate_context(connection, item)
                     if not valid:
                         return block(reason)
+                    _record_action_intent()
                     connection.commit()
                     return True
 
@@ -1308,6 +1634,7 @@ class ExecutionGovernanceService:
                     )
                     if not valid:
                         return block(reason, approval_failure=True)
+                    _record_action_intent()
                     connection.commit()
                     return True
 
@@ -1385,6 +1712,7 @@ class ExecutionGovernanceService:
                 if not valid:
                     # Keep consumption and record the block: approvals are never restored.
                     return block(reason, approval_failure=True)
+                _record_action_intent()
                 self.security._audit(
                     connection,
                     item["organization_id"],
@@ -1408,55 +1736,629 @@ class ExecutionGovernanceService:
                 connection.rollback()
                 raise
 
-    def claim_job(self, job_id: str) -> dict[str, Any] | None:
-        with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
-            try:
-                row = connection.execute(
-                    select(execution_jobs).where(
-                        execution_jobs.c.id == job_id,
-                        execution_jobs.c.status == "queued",
-                    )
-                ).first()
-                if not row:
-                    connection.rollback()
-                    return None
-                item = dict(row._mapping)
-                valid, reason = self._validate_context(connection, item)
-                status = "claimed" if valid else "blocked"
-                connection.execute(
-                    update(execution_jobs)
-                    .where(execution_jobs.c.id == job_id, execution_jobs.c.status == "queued")
-                    .values(
-                        status=status,
-                        started_at=_stamp(datetime.now(UTC)) if valid else None,
-                        finished_at=None if valid else now_iso(),
-                        error_code=None if valid else reason,
-                    )
+    def _claim_on_connection(
+        self,
+        connection: Any,
+        job_id: str,
+        worker_id: str,
+        lease_duration_seconds: float,
+        ts: float,
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            select(execution_jobs).where(
+                execution_jobs.c.id == job_id,
+                execution_jobs.c.status == "queued",
+            )
+        ).first()
+        if not row:
+            return None
+        item = dict(row._mapping)
+        created_at_dt = _utc(item["created_at"])
+        queue_wait_seconds = (datetime.now(UTC) - created_at_dt).total_seconds()
+        if queue_wait_seconds > self.resource_limits.max_queue_wait_seconds:
+            old_gen = int(item.get("lease_generation") or 0)
+            res = connection.execute(
+                update(execution_jobs)
+                .where(
+                    execution_jobs.c.id == job_id,
+                    execution_jobs.c.status == "queued",
+                    execution_jobs.c.lease_generation == old_gen,
                 )
+                .values(
+                    status="blocked",
+                    finished_at=now_iso(),
+                    error_code="EXECUTION_QUEUE_WAIT_EXPIRED",
+                )
+            )
+            if res.rowcount == 1:
                 self.security._audit(
                     connection,
                     item["organization_id"],
                     item["engagement_id"],
                     item["requester_user_id"],
-                    "execution.job_claimed" if valid else "execution.job_blocked",
+                    "execution.deadline_exceeded",
                     "execution_job",
                     job_id,
-                    decision="ALLOW" if valid else "DENY",
-                    reason_code=reason,
-                    details={"policy_decision_id": item["policy_decision_id"]},
+                    decision="DENY",
+                    reason_code="EXECUTION_QUEUE_WAIT_EXPIRED",
+                    details={"queue_wait_ms": int(max(0.0, queue_wait_seconds) * 1000)},
+                )
+            return None
+        valid, reason = self._validate_context(connection, item)
+        status = "claimed" if valid else "blocked"
+        old_gen = int(item.get("lease_generation") or 0)
+        new_gen = old_gen + 1 if valid else old_gen
+        new_attempt = int(item.get("attempt_number") or 0) + (1 if valid else 0)
+        claimed_iso = now_iso()
+        lease_exp = ts + lease_duration_seconds if valid else None
+        res = connection.execute(
+            update(execution_jobs)
+            .where(
+                execution_jobs.c.id == job_id,
+                execution_jobs.c.status == "queued",
+                execution_jobs.c.lease_generation == old_gen,
+            )
+            .values(
+                status=status,
+                worker_id=worker_id if valid else None,
+                lease_generation=new_gen,
+                lease_expires_at=lease_exp,
+                heartbeat_at=ts if valid else None,
+                claimed_at=claimed_iso if valid else None,
+                attempt_number=new_attempt,
+                started_at=_stamp(datetime.now(UTC)) if valid else None,
+                finished_at=None if valid else now_iso(),
+                error_code=None if valid else reason,
+            )
+        )
+        if res.rowcount != 1:
+            return None
+        self.security._audit(
+            connection,
+            item["organization_id"],
+            item["engagement_id"],
+            item["requester_user_id"],
+            "execution.job_claimed" if valid else "execution.job_blocked",
+            "execution_job",
+            job_id,
+            decision="ALLOW" if valid else "DENY",
+            reason_code=reason,
+            details={
+                "policy_decision_id": item["policy_decision_id"],
+                "worker_id": worker_id if valid else None,
+                "lease_generation": new_gen,
+                "attempt_number": new_attempt,
+            },
+        )
+        if not valid:
+            return None
+        return {
+            **item,
+            "status": status,
+            "worker_id": worker_id,
+            "lease_generation": new_gen,
+            "lease_expires_at": lease_exp,
+            "heartbeat_at": ts,
+            "claimed_at": claimed_iso,
+            "attempt_number": new_attempt,
+            "error_code": None,
+        }
+
+    def claim_job(
+        self,
+        job_id: str,
+        worker_id: str | None = None,
+        *,
+        lease_duration_seconds: float = DEFAULT_LEASE_DURATION_SECONDS,
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        self._validate_lease_bounds(lease_duration_seconds)
+        eff_worker_id = worker_id or f"worker-{secrets.token_hex(8)}"
+        ts = time.time() if now is None else float(now)
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                claimed = self._claim_on_connection(
+                    connection, job_id, eff_worker_id, lease_duration_seconds, ts
                 )
                 connection.commit()
-                return (
-                    {**item, "status": status, "error_code": None if valid else reason}
-                    if valid
-                    else None
-                )
+                return claimed
             except Exception:
                 connection.rollback()
                 raise
 
-    def revalidate_job(self, job_id: str) -> bool:
+    def claim_next_job(
+        self,
+        worker_id: str,
+        *,
+        lease_duration_seconds: float = DEFAULT_LEASE_DURATION_SECONDS,
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        self._validate_lease_bounds(lease_duration_seconds)
+        ts = time.time() if now is None else float(now)
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                active_rows = connection.execute(
+                    select(
+                        execution_jobs.c.organization_id,
+                        execution_jobs.c.asset_type,
+                    ).where(execution_jobs.c.status.in_(["claimed", "running"]))
+                ).all()
+                global_active = len(active_rows)
+                if global_active >= self.resource_limits.global_active_limit:
+                    connection.commit()
+                    return None
+                org_active: dict[str, int] = {}
+                workload_active: dict[str, int] = {}
+                for active_row in active_rows:
+                    org_active[active_row.organization_id] = (
+                        org_active.get(active_row.organization_id, 0) + 1
+                    )
+                    workload_active[active_row.asset_type] = (
+                        workload_active.get(active_row.asset_type, 0) + 1
+                    )
+                queued_rows = connection.execute(
+                    select(
+                        execution_jobs.c.id,
+                        execution_jobs.c.organization_id,
+                        execution_jobs.c.asset_type,
+                        execution_jobs.c.created_at,
+                    )
+                    .where(execution_jobs.c.status == "queued")
+                    .order_by(execution_jobs.c.created_at)
+                ).all()
+                if not queued_rows:
+                    connection.commit()
+                    return None
+                eligible = [
+                    r
+                    for r in queued_rows
+                    if org_active.get(r.organization_id, 0)
+                    < self.resource_limits.per_org_active_limit
+                    and workload_active.get(r.asset_type, 0)
+                    < self.resource_limits.workload_limit(r.asset_type)
+                ]
+                if not eligible:
+                    connection.commit()
+                    return None
+                # Fair scheduling: prioritize organizations with fewer active jobs, then FIFO.
+                eligible.sort(key=lambda r: (org_active.get(r.organization_id, 0), r.created_at))
+                for candidate in eligible:
+                    claimed = self._claim_on_connection(
+                        connection, candidate.id, worker_id, lease_duration_seconds, ts
+                    )
+                    if claimed is not None:
+                        connection.commit()
+                        return claimed
+                connection.commit()
+                return None
+            except Exception:
+                connection.rollback()
+                raise
+
+    def heartbeat_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_generation: int,
+        *,
+        lease_duration_seconds: float = DEFAULT_LEASE_DURATION_SECONDS,
+        now: float | None = None,
+    ) -> bool:
+        self._validate_lease_bounds(lease_duration_seconds)
+        ts = time.time() if now is None else float(now)
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    select(execution_jobs).where(execution_jobs.c.id == job_id)
+                ).first()
+                if not row:
+                    connection.rollback()
+                    return False
+                item = dict(row._mapping)
+                if item["status"] not in {"claimed", "running"}:
+                    connection.rollback()
+                    return False
+                if not self._lease_fenced(item, worker_id, lease_generation, ts):
+                    connection.rollback()
+                    return False
+                res = connection.execute(
+                    update(execution_jobs)
+                    .where(
+                        execution_jobs.c.id == job_id,
+                        execution_jobs.c.status.in_(["claimed", "running"]),
+                        execution_jobs.c.worker_id == worker_id,
+                        execution_jobs.c.lease_generation == lease_generation,
+                        execution_jobs.c.lease_expires_at > ts,
+                    )
+                    .values(
+                        heartbeat_at=ts,
+                        lease_expires_at=ts + lease_duration_seconds,
+                    )
+                )
+                connection.execute(
+                    update(worker_leases)
+                    .where(worker_leases.c.worker_id == worker_id)
+                    .values(last_heartbeat_at=ts)
+                )
+                connection.commit()
+                return bool(res.rowcount == 1)
+            except Exception:
+                connection.rollback()
+                raise
+
+    def latest_action_attempt(self, job_id: str) -> dict[str, Any] | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(execution_action_attempts)
+                .where(execution_action_attempts.c.job_id == job_id)
+                .order_by(execution_action_attempts.c.action_sequence.desc())
+                .limit(1)
+            ).first()
+            return dict(row._mapping) if row else None
+
+    def mark_action_in_progress(
+        self,
+        job_id: str,
+        *,
+        worker_id: str | None = None,
+        lease_generation: int | None = None,
+        action_id: str | None = None,
+        now: float | None = None,
+    ) -> bool:
+        stamp = now_iso()
+        ts = time.time() if now is None else float(now)
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                job_row = connection.execute(
+                    select(execution_jobs).where(
+                        execution_jobs.c.id == job_id,
+                        execution_jobs.c.status == "running",
+                    )
+                ).first()
+                if not job_row or not self._lease_fenced(
+                    dict(job_row._mapping), worker_id, lease_generation, ts
+                ):
+                    connection.rollback()
+                    return False
+                query = select(execution_action_attempts).where(
+                    execution_action_attempts.c.job_id == job_id,
+                    execution_action_attempts.c.state.in_(["not_started", "authorized"]),
+                )
+                if action_id is not None:
+                    query = query.where(execution_action_attempts.c.id == action_id)
+                else:
+                    query = query.order_by(execution_action_attempts.c.action_sequence.desc())
+                attempt = connection.execute(query.limit(1)).first()
+                if not attempt:
+                    connection.rollback()
+                    return False
+                if (
+                    lease_generation is not None
+                    and int(attempt.lease_generation) != int(lease_generation)
+                ):
+                    connection.rollback()
+                    return False
+                res = connection.execute(
+                    update(execution_action_attempts)
+                    .where(
+                        execution_action_attempts.c.id == attempt.id,
+                        execution_action_attempts.c.state.in_(["not_started", "authorized"]),
+                    )
+                    .values(state="in_progress", started_at=stamp, updated_at=stamp)
+                )
+                connection.commit()
+                return bool(res.rowcount == 1)
+            except Exception:
+                connection.rollback()
+                raise
+
+    def complete_action_attempt(
+        self,
+        job_id: str,
+        *,
+        state: str,
+        outcome_classification: str,
+        result_reference: str | None = None,
+        worker_id: str | None = None,
+        lease_generation: int | None = None,
+        action_id: str | None = None,
+    ) -> bool:
+        if state not in {
+            "completed",
+            "failed_before_dispatch",
+            "outcome_uncertain",
+            "reconciliation_required",
+        }:
+            raise ValueError("Invalid action attempt completion state.")
+        stamp = now_iso()
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                job_row = connection.execute(
+                    select(execution_jobs).where(execution_jobs.c.id == job_id)
+                ).first()
+                if not job_row:
+                    connection.rollback()
+                    return False
+                item = dict(job_row._mapping)
+                if not self._lease_fenced(
+                    item, worker_id, lease_generation, time.time(), check_expiry=False
+                ):
+                    connection.rollback()
+                    return False
+                query = select(execution_action_attempts).where(
+                    execution_action_attempts.c.job_id == job_id,
+                    execution_action_attempts.c.state.in_(["authorized", "in_progress"]),
+                )
+                if action_id is not None:
+                    query = query.where(execution_action_attempts.c.id == action_id)
+                else:
+                    query = query.order_by(execution_action_attempts.c.action_sequence.desc())
+                attempt = connection.execute(query.limit(1)).first()
+                if not attempt:
+                    connection.rollback()
+                    return False
+                res = connection.execute(
+                    update(execution_action_attempts)
+                    .where(
+                        execution_action_attempts.c.id == attempt.id,
+                        execution_action_attempts.c.state.in_(["authorized", "in_progress"]),
+                    )
+                    .values(
+                        state=state,
+                        completed_at=stamp if state == "completed" else None,
+                        outcome_classification=outcome_classification,
+                        result_reference=result_reference,
+                        updated_at=stamp,
+                    )
+                )
+                if (
+                    res.rowcount == 1
+                    and state in {"outcome_uncertain", "reconciliation_required"}
+                    and item["status"] in {"claimed", "running"}
+                ):
+                    connection.execute(
+                        update(execution_jobs)
+                        .where(
+                            execution_jobs.c.id == job_id,
+                            execution_jobs.c.status.in_(["claimed", "running"]),
+                        )
+                        .values(
+                            status="reconciliation_required",
+                            finished_at=stamp,
+                            error_code="EXTERNAL_OUTCOME_UNCERTAIN",
+                        )
+                    )
+                connection.commit()
+                return bool(res.rowcount == 1)
+            except Exception:
+                connection.rollback()
+                raise
+
+    def recover_stale_jobs(
+        self, *, now: float | None = None, include_stopped_workers: bool = True
+    ) -> list[dict[str, Any]]:
+        """Idempotently recover expired or orphaned jobs, separating safe retries from uncertainty."""
+        ts = time.time() if now is None else float(now)
+        stamp = now_iso()
+        recovered: list[dict[str, Any]] = []
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                stopped_workers: set[str] = set()
+                if include_stopped_workers:
+                    stopped_workers = {
+                        r.worker_id
+                        for r in connection.execute(
+                            select(worker_leases.c.worker_id).where(
+                                worker_leases.c.status == "stopped"
+                            )
+                        ).all()
+                    }
+                conditions = [
+                    execution_jobs.c.lease_expires_at.is_(None),
+                    execution_jobs.c.lease_expires_at <= ts,
+                ]
+                if stopped_workers:
+                    conditions.append(execution_jobs.c.worker_id.in_(stopped_workers))
+                stale_rows = connection.execute(
+                    select(execution_jobs).where(
+                        execution_jobs.c.status.in_(["claimed", "running"]),
+                        or_(*conditions),
+                    )
+                ).all()
+                for row in stale_rows:
+                    item = dict(row._mapping)
+                    job_id = item["id"]
+                    attempts = connection.execute(
+                        select(execution_action_attempts)
+                        .where(execution_action_attempts.c.job_id == job_id)
+                        .order_by(execution_action_attempts.c.action_sequence.desc())
+                    ).all()
+                    unsafe_attempt = next(
+                        (
+                            a
+                            for a in attempts
+                            if a.state
+                            in {
+                                "in_progress",
+                                "outcome_uncertain",
+                                "reconciliation_required",
+                                "completed",
+                            }
+                        ),
+                        None,
+                    )
+                    if unsafe_attempt is not None or item["approval_consumed_at"] is not None:
+                        if unsafe_attempt is not None and unsafe_attempt.state == "in_progress":
+                            connection.execute(
+                                update(execution_action_attempts)
+                                .where(
+                                    execution_action_attempts.c.id == unsafe_attempt.id,
+                                    execution_action_attempts.c.state == "in_progress",
+                                )
+                                .values(
+                                    state="outcome_uncertain",
+                                    outcome_classification="worker_lease_expired",
+                                    updated_at=stamp,
+                                )
+                            )
+                        err = (
+                            "CANCELLATION_OUTCOME_UNCERTAIN"
+                            if item["cancellation_requested_at"] is not None
+                            else "EXTERNAL_OUTCOME_UNCERTAIN"
+                        )
+                        connection.execute(
+                            update(execution_jobs)
+                            .where(
+                                execution_jobs.c.id == job_id,
+                                execution_jobs.c.status.in_(["claimed", "running"]),
+                            )
+                            .values(
+                                status="reconciliation_required",
+                                finished_at=stamp,
+                                last_recovery_at=stamp,
+                                error_code=err,
+                            )
+                        )
+                        self.security._audit(
+                            connection,
+                            item["organization_id"],
+                            item["engagement_id"],
+                            item["requester_user_id"],
+                            "execution.recovery_reconciliation_required",
+                            "execution_job",
+                            job_id,
+                            decision="DENY",
+                            reason_code=err,
+                            details={
+                                "lease_generation": item.get("lease_generation"),
+                                "action_id": unsafe_attempt.id if unsafe_attempt else None,
+                            },
+                        )
+                        recovered.append({"id": job_id, "outcome": "reconciliation_required"})
+                        continue
+
+                    connection.execute(
+                        update(execution_action_attempts)
+                        .where(
+                            execution_action_attempts.c.job_id == job_id,
+                            execution_action_attempts.c.state.in_(["not_started", "authorized"]),
+                        )
+                        .values(
+                            state="failed_before_dispatch",
+                            outcome_classification="worker_crashed_before_dispatch",
+                            completed_at=stamp,
+                            updated_at=stamp,
+                        )
+                    )
+                    if item["cancellation_requested_at"] is not None:
+                        connection.execute(
+                            update(execution_jobs)
+                            .where(
+                                execution_jobs.c.id == job_id,
+                                execution_jobs.c.status.in_(["claimed", "running"]),
+                            )
+                            .values(
+                                status="cancelled",
+                                cancellation_observed_at=item["cancellation_observed_at"] or stamp,
+                                finished_at=stamp,
+                                last_recovery_at=stamp,
+                                error_code="EXECUTION_CANCELLED",
+                            )
+                        )
+                        self.security._audit(
+                            connection,
+                            item["organization_id"],
+                            item["engagement_id"],
+                            item["cancellation_requested_by"] or item["requester_user_id"],
+                            "execution.job_recovered_cancelled",
+                            "execution_job",
+                            job_id,
+                            decision="DENY",
+                            reason_code="CANCELLED_DURING_RECOVERY",
+                            details={"lease_generation": item.get("lease_generation")},
+                        )
+                        recovered.append({"id": job_id, "outcome": "cancelled"})
+                        continue
+
+                    valid, reason = self._validate_context(connection, item)
+                    if valid:
+                        connection.execute(
+                            update(execution_jobs)
+                            .where(
+                                execution_jobs.c.id == job_id,
+                                execution_jobs.c.status.in_(["claimed", "running"]),
+                            )
+                            .values(
+                                status="queued",
+                                worker_id=None,
+                                lease_expires_at=None,
+                                heartbeat_at=None,
+                                claimed_at=None,
+                                last_recovery_at=stamp,
+                                error_code=None,
+                            )
+                        )
+                        self.security._audit(
+                            connection,
+                            item["organization_id"],
+                            item["engagement_id"],
+                            item["requester_user_id"],
+                            "execution.job_recovered_requeued",
+                            "execution_job",
+                            job_id,
+                            decision="ALLOW",
+                            reason_code="SAFE_RECOVERY_REQUEUED",
+                            details={"lease_generation": item.get("lease_generation")},
+                        )
+                        recovered.append({"id": job_id, "outcome": "queued"})
+                    else:
+                        connection.execute(
+                            update(execution_jobs)
+                            .where(
+                                execution_jobs.c.id == job_id,
+                                execution_jobs.c.status.in_(["claimed", "running"]),
+                            )
+                            .values(
+                                status="blocked",
+                                finished_at=stamp,
+                                last_recovery_at=stamp,
+                                error_code=reason,
+                            )
+                        )
+                        self.security._audit(
+                            connection,
+                            item["organization_id"],
+                            item["engagement_id"],
+                            item["requester_user_id"],
+                            "execution.job_blocked",
+                            "execution_job",
+                            job_id,
+                            decision="DENY",
+                            reason_code=reason,
+                            details={"lease_generation": item.get("lease_generation")},
+                        )
+                        recovered.append({"id": job_id, "outcome": "blocked"})
+                connection.commit()
+                return recovered
+            except Exception:
+                connection.rollback()
+                raise
+
+    def revalidate_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str | None = None,
+        lease_generation: int | None = None,
+        now: float | None = None,
+    ) -> bool:
+        ts = time.time() if now is None else float(now)
         with self.engine.connect() as connection:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             try:
@@ -1470,15 +2372,22 @@ class ExecutionGovernanceService:
                     connection.rollback()
                     return False
                 item = dict(row._mapping)
+                if not self._lease_fenced(item, worker_id, lease_generation, ts):
+                    connection.rollback()
+                    return False
                 valid, reason = self._validate_context(connection, item)
                 if not valid:
-                    connection.execute(
-                        update(execution_jobs)
-                        .where(
-                            execution_jobs.c.id == job_id,
-                            execution_jobs.c.status.in_(["claimed", "running"]),
+                    update_stmt = update(execution_jobs).where(
+                        execution_jobs.c.id == job_id,
+                        execution_jobs.c.status.in_(["claimed", "running"]),
+                    )
+                    if worker_id is not None and lease_generation is not None:
+                        update_stmt = update_stmt.where(
+                            execution_jobs.c.worker_id == worker_id,
+                            execution_jobs.c.lease_generation == lease_generation,
                         )
-                        .values(status="blocked", finished_at=now_iso(), error_code=reason)
+                    connection.execute(
+                        update_stmt.values(status="blocked", finished_at=now_iso(), error_code=reason)
                     )
                     self.security._audit(
                         connection,
@@ -1518,7 +2427,17 @@ class ExecutionGovernanceService:
                 connection.rollback()
                 raise
 
-    def record_progress(self, job_id: str, percent: int, phase: str) -> None:
+    def record_progress(
+        self,
+        job_id: str,
+        percent: int,
+        phase: str,
+        *,
+        worker_id: str | None = None,
+        lease_generation: int | None = None,
+        now: float | None = None,
+    ) -> None:
+        ts = time.time() if now is None else float(now)
         with self.engine.begin() as connection:
             row = connection.execute(
                 select(execution_jobs).where(
@@ -1529,6 +2448,8 @@ class ExecutionGovernanceService:
             if not row:
                 return
             item = dict(row._mapping)
+            if not self._lease_fenced(item, worker_id, lease_generation, ts):
+                return
             self.security._audit(
                 connection,
                 item["organization_id"],
@@ -1542,8 +2463,17 @@ class ExecutionGovernanceService:
                 details={"percent": percent, "phase": phase},
             )
 
-    def block_running_job(self, job_id: str, reason: str) -> None:
+    def block_running_job(
+        self,
+        job_id: str,
+        reason: str,
+        *,
+        worker_id: str | None = None,
+        lease_generation: int | None = None,
+        now: float | None = None,
+    ) -> None:
         """Block a running job without leaking adapter details or consuming approval."""
+        ts = time.time() if now is None else float(now)
         with self.engine.begin() as connection:
             row = connection.execute(
                 select(execution_jobs).where(
@@ -1554,6 +2484,8 @@ class ExecutionGovernanceService:
             if not row:
                 return
             item = dict(row._mapping)
+            if not self._lease_fenced(item, worker_id, lease_generation, ts):
+                return
             connection.execute(
                 update(execution_jobs)
                 .where(execution_jobs.c.id == job_id, execution_jobs.c.status == "running")
@@ -1602,7 +2534,11 @@ class ExecutionGovernanceService:
         cancelled: bool = False,
         error_code: str | None = None,
         result_summary: dict[str, Any] | None = None,
-    ) -> None:
+        worker_id: str | None = None,
+        lease_generation: int | None = None,
+        now: float | None = None,
+    ) -> bool:
+        ts = time.time() if now is None else float(now)
         with self.engine.begin() as connection:
             row = connection.execute(
                 select(execution_jobs).where(
@@ -1611,13 +2547,22 @@ class ExecutionGovernanceService:
                 )
             ).first()
             if not row:
-                return
+                return False
             item = dict(row._mapping)
+            if not self._lease_fenced(item, worker_id, lease_generation, ts):
+                return False
             status = "cancelled" if cancelled else ("failed" if failed else "completed")
-            connection.execute(
-                update(execution_jobs)
-                .where(execution_jobs.c.id == job_id, execution_jobs.c.status == "running")
-                .values(
+            stmt = update(execution_jobs).where(
+                execution_jobs.c.id == job_id,
+                execution_jobs.c.status == "running",
+            )
+            if worker_id is not None and lease_generation is not None:
+                stmt = stmt.where(
+                    execution_jobs.c.worker_id == worker_id,
+                    execution_jobs.c.lease_generation == lease_generation,
+                )
+            res = connection.execute(
+                stmt.values(
                     status=status,
                     scan_id=scan_id,
                     result_summary=result_summary,
@@ -1625,6 +2570,8 @@ class ExecutionGovernanceService:
                     error_code=error_code,
                 )
             )
+            if res.rowcount != 1:
+                return False
             self.security._audit(
                 connection,
                 item["organization_id"],
@@ -1691,6 +2638,7 @@ class ExecutionGovernanceService:
                     reason_code="CANCELLATION_COMPLETED",
                     details={"job_status": "cancelled"},
                 )
+            return True
 
     def partial_result(self, job_id: str) -> dict[str, Any]:
         with self.engine.connect() as connection:
@@ -1698,6 +2646,88 @@ class ExecutionGovernanceService:
                 execution_jobs.c.scan_id, execution_jobs.c.result_summary,
             ).where(execution_jobs.c.id == job_id)).first()
             return dict(row._mapping) if row else {"scan_id": None, "result_summary": None}
+
+    def get_organization_resource_usage(
+        self, user_id: str, organization_id: str
+    ) -> dict[str, Any]:
+        """Return tenant-isolated queue and active execution counts for one organization."""
+        with self.engine.connect() as connection:
+            from chinescan.core.storage.sqlite import organization_memberships
+
+            membership = connection.execute(
+                select(organization_memberships.c.status).where(
+                    organization_memberships.c.organization_id == organization_id,
+                    organization_memberships.c.user_id == user_id,
+                    organization_memberships.c.status == "active",
+                )
+            ).first()
+            if membership is None:
+                raise PermissionError("Organization access denied.")
+            rows = connection.execute(
+                select(execution_jobs.c.status, execution_jobs.c.asset_type).where(
+                    execution_jobs.c.organization_id == organization_id,
+                    execution_jobs.c.status.in_(
+                        ["queued", "claimed", "running", "reconciliation_required"]
+                    ),
+                )
+            ).all()
+        queued = sum(1 for r in rows if r.status == "queued")
+        active = sum(1 for r in rows if r.status in {"claimed", "running"})
+        reconciliation = sum(1 for r in rows if r.status == "reconciliation_required")
+        return {
+            "organization_id": organization_id,
+            "queued_jobs": queued,
+            "active_jobs": active,
+            "total_reserved_jobs": queued + active,
+            "reconciliation_required_jobs": reconciliation,
+            "limits": {
+                "per_org_active_limit": self.resource_limits.per_org_active_limit,
+                "per_org_queued_limit": self.resource_limits.per_org_queued_limit,
+                "default_job_deadline_seconds": self.resource_limits.default_job_deadline_seconds,
+                "max_queue_wait_seconds": self.resource_limits.max_queue_wait_seconds,
+            },
+        }
+
+    def get_global_resource_diagnostics(self) -> dict[str, Any]:
+        """Return operator-only global execution capacity and worker lease health."""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(execution_jobs.c.status, execution_jobs.c.asset_type).where(
+                    execution_jobs.c.status.in_(
+                        ["queued", "claimed", "running", "reconciliation_required"]
+                    )
+                )
+            ).all()
+            workers = connection.execute(
+                select(
+                    worker_leases.c.worker_id,
+                    worker_leases.c.status,
+                    worker_leases.c.last_heartbeat_at,
+                )
+            ).all()
+        queued = sum(1 for r in rows if r.status == "queued")
+        active = sum(1 for r in rows if r.status in {"claimed", "running"})
+        reconciliation = sum(1 for r in rows if r.status == "reconciliation_required")
+        by_workload: dict[str, int] = {}
+        for r in rows:
+            if r.status in {"claimed", "running"}:
+                by_workload[r.asset_type] = by_workload.get(r.asset_type, 0) + 1
+        return {
+            "global_queued_jobs": queued,
+            "global_active_jobs": active,
+            "global_reserved_jobs": queued + active,
+            "reconciliation_required_jobs": reconciliation,
+            "active_by_workload": by_workload,
+            "workers": [
+                {
+                    "worker_id": w.worker_id,
+                    "status": w.status,
+                    "last_heartbeat_at": w.last_heartbeat_at,
+                }
+                for w in workers
+            ],
+            "limits": self.resource_limits.model_dump(mode="json"),
+        }
 
 
 class GovernedDomainWorker:
@@ -1708,10 +2738,22 @@ class GovernedDomainWorker:
         repository: Any,
         governance: ExecutionGovernanceService,
         adapters: AdapterRegistry | None = None,
+        *,
+        worker_id: str | None = None,
+        lease_duration_seconds: float = DEFAULT_LEASE_DURATION_SECONDS,
+        heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
     ) -> None:
+        ExecutionGovernanceService._validate_lease_bounds(
+            lease_duration_seconds, heartbeat_interval_seconds
+        )
         self.repository = repository
         self.governance = governance
         self.adapters = adapters or governance.adapters
+        self.worker_id = worker_id or f"worker-{secrets.token_hex(8)}"
+        self.lease_duration_seconds = float(lease_duration_seconds)
+        self.heartbeat_interval_seconds = float(heartbeat_interval_seconds)
+        self.shutdown_grace_seconds = float(shutdown_grace_seconds)
         self._condition = threading.Condition()
         self._stopping = False
         self._thread: threading.Thread | None = None
@@ -1732,35 +2774,18 @@ class GovernedDomainWorker:
         return result
 
     def start(self) -> None:
-        with self.repository.engine.begin() as connection:
-            stale = connection.execute(
-                select(execution_jobs).where(execution_jobs.c.status.in_(["claimed", "running"]))
-            ).all()
-            for row in stale:
-                item = dict(row._mapping)
-                connection.execute(
-                    update(execution_jobs)
-                    .where(execution_jobs.c.id == item["id"])
-                    .values(status="failed", finished_at=now_iso(), error_code="WORKER_RESTARTED")
-                )
-                self.governance.security._audit(
-                    connection,
-                    item["organization_id"],
-                    item["engagement_id"],
-                    item["requester_user_id"],
-                    "execution.job_interrupted",
-                    "execution_job",
-                    item["id"],
-                    decision="DENY",
-                    reason_code="WORKER_RESTARTED",
-                    details={"policy_decision_id": item["policy_decision_id"]},
-                )
+        with self._condition:
+            self._stopping = False
+        self.governance.register_worker(self.worker_id)
+        self.governance.recover_stale_jobs()
         self._thread = threading.Thread(
             target=self._run, name="chinescan-governed-domain-jobs", daemon=True
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, grace_seconds: float | None = None) -> None:
+        grace = self.shutdown_grace_seconds if grace_seconds is None else float(grace_seconds)
+        self.governance.mark_worker_stopping(self.worker_id)
         with self._condition:
             self._stopping = True
             self._condition.notify_all()
@@ -1768,7 +2793,12 @@ class GovernedDomainWorker:
             for cancellation in self._active_cancellations.values():
                 cancellation.set()
         if self._thread:
-            self._thread.join()
+            self._thread.join(timeout=max(0.1, grace))
+            if not self._thread.is_alive():
+                self.governance.unregister_worker(self.worker_id)
+                self._thread = None
+        else:
+            self.governance.unregister_worker(self.worker_id)
 
     def _next_job_id(self) -> str | None:
         with self.repository.engine.connect() as connection:
@@ -1781,10 +2811,24 @@ class GovernedDomainWorker:
             return result if isinstance(result, str) else None
 
     def run_one(self, requested_job_id: str | None = None) -> dict[str, Any] | None:
-        job_id = requested_job_id or self._next_job_id()
-        if job_id is None:
-            return None
-        job = self.governance.claim_job(job_id)
+        with self._condition:
+            if self._stopping:
+                return None
+        if requested_job_id is not None:
+            job = self.governance.claim_job(
+                requested_job_id,
+                self.worker_id,
+                lease_duration_seconds=self.lease_duration_seconds,
+            )
+            job_id = requested_job_id
+        else:
+            job = self.governance.claim_next_job(
+                self.worker_id,
+                lease_duration_seconds=self.lease_duration_seconds,
+            )
+            if job is None:
+                return None
+            job_id = job["id"]
         if job is None:
             with self.repository.engine.connect() as connection:
                 status = connection.execute(
@@ -1793,7 +2837,10 @@ class GovernedDomainWorker:
             if status == "cancelled":
                 return {"id": job_id, "status": "cancelled"}
             return {"id": job_id, "status": "blocked"}
-        if not self.governance.revalidate_job(job_id):
+        lease_generation = int(job["lease_generation"])
+        if not self.governance.revalidate_job(
+            job_id, worker_id=self.worker_id, lease_generation=lease_generation
+        ):
             return {"id": job_id, "status": "blocked"}
         try:
             context = ExecutionContext.from_job(job)
@@ -1811,40 +2858,151 @@ class GovernedDomainWorker:
                 raise AdapterFailure("ADAPTER_CLASSIFICATION_MISMATCH")
         except (ValueError, AdapterFailure):
             self.governance.finish_job(
-                job_id, scan_id=None, failed=True, error_code="ADAPTER_CONTEXT_REJECTED"
+                job_id,
+                scan_id=None,
+                failed=True,
+                error_code="ADAPTER_CONTEXT_REJECTED",
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
             )
             return {"id": job_id, "status": "failed"}
         cancellation = Event()
+        heartbeat_stop = Event()
+        lease_lost = Event()
+        deadline_exceeded = Event()
+        limits = self.governance.resource_limits
+        expires_remaining = max(0.0, (_utc(context.expires_at) - datetime.now(UTC)).total_seconds())
+        effective_deadline_seconds = min(limits.default_job_deadline_seconds, expires_remaining)
+        deadline_monotonic = time.monotonic() + effective_deadline_seconds
         with self._active_lock:
             self._active_cancellations[job_id] = cancellation
+
+        def _heartbeat_loop() -> None:
+            wait_step = min(self.heartbeat_interval_seconds, max(0.05, effective_deadline_seconds))
+            while not heartbeat_stop.wait(timeout=wait_step):
+                if time.monotonic() >= deadline_monotonic:
+                    deadline_exceeded.set()
+                    cancellation.set()
+                    return
+                if not self.governance.heartbeat_job(
+                    job_id,
+                    self.worker_id,
+                    lease_generation,
+                    lease_duration_seconds=self.lease_duration_seconds,
+                ):
+                    lease_lost.set()
+                    cancellation.set()
+                    return
+
+        hb_thread = threading.Thread(
+            target=_heartbeat_loop,
+            name=f"chinescan-hb-{job_id[:8]}",
+            daemon=True,
+        )
+        hb_thread.start()
+
+        def _authorize_and_mark() -> bool:
+            if lease_lost.is_set():
+                return False
+            ok = self.governance.authorize_external_action(
+                job_id,
+                context.target,
+                context.technique,
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
+                adapter_id=adapter.capabilities.adapter_id,
+            )
+            if ok:
+                self.governance.mark_action_in_progress(
+                    job_id,
+                    worker_id=self.worker_id,
+                    lease_generation=lease_generation,
+                )
+            return ok
+
         control = ExecutionControl(
             context=context,
             cancellation=cancellation,
             external_operations_enabled=adapter.capabilities.performs_external_operations,
-            revalidate=lambda: self.governance.authorize_external_action(
-                job_id, context.target, context.technique
+            revalidate=_authorize_and_mark,
+            progress=lambda percent, phase: self.governance.record_progress(
+                job_id,
+                percent,
+                phase,
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
             ),
-            progress=lambda percent, phase: self.governance.record_progress(job_id, percent, phase),
-            cancellation_check=lambda: self.governance.observe_cancellation(job_id),
+            cancellation_check=lambda: self.governance.observe_cancellation(
+                job_id,
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
+            ),
+            deadline_monotonic=deadline_monotonic,
+            operation_timeout_seconds=limits.default_operation_timeout_seconds,
+            max_findings_per_job=limits.max_findings_per_job,
         )
         try:
             control.check_cancelled()
-            with self.repository.organization_context(context.organization_id):
+            # Reconstruct repository authority from the persisted, revalidated job.
+            # The requester must still have active membership; worker threads do
+            # not inherit the web request or local-operator principal.
+            with self.repository.member_context(
+                context.organization_id, context.requester_user_id, write=True
+            ):
                 with self.repository.execution_provenance_context(
                     context.model_dump(mode="json")
                 ):
                     result = adapter.execute(context, parameters, control)
+            if lease_lost.is_set():
+                self.governance.complete_action_attempt(
+                    job_id,
+                    state="outcome_uncertain",
+                    outcome_classification="lease_lost_during_execution",
+                    worker_id=self.worker_id,
+                    lease_generation=lease_generation,
+                )
+                return {"id": job_id, "status": "reconciliation_required"}
             if (
                 context.action_class == "sensitive"
                 and not self.governance.sensitive_approval_consumed(job_id)
             ):
-                self.governance.block_running_job(job_id, "SENSITIVE_ACTION_NOT_REACHED")
+                self.governance.complete_action_attempt(
+                    job_id,
+                    state="failed_before_dispatch",
+                    outcome_classification="sensitive_action_not_reached",
+                    worker_id=self.worker_id,
+                    lease_generation=lease_generation,
+                )
+                self.governance.block_running_job(
+                    job_id,
+                    "SENSITIVE_ACTION_NOT_REACHED",
+                    worker_id=self.worker_id,
+                    lease_generation=lease_generation,
+                )
                 return {"id": job_id, "status": "blocked"}
-            if not self.governance.revalidate_job(job_id):
+            if not self.governance.revalidate_job(
+                job_id, worker_id=self.worker_id, lease_generation=lease_generation
+            ):
+                self.governance.complete_action_attempt(
+                    job_id,
+                    state="outcome_uncertain",
+                    outcome_classification="revalidation_failed_post_execute",
+                    result_reference=result.result_id,
+                    worker_id=self.worker_id,
+                    lease_generation=lease_generation,
+                )
                 outcome = {"id": job_id, "status": "blocked"}
                 if result.result_id:
                     outcome["scan_id"] = result.result_id
                 return outcome
+            self.governance.complete_action_attempt(
+                job_id,
+                state="completed",
+                outcome_classification="succeeded" if result.status == "complete" else "partial",
+                result_reference=result.result_id,
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
+            )
             failed = result.status != "complete"
             self.governance.finish_job(
                 job_id,
@@ -1852,6 +3010,8 @@ class GovernedDomainWorker:
                 failed=failed,
                 error_code="ADAPTER_PARTIAL_RESULT" if failed else None,
                 result_summary=result.model_dump(mode="json"),
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
             )
             return {
                 "id": job_id,
@@ -1860,24 +3020,157 @@ class GovernedDomainWorker:
                 "adapter_id": result.adapter_id,
                 "result": result.summary,
             }
-        except ExecutionCancelled:
+        except ExecutionDeadlineExceeded:
+            latest = self.governance.latest_action_attempt(job_id)
+            if latest and latest.get("state") in {"in_progress", "outcome_uncertain"}:
+                self.governance.complete_action_attempt(
+                    job_id,
+                    state="outcome_uncertain",
+                    outcome_classification="deadline_exceeded_in_progress",
+                    worker_id=self.worker_id,
+                    lease_generation=lease_generation,
+                )
+                return {
+                    "id": job_id,
+                    "status": "reconciliation_required",
+                    "error_code": "EXTERNAL_OUTCOME_UNCERTAIN",
+                }
+            self.governance.complete_action_attempt(
+                job_id,
+                state="failed_before_dispatch",
+                outcome_classification="deadline_exceeded_before_dispatch",
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
+            )
             partial = self.governance.partial_result(job_id)
             self.governance.finish_job(
-                job_id, scan_id=partial["scan_id"], cancelled=True,
-                error_code="EXECUTION_CANCELLED", result_summary=partial["result_summary"],
+                job_id,
+                scan_id=partial["scan_id"],
+                failed=True,
+                error_code="EXECUTION_DEADLINE_EXCEEDED",
+                result_summary=partial["result_summary"],
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
+            )
+            outcome = {
+                "id": job_id,
+                "status": "failed",
+                "error_code": "EXECUTION_DEADLINE_EXCEEDED",
+            }
+            if partial["scan_id"]:
+                outcome["scan_id"] = partial["scan_id"]
+            return outcome
+        except ExecutionCancelled:
+            latest = self.governance.latest_action_attempt(job_id)
+            if deadline_exceeded.is_set():
+                if latest and latest.get("state") in {"in_progress", "outcome_uncertain"}:
+                    self.governance.complete_action_attempt(
+                        job_id,
+                        state="outcome_uncertain",
+                        outcome_classification="deadline_exceeded_in_progress",
+                        worker_id=self.worker_id,
+                        lease_generation=lease_generation,
+                    )
+                    return {
+                        "id": job_id,
+                        "status": "reconciliation_required",
+                        "error_code": "EXTERNAL_OUTCOME_UNCERTAIN",
+                    }
+                self.governance.complete_action_attempt(
+                    job_id,
+                    state="failed_before_dispatch",
+                    outcome_classification="deadline_exceeded_before_dispatch",
+                    worker_id=self.worker_id,
+                    lease_generation=lease_generation,
+                )
+                partial = self.governance.partial_result(job_id)
+                self.governance.finish_job(
+                    job_id,
+                    scan_id=partial["scan_id"],
+                    failed=True,
+                    error_code="EXECUTION_DEADLINE_EXCEEDED",
+                    result_summary=partial["result_summary"],
+                    worker_id=self.worker_id,
+                    lease_generation=lease_generation,
+                )
+                return {
+                    "id": job_id,
+                    "status": "failed",
+                    "error_code": "EXECUTION_DEADLINE_EXCEEDED",
+                }
+            if latest and latest.get("state") in {"in_progress", "outcome_uncertain"}:
+                self.governance.complete_action_attempt(
+                    job_id,
+                    state="outcome_uncertain",
+                    outcome_classification="cancelled_during_in_progress",
+                    worker_id=self.worker_id,
+                    lease_generation=lease_generation,
+                )
+                return {"id": job_id, "status": "reconciliation_required"}
+            self.governance.complete_action_attempt(
+                job_id,
+                state="failed_before_dispatch",
+                outcome_classification="cancelled_before_dispatch",
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
+            )
+            partial = self.governance.partial_result(job_id)
+            self.governance.finish_job(
+                job_id,
+                scan_id=partial["scan_id"],
+                cancelled=True,
+                error_code="EXECUTION_CANCELLED",
+                result_summary=partial["result_summary"],
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
             )
             outcome = {"id": job_id, "status": "cancelled"}
             if partial["scan_id"]:
                 outcome["scan_id"] = partial["scan_id"]
             return outcome
         except ExecutionStopped:
+            self.governance.complete_action_attempt(
+                job_id,
+                state="outcome_uncertain",
+                outcome_classification="execution_stopped",
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
+            )
             return {"id": job_id, "status": "blocked"}
         except AdapterFailure as exc:
             if exc.code == "POLICY_REVALIDATION_DENIED":
                 return {"id": job_id, "status": "blocked"}
+            latest = self.governance.latest_action_attempt(job_id)
+            if latest and latest.get("state") == "in_progress":
+                self.governance.complete_action_attempt(
+                    job_id,
+                    state="outcome_uncertain",
+                    outcome_classification=f"adapter_failure:{exc.code}",
+                    worker_id=self.worker_id,
+                    lease_generation=lease_generation,
+                )
+                return {
+                    "id": job_id,
+                    "status": "reconciliation_required",
+                    "error_code": "EXTERNAL_OUTCOME_UNCERTAIN",
+                }
+            self.governance.complete_action_attempt(
+                job_id,
+                state="failed_before_dispatch",
+                outcome_classification=exc.code,
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
+            )
             partial = self.governance.partial_result(job_id)
-            self.governance.finish_job(job_id, scan_id=partial["scan_id"], failed=True,
-                                        error_code=exc.code, result_summary=partial["result_summary"])
+            self.governance.finish_job(
+                job_id,
+                scan_id=partial["scan_id"],
+                failed=True,
+                error_code=exc.code,
+                result_summary=partial["result_summary"],
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
+            )
             outcome = {"id": job_id, "status": "failed", "error_code": exc.code}
             if partial["scan_id"]:
                 outcome["scan_id"] = partial["scan_id"]
@@ -1885,22 +3178,54 @@ class GovernedDomainWorker:
         except Exception:
             # Authorization failures already transition the job to BLOCKED. All other
             # failures have a generic durable code; internal exception text is withheld.
+            latest = self.governance.latest_action_attempt(job_id)
+            if latest and latest.get("state") == "in_progress":
+                self.governance.complete_action_attempt(
+                    job_id,
+                    state="outcome_uncertain",
+                    outcome_classification="unexpected_exception_in_progress",
+                    worker_id=self.worker_id,
+                    lease_generation=lease_generation,
+                )
+                return {"id": job_id, "status": "reconciliation_required"}
+            self.governance.complete_action_attempt(
+                job_id,
+                state="failed_before_dispatch",
+                outcome_classification="unexpected_exception_before_dispatch",
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
+            )
             partial = self.governance.partial_result(job_id)
-            self.governance.finish_job(job_id, scan_id=partial["scan_id"], failed=True,
-                                        result_summary=partial["result_summary"])
+            self.governance.finish_job(
+                job_id,
+                scan_id=partial["scan_id"],
+                failed=True,
+                result_summary=partial["result_summary"],
+                worker_id=self.worker_id,
+                lease_generation=lease_generation,
+            )
             outcome = {"id": job_id, "status": "failed"}
             if partial["scan_id"]:
                 outcome["scan_id"] = partial["scan_id"]
             return outcome
         finally:
+            heartbeat_stop.set()
+            hb_thread.join(timeout=1.0)
             with self._active_lock:
                 self._active_cancellations.pop(job_id, None)
 
     def _run(self) -> None:
+        idle_ticks = 0
         while True:
             with self._condition:
                 if self._stopping:
                     return
             if self.run_one() is None:
+                idle_ticks += 1
+                if idle_ticks >= 10:
+                    idle_ticks = 0
+                    self.governance.recover_stale_jobs(include_stopped_workers=False)
                 with self._condition:
                     self._condition.wait(timeout=0.5)
+            else:
+                idle_ticks = 0

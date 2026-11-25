@@ -674,10 +674,18 @@ class RepositoryAssessmentService:
         if not self._is_lead(user_id, organization_id, engagement_id):
             return None
         values = []
-        for item in self.projects.list():
-            if item.get("kind") == "github":
-                continue
-            values.append({"project_registry_id": str(item["project_id"]), "display_label": str(item.get("display_name", item.get("name", "Local project")))})
+        # Listing the local registry is authorized by the engagement lead check
+        # above and must remain scoped to the requested organization.
+        with self.repository.organization_context(organization_id):
+            for item in self.projects.list():
+                if item.get("kind") == "github":
+                    continue
+                values.append({
+                    "project_registry_id": str(item["project_id"]),
+                    "display_label": str(
+                        item.get("display_name", item.get("name", "Local project"))
+                    ),
+                })
         return values
 
     def create_asset(self, user_id: str, organization_id: str, engagement_id: str, description: str | None = None) -> dict[str, Any] | None:
@@ -711,14 +719,25 @@ class RepositoryAssessmentService:
             raise RepositorySnapshotError("attestation_required", "The exact repository authorization attestation is required.")
         if not project_registry_id or len(project_registry_id) > 80:
             raise RepositorySnapshotError("project_unavailable", "Registered project is unavailable.")
-        self._validate_binding(user_id, organization_id, engagement_id, asset_id, authorization_id, scope_revision_id)
-        stored = self.projects._stored(project_registry_id)
-        if stored and stored.get("kind") == "github":
-            raise RepositorySnapshotError("project_source_unsupported", "Only operator-registered local projects are supported.")
-        try:
-            label, root = self.projects.resolve(project_registry_id)
-        except ProjectError as exc:
-            raise RepositorySnapshotError("project_unavailable", "Registered project is unavailable.") from exc
+        self._validate_binding(
+            user_id, organization_id, engagement_id, asset_id,
+            authorization_id, scope_revision_id,
+        )
+        # `_validate_binding` verifies the active engagement and lead assignment.
+        # Read the operator-managed project registry only inside that org scope.
+        with self.repository.organization_context(organization_id):
+            stored = self.projects._stored(project_registry_id)
+            if stored and stored.get("kind") == "github":
+                raise RepositorySnapshotError(
+                    "project_source_unsupported",
+                    "Only operator-registered local projects are supported.",
+                )
+            try:
+                label, root = self.projects.resolve(project_registry_id)
+            except ProjectError as exc:
+                raise RepositorySnapshotError(
+                    "project_unavailable", "Registered project is unavailable."
+                ) from exc
         with self.engine.connect() as connection:
             existing_binding = connection.execute(select(repository_asset_bindings).where(
                 repository_asset_bindings.c.organization_id == organization_id,
@@ -828,6 +847,7 @@ class RepositoryAssessmentService:
             engagement_assignments.c.role == "lead",
             engagement_assignments.c.status == "active",
             organization_memberships.c.status == "active",
+            organization_memberships.c.role.in_(("owner", "admin", "member")),
             organizations.c.status == "active",
             users.c.status == "active",
             *([engagements.c.status == "active"] if require_active_engagement else []),

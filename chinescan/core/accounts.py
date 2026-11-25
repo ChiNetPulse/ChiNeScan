@@ -129,15 +129,37 @@ class LoginThrottle:
 
 
 class ProgressiveLockout:
-    """Process-local escalating lockouts shared by authentication endpoints."""
+    """Escalating lockouts shared by authentication endpoints (persisted when engine is given)."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, engine: Any = None, clock: Any = time.time) -> None:
+        self._engine = engine
+        self._clock = clock
         self._failures: dict[str, int] = {}
         self._locked_until: dict[str, float] = {}
         self._lock = threading.Lock()
 
+    @staticmethod
+    def _key_hash(key: str) -> str:
+        return hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()
+
     def retry_after(self, keys: list[str]) -> int:
-        now = time.monotonic()
+        now = self._clock()
+        if self._engine is not None:
+            from sqlalchemy import select
+
+            from chinescan.core.storage.sqlite import auth_lockouts
+
+            hashes = [self._key_hash(k) for k in set(keys)]
+            if not hashes:
+                return 0
+            with self._engine.connect() as connection:
+                rows = connection.execute(
+                    select(auth_lockouts.c.locked_until).where(auth_lockouts.c.key_hash.in_(hashes))
+                ).scalars()
+                return max(
+                    (max(0, int((lu or 0) - now + 0.999)) for lu in rows),
+                    default=0,
+                )
         with self._lock:
             return max(
                 (max(0, int(self._locked_until.get(key, 0) - now + 0.999)) for key in keys),
@@ -145,7 +167,55 @@ class ProgressiveLockout:
             )
 
     def fail(self, keys: list[str]) -> int:
-        now = time.monotonic()
+        now = self._clock()
+        if self._engine is not None:
+            from sqlalchemy import select, update
+
+            from chinescan.core.storage.sqlite import auth_lockouts
+
+            hashes = sorted({self._key_hash(k) for k in keys})
+            if not hashes:
+                return 0
+            max_retry = 0
+            with self._engine.connect() as connection:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                try:
+                    for key_hash in hashes:
+                        row = connection.execute(
+                            select(auth_lockouts.c.failure_count).where(
+                                auth_lockouts.c.key_hash == key_hash
+                            )
+                        ).first()
+                        count = (int(row.failure_count) if row else 0) + 1
+                        locked_until: float | None = None
+                        if count >= 5:
+                            stage = min((count - 5) // 5, 2)
+                            locked_until = now + (60, 300, 900)[stage]
+                            max_retry = max(max_retry, max(0, int(locked_until - now + 0.999)))
+                        if row is None:
+                            connection.execute(
+                                auth_lockouts.insert().values(
+                                    key_hash=key_hash,
+                                    failure_count=count,
+                                    locked_until=locked_until,
+                                    updated_at=now,
+                                )
+                            )
+                        else:
+                            connection.execute(
+                                update(auth_lockouts)
+                                .where(auth_lockouts.c.key_hash == key_hash)
+                                .values(
+                                    failure_count=count,
+                                    locked_until=locked_until,
+                                    updated_at=now,
+                                )
+                            )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+            return max_retry
         with self._lock:
             for key in set(keys):
                 count = self._failures.get(key, 0) + 1
@@ -159,6 +229,17 @@ class ProgressiveLockout:
             )
 
     def succeed(self, keys: list[str]) -> None:
+        if self._engine is not None:
+            from chinescan.core.storage.sqlite import auth_lockouts
+
+            hashes = [self._key_hash(k) for k in set(keys)]
+            if not hashes:
+                return
+            with self._engine.begin() as connection:
+                connection.execute(
+                    auth_lockouts.delete().where(auth_lockouts.c.key_hash.in_(hashes))
+                )
+            return
         with self._lock:
             for key in set(keys):
                 self._failures.pop(key, None)
@@ -511,7 +592,7 @@ class Session:
 
 
 class SessionStore:
-    """Opaque, process-local sessions; restarting or password reset invalidates sessions."""
+    """Opaque sessions persisted to SQLite when engine is provided."""
 
     def __init__(
         self,
@@ -519,10 +600,12 @@ class SessionStore:
         idle_ttl_seconds: int = SESSION_IDLE_TTL_SECONDS,
         *,
         clock: Any = time.time,
+        engine: Any = None,
     ) -> None:
         self.ttl_seconds = ttl_seconds
         self.idle_ttl_seconds = idle_ttl_seconds
         self._clock = clock
+        self._engine = engine
         self._sessions: dict[str, Session] = {}
         self._lock = threading.RLock()
 
@@ -544,6 +627,43 @@ class SessionStore:
             created_at=now,
             last_seen_at=now,
         )
+        token_hash = self._key(token)
+        if self._engine is not None and user_id is not None:
+            from sqlalchemy import or_
+
+            from chinescan.core.storage.sqlite import user_sessions
+
+            with self._engine.connect() as connection:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                try:
+                    connection.execute(
+                        user_sessions.delete().where(
+                            or_(
+                                user_sessions.c.expires_at <= now,
+                                user_sessions.c.last_seen_at + self.idle_ttl_seconds <= now,
+                                user_sessions.c.revoked_at.is_not(None),
+                            )
+                        )
+                    )
+                    connection.execute(
+                        user_sessions.insert().values(
+                            id=str(uuid.uuid4()),
+                            token_hash=token_hash,
+                            user_id=user_id,
+                            email_normalized=email,
+                            csrf_token=session.csrf_token,
+                            auth_epoch=auth_epoch,
+                            created_at=now,
+                            last_seen_at=now,
+                            expires_at=session.expires_at,
+                            revoked_at=None,
+                        )
+                    )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+            return token, session
         with self._lock:
             expired = [key for key, value in self._sessions.items() if value.expires_at <= now]
             for key in expired:
@@ -551,16 +671,58 @@ class SessionStore:
             if len(self._sessions) >= 128:
                 oldest = min(self._sessions, key=lambda key: self._sessions[key].expires_at)
                 del self._sessions[oldest]
-            self._sessions[self._key(token)] = session
+            self._sessions[token_hash] = session
         return token, session
 
     def get(self, token: str | None) -> Session | None:
         if not token:
             return None
         key = self._key(token)
+        now = self._clock()
+        if self._engine is not None:
+            from sqlalchemy import select, update
+
+            from chinescan.core.storage.sqlite import user_sessions
+
+            with self._engine.connect() as connection:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                try:
+                    row = connection.execute(
+                        select(user_sessions).where(user_sessions.c.token_hash == key)
+                    ).first()
+                    if row is None:
+                        connection.commit()
+                        return None
+                    if (
+                        row.revoked_at is not None
+                        or row.expires_at <= now
+                        or row.last_seen_at + self.idle_ttl_seconds <= now
+                    ):
+                        connection.execute(
+                            user_sessions.delete().where(user_sessions.c.token_hash == key)
+                        )
+                        connection.commit()
+                        return None
+                    connection.execute(
+                        update(user_sessions)
+                        .where(user_sessions.c.token_hash == key)
+                        .values(last_seen_at=now)
+                    )
+                    connection.commit()
+                    return Session(
+                        email=row.email_normalized,
+                        csrf_token=row.csrf_token,
+                        expires_at=row.expires_at,
+                        auth_epoch=row.auth_epoch,
+                        user_id=row.user_id,
+                        created_at=row.created_at,
+                        last_seen_at=now,
+                    )
+                except Exception:
+                    connection.rollback()
+                    raise
         with self._lock:
             session = self._sessions.get(key)
-            now = self._clock()
             if session and (
                 session.expires_at <= now or session.last_seen_at + self.idle_ttl_seconds <= now
             ):
@@ -570,12 +732,62 @@ class SessionStore:
                 session.last_seen_at = now
             return session
 
+    def rotate(
+        self, old_token: str | None, email: str, auth_epoch: str, user_id: str | None = None
+    ) -> tuple[str, Session]:
+        self.revoke(old_token)
+        return self.create(email, auth_epoch, user_id=user_id)
+
     def revoke(self, token: str | None) -> None:
-        if token:
-            with self._lock:
-                self._sessions.pop(self._key(token), None)
+        if not token:
+            return
+        key = self._key(token)
+        if self._engine is not None:
+            from sqlalchemy import update
+
+            from chinescan.core.storage.sqlite import user_sessions
+
+            with self._engine.begin() as connection:
+                connection.execute(
+                    update(user_sessions)
+                    .where(user_sessions.c.token_hash == key, user_sessions.c.revoked_at.is_(None))
+                    .values(revoked_at=self._clock())
+                )
+        with self._lock:
+            self._sessions.pop(key, None)
+
+    def revoke_user_sessions(self, user_id: str) -> None:
+        if self._engine is not None:
+            from sqlalchemy import update
+
+            from chinescan.core.storage.sqlite import user_sessions
+
+            with self._engine.begin() as connection:
+                connection.execute(
+                    update(user_sessions)
+                    .where(
+                        user_sessions.c.user_id == user_id,
+                        user_sessions.c.revoked_at.is_(None),
+                    )
+                    .values(revoked_at=self._clock())
+                )
+        with self._lock:
+            stale = [k for k, v in self._sessions.items() if v.user_id == user_id]
+            for k in stale:
+                del self._sessions[k]
 
     def revoke_all(self) -> None:
+        if self._engine is not None:
+            from sqlalchemy import update
+
+            from chinescan.core.storage.sqlite import user_sessions
+
+            with self._engine.begin() as connection:
+                connection.execute(
+                    update(user_sessions)
+                    .where(user_sessions.c.revoked_at.is_(None))
+                    .values(revoked_at=self._clock())
+                )
         with self._lock:
             self._sessions.clear()
 

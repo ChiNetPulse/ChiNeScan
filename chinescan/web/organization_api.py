@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from chinescan.core.accounts import Session
+from chinescan.core.identity import IdentityError, IdentityService
 from chinescan.core.organizations import OrganizationError, OrganizationService
 
 
@@ -73,6 +74,12 @@ class AssignmentUpdate(StrictModel):
     status: str | None = None
 
 
+class InvitationCreate(StrictModel):
+    email: str = Field(min_length=3, max_length=254)
+    role: str = "member"
+    ttl_hours: int = Field(default=168, ge=1, le=720)
+
+
 def _principal(session: Session) -> str:
     if not session.user_id:
         raise HTTPException(status_code=401, detail="Authentication required.")
@@ -91,6 +98,7 @@ def create_organization_router(
     service: OrganizationService,
     current_session: Any,
     require_csrf: Any,
+    identity: IdentityService | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api", tags=["organizations"])
 
@@ -395,5 +403,54 @@ def create_organization_router(
         if not service.operator_user_id or user_id != service.operator_user_id:
             raise _not_found()
         return service.migration_report() or {"status": "not_available"}
+
+    if identity is not None:
+        @router.get("/organizations/{organization_id}/invitations")
+        def list_invitations(
+            organization_id: str, session: Session = Depends(current_session)
+        ) -> dict[str, Any]:
+            items = identity.list_invitations(_principal(session), organization_id)
+            if items is None:
+                raise _not_found()
+            return {"items": items}
+
+        @router.post(
+            "/organizations/{organization_id}/invitations",
+            status_code=201,
+            dependencies=[Depends(require_csrf)],
+        )
+        def create_invitation(
+            organization_id: str,
+            payload: InvitationCreate,
+            session: Session = Depends(current_session),
+        ) -> dict[str, Any]:
+            try:
+                item = identity.create_invitation(
+                    _principal(session),
+                    organization_id,
+                    payload.email,
+                    payload.role,
+                    ttl_hours=payload.ttl_hours,
+                )
+            except IdentityError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from None
+            if item is None:
+                raise _not_found()
+            return item
+
+        @router.post(
+            "/organizations/{organization_id}/invitations/{invitation_id}/revoke",
+            dependencies=[Depends(require_csrf)],
+        )
+        def revoke_invitation(
+            organization_id: str,
+            invitation_id: str,
+            session: Session = Depends(current_session),
+        ) -> dict[str, str]:
+            if not identity.revoke_invitation(
+                _principal(session), organization_id, invitation_id
+            ):
+                raise _not_found()
+            return {"status": "revoked"}
 
     return router

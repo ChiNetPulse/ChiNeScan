@@ -260,6 +260,17 @@ class DashboardIntelligence:
                         "module": str(record.get("module", "Security Dashboard"))[:80],
                     }
                 )
+        return self._persist_signals(signals, repeated_signals)
+
+    def record_security_signal(self, signal: dict[str, str]) -> list[dict[str, Any]]:
+        """Persist one server-generated security alert without scanning tenant records."""
+        if signal.get("kind") not in {"authorization_block", "repeated_auth_failure"}:
+            raise ValueError("Unsupported dashboard security signal.")
+        return self._persist_signals([signal], [signal])
+
+    def _persist_signals(
+        self, signals: list[dict[str, str]], repeated_signals: list[dict[str, str]]
+    ) -> list[dict[str, Any]]:
         if not signals:
             return []
         try:

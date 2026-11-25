@@ -13,7 +13,7 @@ from chinescan.cli.app import app
 from chinescan.core.cases import CaseWorkflow
 from chinescan.core.models.investigation import CaseStatus
 from chinescan.core.storage.recovery import verify_backup
-from chinescan.core.storage.sqlite import SQLiteRepository
+from chinescan.cli.commands import _local_cli_repository
 from chinescan.log_analysis.service import LogAnalysisService
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "sample-logs"
@@ -36,7 +36,7 @@ def run_drill(root: Path) -> dict[str, str]:
     original = root / "original.sqlite3"
     restored = root / "restored.sqlite3"
     bundle = root / "backup-bundle"
-    repository = SQLiteRepository(original)
+    repository = _local_cli_repository(original)
     try:
         analysis = LogAnalysisService(repository).analyze(FIXTURES)
         workflow = CaseWorkflow(repository)

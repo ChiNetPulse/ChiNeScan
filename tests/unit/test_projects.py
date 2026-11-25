@@ -259,9 +259,10 @@ def test_project_logs_api_end_to_end(tmp_path: Path) -> None:
             rule_id="fixture",
             project_id=project_id,
         )
-        app.state.repository.save(
-            "finding", persisted_finding.finding_id, persisted_finding.model_dump(mode="json")
-        )
+        with app.state.repository.local_operator_context():
+            app.state.repository.save(
+                "finding", persisted_finding.finding_id, persisted_finding.model_dump(mode="json")
+            )
         assert (
             client.request(
                 "DELETE",
@@ -411,9 +412,10 @@ def test_project_suggestions_do_not_open_candidate_files(tmp_path: Path, monkeyp
         json={"name": "Metadata only", "directory_id": _selection(client)},
         headers=_headers,
     ).json()
-    suggestions = app.state.log_location_service.suggestions(
-        project["project_id"], "suggestion-spy-session"
-    )
+    with app.state.repository.local_operator_context():
+        suggestions = app.state.log_location_service.suggestions(
+            project["project_id"], "suggestion-spy-session"
+        )
     assert {item["label"] for item in suggestions["items"]} >= {
         "logs",
         "logs/auth.jsonl",
@@ -507,8 +509,11 @@ def test_external_log_location_requires_allowed_root_and_hard_deny_wins(tmp_path
     )
     assert linked.status_code == 201
     assert str(allowed) not in linked.text and str(external_logs) not in linked.text
-    with pytest.raises(ValueError, match="no longer approved") as denied:
-        app.state.log_location_service.add(project["project_id"], "Denied", denied_logs, "external")
+    with app.state.repository.local_operator_context():
+        with pytest.raises(ValueError, match="no longer approved") as denied:
+            app.state.log_location_service.add(
+                project["project_id"], "Denied", denied_logs, "external"
+            )
     assert str(denied_logs) not in str(denied.value)
     assert str(denied_logs) not in json.dumps({"detail": {"message": str(denied.value)}})
     client.close()
@@ -637,15 +642,17 @@ def test_project_api_create_show_remove_keeps_files_scans_findings_and_cases(
         rule_id="fixture",
         project_id=project["project_id"],
     )
-    repository.save("scan", scan.scan_id, scan.model_dump(mode="json"))
-    repository.save("finding", finding.finding_id, finding.model_dump(mode="json"))
+    with repository.local_operator_context():
+        repository.save("scan", scan.scan_id, scan.model_dump(mode="json"))
+        repository.save("finding", finding.finding_id, finding.model_dump(mode="json"))
     case = Case(
         case_id="project-case",
         title="Project case",
         project_id=project["project_id"],
         scan_ids=[scan.scan_id],
     )
-    repository.save("case", case.case_id, case.model_dump(mode="json"))
+    with repository.local_operator_context():
+        repository.save("case", case.case_id, case.model_dump(mode="json"))
     assert (
         client.request(
             "DELETE",
@@ -666,10 +673,11 @@ def test_project_api_create_show_remove_keeps_files_scans_findings_and_cases(
     )
     assert (root / "main.py").exists()
     assert hashlib.sha256((root / "main.py").read_bytes()).hexdigest() == before
-    assert repository.get("project", project["project_id"]) is None
-    assert repository.get("scan", scan.scan_id)["project_removed"] is True
-    assert repository.get("finding", finding.finding_id)["project_removed"] is True
-    assert repository.get("case", case.case_id)["project_removed"] is True
+    with repository.local_operator_context():
+        assert repository.get("project", project["project_id"]) is None
+        assert repository.get("scan", scan.scan_id)["project_removed"] is True
+        assert repository.get("finding", finding.finding_id)["project_removed"] is True
+        assert repository.get("case", case.case_id)["project_removed"] is True
     client.close()
 
 

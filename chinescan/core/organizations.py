@@ -19,9 +19,9 @@ from chinescan.core.storage.sqlite import (
     organization_memberships,
     organizations,
     record_ownership,
+    records,
     repository_asset_bindings,
     repository_snapshots,
-    records,
     users,
 )
 
@@ -126,22 +126,18 @@ class OrganizationService:
                 user = _dict(user_row)
                 if user["status"] != "active":
                     raise OrganizationError("The account is suspended or archived.")
-                connection.execute(
-                    update(users)
-                    .where(users.c.id == user["id"])
-                    .values(
-                        email_normalized=normalized,
-                        display_name=normalized,
-                        auth_epoch=auth_epoch,
-                        updated_at=timestamp,
+                changes = {
+                    "email_normalized": normalized,
+                    "display_name": normalized,
+                    "auth_epoch": auth_epoch,
+                }
+                if any(user[key] != value for key, value in changes.items()):
+                    connection.execute(
+                        update(users)
+                        .where(users.c.id == user["id"])
+                        .values(**changes, updated_at=timestamp)
                     )
-                )
-                user.update(
-                    email_normalized=normalized,
-                    display_name=normalized,
-                    auth_epoch=auth_epoch,
-                    updated_at=timestamp,
-                )
+                    user.update(**changes, updated_at=timestamp)
             else:
                 user = {
                     "id": identity_id or str(uuid4()),
@@ -266,17 +262,27 @@ class OrganizationService:
                 + (["Ownership table has invalid references."] if invalid_references else []),
                 "created_at": timestamp,
             }
-            connection.execute(
-                organization_bootstrap_reports.delete().where(
+            previous_report = connection.execute(
+                select(organization_bootstrap_reports).where(
                     organization_bootstrap_reports.c.report_id == report["report_id"]
                 )
-            )
-            connection.execute(
-                organization_bootstrap_reports.insert().values(
-                    report_id=report["report_id"], payload=report, created_at=timestamp
+            ).first()
+            previous_payload = _dict(previous_report).get("payload") if previous_report else None
+            if not isinstance(previous_payload, dict) or any(
+                key != "created_at" and previous_payload.get(key) != value
+                for key, value in report.items()
+            ):
+                connection.execute(
+                    organization_bootstrap_reports.delete().where(
+                        organization_bootstrap_reports.c.report_id == report["report_id"]
+                    )
                 )
-            )
-            self.repository.worker_organization_id = org["id"]
+                connection.execute(
+                    organization_bootstrap_reports.insert().values(
+                        report_id=report["report_id"], payload=report, created_at=timestamp
+                    )
+                )
+            self.repository._local_operator_organization_id = org["id"]
             return user, org
 
     def get_active_user(self, user_id: str) -> dict[str, Any] | None:
@@ -414,15 +420,7 @@ class OrganizationService:
     def update_organization(
         self, user_id: str, organization_id: str, **changes: Any
     ) -> dict[str, Any] | None:
-        with self.engine.connect() as connection:
-            actor_role = connection.execute(
-                select(organization_memberships.c.role).where(
-                    organization_memberships.c.user_id == user_id,
-                    organization_memberships.c.organization_id == organization_id,
-                    organization_memberships.c.status == "active",
-                )
-            ).scalar_one_or_none()
-        if actor_role not in {"owner", "admin"}:
+        if not self.has_role(user_id, organization_id, {"owner", "admin"}):
             return None
         changes["updated_at"] = now_iso()
         with self.engine.begin() as connection:
@@ -1027,6 +1025,7 @@ class OrganizationService:
                         engagement_assignments.c.role.in_(roles),
                         engagement_assignments.c.status == "active",
                         organization_memberships.c.status == "active",
+                        organization_memberships.c.role == "member",
                         organizations.c.status == "active",
                         engagements.c.status == "active",
                         users.c.status == "active",

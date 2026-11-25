@@ -71,6 +71,21 @@ SCAN_DETAIL_WITHHELD_FIELD_REASONS = {
 }
 
 
+
+
+def _bind_operator_repository(repository: SQLiteRepository, credential: Path) -> None:
+    from chinescan.core.organizations import OrganizationService
+    from chinescan.web.auth import operator_auth_epoch, operator_email, operator_identity_id
+
+    email = operator_email(credential)
+    identity_id = operator_identity_id(credential)
+    assert email is not None and identity_id is not None
+    OrganizationService(repository).ensure_operator(
+        email, operator_auth_epoch(credential), identity_id
+    )
+    repository.bind_local_operator_context()
+
+
 def _fixture(
     tmp_path,
     *,
@@ -81,7 +96,9 @@ def _fixture(
     database = tmp_path / "records.sqlite3"
     credential = tmp_path / "private" / "operator.json"
     create_operator(credential, "analyst@example.test", "safe local password")
-    repository = SQLiteRepository(database)
+    os.environ["CHINESCAN_OPERATOR_CREDENTIAL_FILE"] = str(credential)
+    setup_app = create_app(database, credential, serve_frontend=False)
+    repository = setup_app.state.repository
     finding = Finding(
         finding_id="finding-1",
         title="Unsafe evaluation",
@@ -106,9 +123,10 @@ def _fixture(
         finding_ids=[finding.finding_id, critical.finding_id],
         project_types=["python"],
     )
-    repository.save("finding", finding.finding_id, finding.model_dump(mode="json"))
-    repository.save("finding", critical.finding_id, critical.model_dump(mode="json"))
-    repository.save("scan", scan.scan_id, scan.model_dump(mode="json"))
+    with repository.local_operator_context():
+        repository.save("finding", finding.finding_id, finding.model_dump(mode="json"))
+        repository.save("finding", critical.finding_id, critical.model_dump(mode="json"))
+        repository.save("scan", scan.scan_id, scan.model_dump(mode="json"))
     repository.close()
     app_options: dict[str, Any] = {
         "session_ttl_seconds": ttl,
@@ -258,7 +276,7 @@ def test_complete_jsonl_route_is_authenticated_and_has_completion_record(tmp_pat
 def test_scan_cli_api_and_complete_export_share_normalized_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _, client, _, database = _fixture(tmp_path)
+    _, client, credential, database = _fixture(tmp_path)
     try:
         parity_fixture = json.loads(
             (
@@ -270,6 +288,7 @@ def test_scan_cli_api_and_complete_export_share_normalized_values(
             ).read_text(encoding="utf-8")
         )
         repository = SQLiteRepository(database)
+        _bind_operator_repository(repository, credential)
         scan = Scan.model_validate(parity_fixture["scan"])
         findings = [Finding.model_validate(item) for item in parity_fixture["findings"]]
         for finding in findings:
@@ -330,9 +349,10 @@ def test_scan_cli_api_and_complete_export_share_normalized_values(
 def test_redaction_limit_failure_is_explicit_across_cli_and_api(tmp_path: Path) -> None:
     from chinescan.core.logging.redaction import MAX_REDACT_STRING_CHARS
 
-    _, client, _, database = _fixture(tmp_path)
+    _, client, credential, database = _fixture(tmp_path)
     try:
         repository = SQLiteRepository(database)
+        _bind_operator_repository(repository, credential)
         finding = Finding.model_validate(repository.get("finding", "finding-1"))
         finding.description = "password=synthetic-report-canary " + "x" * (
             MAX_REDACT_STRING_CHARS - len("password=synthetic-report-canary ") + 1
@@ -364,9 +384,10 @@ def test_redaction_limit_failure_is_explicit_across_cli_and_api(tmp_path: Path) 
 def test_legacy_score_without_ledger_stays_unavailable_in_api_and_export(
     tmp_path: Path,
 ) -> None:
-    _, client, _, database = _fixture(tmp_path)
+    _, client, credential, database = _fixture(tmp_path)
     try:
         repository = SQLiteRepository(database)
+        _bind_operator_repository(repository, credential)
         scan = Scan.model_validate(repository.get("scan", "scan-1"))
         legacy_score = VibeCodingRisk(
             score=81,
@@ -405,7 +426,7 @@ def test_complete_export_limits_are_explicit_at_record_and_byte_boundaries(
     import importlib
 
     web_module = importlib.import_module("chinescan.web.app")
-    _, client, _, database = _fixture(tmp_path)
+    _, client, credential, database = _fixture(tmp_path)
     try:
         headers = _import_session(client)
         monkeypatch.setattr(web_module, "MAX_SCAN_REPORT_FINDINGS", 1)
@@ -416,6 +437,7 @@ def test_complete_export_limits_are_explicit_at_record_and_byte_boundaries(
 
         monkeypatch.setattr(web_module, "MAX_SCAN_REPORT_FINDINGS", 2)
         report_repository = SQLiteRepository(database)
+        _bind_operator_repository(report_repository, credential)
         try:
             body = web_module.render_report(
                 Scan.model_validate(report_repository.get("scan", "scan-1")),
@@ -468,9 +490,10 @@ def test_sql_injection_inputs_cannot_change_record_queries(tmp_path: Path, paylo
     app, client, *_ = _fixture(tmp_path)
     try:
         headers = _import_session(client)
-        before = app.state.repository.count_records("scan") + app.state.repository.count_records(
-            "finding"
-        )
+        with app.state.repository.local_operator_context():
+            before = app.state.repository.count_records("scan") + (
+                app.state.repository.count_records("finding")
+            )
         path_id = client.get(f"/api/scans/{payload}", headers=headers)
         assert path_id.status_code in {404, 422}
         search = client.get("/api/scans", params={"scanner": payload}, headers=headers)
@@ -481,9 +504,10 @@ def test_sql_injection_inputs_cannot_change_record_queries(tmp_path: Path, paylo
         filter_result = client.get("/api/findings", params={"severity": payload}, headers=headers)
         assert sort.status_code == 422
         assert filter_result.status_code == 422
-        after = app.state.repository.count_records("scan") + app.state.repository.count_records(
-            "finding"
-        )
+        with app.state.repository.local_operator_context():
+            after = app.state.repository.count_records("scan") + app.state.repository.count_records(
+                "finding"
+            )
         assert before == after
     finally:
         client.close()
@@ -699,14 +723,16 @@ def test_external_report_import_is_inert_separate_and_escaped(tmp_path: Path) ->
         )
         assert response.status_code == 201
         repository = app.state.repository
-        scan_payload = repository.get("scan", "scan-1")
-        imported_ids = [
-            finding_id
-            for finding_id in scan_payload["finding_ids"]
-            if repository.get("finding", finding_id).get("source") == "scanity"
-        ]
+        with repository.local_operator_context():
+            scan_payload = repository.get("scan", "scan-1")
+            imported_ids = [
+                finding_id
+                for finding_id in scan_payload["finding_ids"]
+                if repository.get("finding", finding_id).get("source") == "scanity"
+            ]
         assert len(imported_ids) == 1
-        imported = repository.get("finding", imported_ids[0])
+        with repository.local_operator_context():
+            imported = repository.get("finding", imported_ids[0])
         assert imported["source"] == "scanity"
         assert imported["title"] == '<script>alert("do not run")</script>'
         assert "synthetic-redaction-canary" not in imported["description"]
@@ -823,6 +849,7 @@ def test_log_source_status_endpoint_keeps_existing_array_and_authentication(tmp_
 def test_old_shape_scan_still_serializes_from_authenticated_api(tmp_path):
     _app, client, _credential, database = _fixture(tmp_path)
     repository = SQLiteRepository(database)
+    _bind_operator_repository(repository, _credential)
     old_scan = repository.get("scan", "scan-1")
     assert old_scan is not None
     old_scan.pop("coverage", None)
@@ -839,6 +866,7 @@ def test_old_shape_scan_still_serializes_from_authenticated_api(tmp_path):
 def test_every_persisted_scan_column_round_trips_through_detail_response(tmp_path):
     _app, client, _credential, database = _fixture(tmp_path)
     repository = SQLiteRepository(database)
+    _bind_operator_repository(repository, _credential)
     scan = Scan(
         scan_id="scan-1",
         project_id="project-1",
@@ -893,6 +921,7 @@ def test_successful_findings_payload_preserves_hashes_titles_and_tokens(tmp_path
         remediation=f"Rotate token {token}",
     )
     repository = SQLiteRepository(database)
+    _bind_operator_repository(repository, _credential)
     repository.save("finding", finding.finding_id, finding.model_dump(mode="json"))
     repository.close()
     assert _login(client).status_code == 200
@@ -1401,6 +1430,7 @@ def test_protected_reads_and_paginated_real_records(tmp_path):
 def test_overview_and_scan_list_accept_project_log_scan_records_with_locations(tmp_path):
     _app, client, _credential, database = _fixture(tmp_path)
     repository = SQLiteRepository(database)
+    _bind_operator_repository(repository, _credential)
     scan = repository.get("scan", "scan-1")
     assert scan is not None
     scan["location_ids"] = ["synthetic-location"]
@@ -1499,32 +1529,33 @@ def test_malware_api_fail_closed_and_redacted_case_linking(tmp_path, request):
             "clamav": {"installation": "not_checked"},
         },
     }
-    repository.save("malware_sample", sample["sample_id"], sample)
-    repository.save("malware_analysis", analysis["analysis_id"], analysis)
-    repository.save(
-        "malware_job",
-        "job-1",
-        {
-            "job_id": "job-1",
-            "sample_id": sample["sample_id"],
-            "status": "succeeded",
-            "created_at": datetime.now(UTC).isoformat(),
-            "started_at": None,
-            "finished_at": None,
-            "analysis_id": analysis["analysis_id"],
-            "warning": None,
-        },
-    )
-    repository.save(
-        "scan",
-        "scan-case",
-        Scan(
-            scan_id="scan-case",
-            target_id="target-case",
-            scanner="builtin",
-            started_at=datetime.now(UTC),
-        ).model_dump(mode="json"),
-    )
+    with repository.local_operator_context():
+        repository.save("malware_sample", sample["sample_id"], sample)
+        repository.save("malware_analysis", analysis["analysis_id"], analysis)
+        repository.save(
+            "malware_job",
+            "job-1",
+            {
+                "job_id": "job-1",
+                "sample_id": sample["sample_id"],
+                "status": "succeeded",
+                "created_at": datetime.now(UTC).isoformat(),
+                "started_at": None,
+                "finished_at": None,
+                "analysis_id": analysis["analysis_id"],
+                "warning": None,
+            },
+        )
+        repository.save(
+            "scan",
+            "scan-case",
+            Scan(
+                scan_id="scan-case",
+                target_id="target-case",
+                scanner="builtin",
+                started_at=datetime.now(UTC),
+            ).model_dump(mode="json"),
+        )
     managed_root = app.state.malware_job_manager.manager.store.root
     (managed_root / ("b" * 64)).write_bytes(b"12345678")
     client = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))
@@ -1846,7 +1877,7 @@ def test_explicit_web_startup_is_fixed_to_loopback_and_single_worker(tmp_path, m
         rmtree(external, ignore_errors=True)
 
 
-def test_session_cookie_is_invalid_after_new_application_instance(tmp_path):
+def test_session_cookie_persists_across_new_application_instance(tmp_path):
     _app, first_client, credential, database = _fixture(tmp_path)
     login = _login(first_client)
     cookie = first_client.cookies.get(COOKIE_NAME)
@@ -1854,7 +1885,7 @@ def test_session_cookie_is_invalid_after_new_application_instance(tmp_path):
     second_app = create_app(database, credential, serve_frontend=False)
     second_client = TestClient(second_app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))
     second_client.cookies.set(COOKIE_NAME, cookie)
-    assert second_client.get("/api/overview").status_code == 401
+    assert second_client.get("/api/overview").status_code == 200
     second_app.state.repository.close()
 
 

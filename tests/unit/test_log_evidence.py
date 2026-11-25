@@ -419,7 +419,7 @@ def test_log_evidence_backup_and_restore_include_snapshot_content(tmp_path: Path
     restore_dir = tmp_path / "restore"
     restore_dir.mkdir()
     restored = restore_backup(bundle, restore_dir / "restored.sqlite3")
-    assert restored.resulting_revision == "0013_governed_chain_trace"
+    assert restored.resulting_revision == "0015_durable_job_leases_actions"
     restored_snapshot_file = (
         restore_dir / "log-evidence-snapshots" / _org / evidence["sha256"] / "events.jsonl"
     )

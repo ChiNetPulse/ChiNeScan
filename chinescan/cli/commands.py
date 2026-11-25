@@ -40,10 +40,10 @@ from chinescan.core.fs_policy import (
 )
 from chinescan.core.github_import import GitHubImportService
 from chinescan.core.log_evidence import LogEvidenceError, LogEvidenceStore
-from chinescan.core.malware_evidence import MalwareEvidenceError, MalwareEvidenceStore
 from chinescan.core.log_locations import LogLocationService
 from chinescan.core.logging.redaction import redact
 from chinescan.core.malware_ack import MalwareAcknowledgementError, MalwareAcknowledgements
+from chinescan.core.malware_evidence import MalwareEvidenceError, MalwareEvidenceStore
 from chinescan.core.malware_project_scan import ProjectMalwareScanner
 from chinescan.core.models.common import Severity
 from chinescan.core.models.investigation import CaseStatus
@@ -104,6 +104,7 @@ from chinescan.web.auth import (
     migrate_legacy_operator,
     migrate_operator_email_for_reset,
     normalize_email,
+    operator_auth_epoch,
     operator_email,
     operator_identity_id,
     operator_identity_summary,
@@ -122,11 +123,72 @@ def version() -> None:
 
 
 def _operator_credential_path(path: Path | None) -> Path:
-    selected = (path or Path.home() / ".config" / "chinescan" / "operator.json").expanduser()
+    configured = os.environ.get("CHINESCAN_OPERATOR_CREDENTIAL_FILE")
+    selected = (
+        path or (Path(configured) if configured else None)
+        or Path.home() / ".config" / "chinescan" / "operator.json"
+    ).expanduser()
     resolved = selected.resolve(strict=False)
     if any((parent / ".git").exists() for parent in resolved.parents):
         raise CredentialError("Operator credentials must be stored outside Git repositories.")
     return resolved
+
+
+def _local_cli_repository(database_path: Path | str) -> SQLiteRepository:
+    """Open a local CLI repository scoped to the bootstrapped operator's personal org."""
+    repository = SQLiteRepository(database_path)
+    try:
+        credentials = _operator_credential_path(None)
+        if operator_status(credentials) != "active":
+            raise CredentialError("Complete local operator bootstrap before using stored CLI data.")
+        email = operator_email(credentials)
+        if not email:
+            raise CredentialError("Local operator account is unavailable or invalid.")
+        identity_id = operator_identity_id(credentials)
+        if identity_id is None:
+            raise CredentialError(
+                "Persistent operator identity is unavailable; start the dashboard once "
+                "after bootstrap."
+            )
+        organizations = OrganizationService(repository)
+        operator = organizations.get_active_user(identity_id)
+        if operator is not None:
+            if operator.get("email_normalized") != email:
+                raise CredentialError("Local operator identity could not be verified.")
+            if operator.get("auth_epoch") != operator_auth_epoch(credentials):
+                operator, _personal_organization = organizations.ensure_operator(
+                    email, operator_auth_epoch(credentials), identity_id
+                )
+            else:
+                personal_organization_id = organizations.personal_organization_id(identity_id)
+                if personal_organization_id is None:
+                    raise CredentialError("Local operator organization is unavailable.")
+                repository._local_operator_organization_id = personal_organization_id
+        else:
+            with repository.engine.connect() as connection:
+                persistent_data_exists = any(
+                    int(connection.exec_driver_sql(query).scalar_one()) > 0
+                    for query in (
+                        "SELECT count(*) FROM users",
+                        "SELECT count(*) FROM records",
+                    )
+                )
+            if persistent_data_exists:
+                raise CredentialError(
+                    "Existing data requires explicit operator bootstrap before local CLI access."
+                )
+            operator, _personal_organization = organizations.ensure_operator(
+                email, operator_auth_epoch(credentials), identity_id
+            )
+        if operator is not None and operator.get("id") != identity_id:
+            raise CredentialError("Local operator identity could not be verified.")
+        repository.bind_local_operator_context()
+        return repository
+    except Exception as exc:
+        repository.close()
+        if isinstance(exc, (CredentialError, StorageError)):
+            raise StorageError("Authorized local CLI storage is unavailable.") from exc
+        raise StorageError("Authorized local CLI storage is unavailable.") from exc
 
 
 web_app = typer.Typer(help="Start or bootstrap the authenticated loopback dashboard.")
@@ -642,7 +704,7 @@ def _github_service(
     from chinescan.core.fs_policy import FilesystemBrowserService
     from chinescan.core.projects import ProjectFileRegistry
 
-    repository = SQLiteRepository(settings.database_path)
+    repository = _local_cli_repository(settings.database_path)
     hard, soft = policy_paths(settings)
     managed_directory = settings.database_path.expanduser().resolve(strict=False).parent / "gh"
     projects = ProjectService(
@@ -909,7 +971,7 @@ def code_scan(
             scanners.append(IndicatorScanner(indicator_files or []))
         else:
             scanners.append(NpmAuditScanner(timeout_seconds))
-    repository = SQLiteRepository(settings.database_path)
+    repository = _local_cli_repository(settings.database_path)
     try:
         result = CodeScanService(scanners, repository).scan(target)
     except ScannerError as exc:
@@ -920,7 +982,7 @@ def code_scan(
 
     saved_reports: list[Path] = []
     if not no_save_report:
-        report_repository = SQLiteRepository(settings.database_path)
+        report_repository = _local_cli_repository(settings.database_path)
         try:
             saved_reports = save_scan_reports(
                 report_repository, result.scan_id, settings.reports_dir
@@ -1015,7 +1077,7 @@ def report(
         raise typer.BadParameter(
             "must be json, full-json, jsonl, detail, markdown, html, csv, sarif, or share-summary"
         )
-    repository = SQLiteRepository(_settings().database_path)
+    repository = _local_cli_repository(_settings().database_path)
     try:
         if output_format == "jsonl":
             if output is None:
@@ -1047,7 +1109,7 @@ def compare_scans(
     baseline_scan_id: str = typer.Argument(..., help="Earlier scan ID."),  # noqa: B008
     current_scan_id: str = typer.Argument(..., help="Later scan ID."),  # noqa: B008
 ) -> None:
-    repository = SQLiteRepository(_settings().database_path)
+    repository = _local_cli_repository(_settings().database_path)
     try:
         _, baseline = scan_data(repository, baseline_scan_id)
         _, current = scan_data(repository, current_scan_id)
@@ -1075,7 +1137,7 @@ def scan_trends(
     """Summarize local scan, finding, and alert counts by day."""
     if output_format not in {"human", "json"}:
         raise typer.BadParameter("must be 'human' or 'json'")
-    repository = SQLiteRepository(_settings().database_path)
+    repository = _local_cli_repository(_settings().database_path)
     try:
         summary = scan_history_trends(
             repository.list_records("scan"),
@@ -1116,7 +1178,7 @@ def logs_ingest(
         raise typer.BadParameter("--rules path does not exist")
     if ioc_file is not None and not ioc_file.is_file():
         raise typer.BadParameter("--ioc-file must be a local file")
-    repository = SQLiteRepository(_settings().database_path)
+    repository = _local_cli_repository(_settings().database_path)
     try:
         result = LogAnalysisService(repository).analyze(target, rules_path=rules, ioc_path=ioc_file)
     except LogIngestionError as exc:
@@ -1175,6 +1237,7 @@ def log_evidence_register(
         raise typer.Exit(code=2) from exc
     settings = _settings()
     repository = SQLiteRepository(settings.database_path)
+    repository.bind_member_context(organization_id, user_id, write=True)
     try:
         organizations = OrganizationService(repository)
         user = organizations.get_active_user(user_id)
@@ -1233,6 +1296,7 @@ def governed_log_analysis(
         raise typer.Exit(code=2) from exc
     settings = _settings()
     repository = SQLiteRepository(settings.database_path)
+    repository.bind_member_context(organization_id, user_id, write=True)
     try:
         organizations = OrganizationService(repository)
         user = organizations.get_active_user(user_id)
@@ -1317,6 +1381,7 @@ def governed_chain_trace(
         raise typer.Exit(code=2) from exc
     settings = _settings()
     repository = SQLiteRepository(settings.database_path)
+    repository.bind_member_context(organization_id, user_id, write=True)
     try:
         organizations = OrganizationService(repository)
         user = organizations.get_active_user(user_id)
@@ -1439,6 +1504,7 @@ def malware_evidence_register(
         typer.echo(str(redact(str(exc))), err=True)
         raise typer.Exit(code=2) from exc
     repository = SQLiteRepository(_settings().database_path)
+    repository.bind_member_context(organization_id, user_id, write=True)
     try:
         settings = _settings()
         organizations = OrganizationService(repository)
@@ -1493,6 +1559,7 @@ def governed_malware_triage(
         raise typer.Exit(code=2) from exc
     settings = _settings()
     repository = SQLiteRepository(settings.database_path)
+    repository.bind_member_context(organization_id, user_id, write=True)
     try:
         organizations = OrganizationService(repository)
         user = organizations.get_active_user(user_id)
@@ -1684,6 +1751,7 @@ def domain_assess(
                 "Persistent operator identity is unavailable; run web bootstrap first.", err=True
             )
             raise typer.Exit(code=2)
+        repository.bind_member_context(organization_id, principal, write=True)
         governance = ExecutionGovernanceService(
             EngagementSecurityService(repository, organization_service)
         )
@@ -1808,6 +1876,7 @@ def governed_code_scan(
             )
             raise typer.Exit(code=2)
 
+        repository.bind_member_context(organization_id, stable_user_id, write=True)
         security = EngagementSecurityService(repository, organizations)
         snapshot_root = (
             settings.database_path.expanduser().resolve(strict=False).parent
@@ -1906,6 +1975,18 @@ case_app.add_typer(case_note_app, name="note")
 db_app = typer.Typer(help="Create, verify, and restore local SQLite backups.")
 
 
+def _authorize_local_database_maintenance(database_path: Path) -> None:
+    """Require an established local operator before a CLI command reads the live DB."""
+    try:
+        repository = _local_cli_repository(database_path)
+    except (StorageError, SQLAlchemyError, OSError) as exc:
+        typer.echo(
+            "Authorized local operator access is required for database maintenance.", err=True
+        )
+        raise typer.Exit(code=1) from exc
+    repository.close()
+
+
 def _recovery_error(exc: RecoveryError) -> None:
     typer.echo(str(redact(str(exc))), err=True)
     raise typer.Exit(code=exc.exit_code) from exc
@@ -1921,6 +2002,7 @@ def database_backup(
     if output_format not in {"human", "json"}:
         raise typer.BadParameter("must be human or json")
     settings = _settings()
+    _authorize_local_database_maintenance(settings.database_path)
     try:
         result = backup_database(
             settings.database_path,
@@ -2001,6 +2083,7 @@ def database_restore(
     if output_format not in {"human", "json"}:
         raise typer.BadParameter("must be human or json")
     settings = _settings()
+    _authorize_local_database_maintenance(settings.database_path)
     try:
         result = restore_backup(
             backup_directory,
@@ -2058,7 +2141,7 @@ def database_retention_plan(
 
 def _case_repository() -> SQLiteRepository:
     try:
-        return SQLiteRepository(_settings().database_path)
+        return _local_cli_repository(_settings().database_path)
     except (StorageError, SQLAlchemyError, OSError) as exc:
         typer.echo("Case storage could not be opened.", err=True)
         raise typer.Exit(code=1) from exc
@@ -2370,7 +2453,7 @@ def _project_service(repository: SQLiteRepository | None = None) -> ProjectServi
         ],
     )
     return ProjectService(
-        repository or SQLiteRepository(settings.database_path),
+        repository or _local_cli_repository(settings.database_path),
         FilesystemBrowserService(settings.allowed_roots, hard, soft, settings.allow_soft_denied),
         legacy,
         allowed_roots=settings.allowed_roots,

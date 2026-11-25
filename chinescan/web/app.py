@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import secrets
 import shutil
 import threading
@@ -25,7 +26,7 @@ from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Requ
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.routing import Match
 
@@ -39,6 +40,7 @@ from chinescan.core.cases import (
     CaseWorkflowError,
 )
 from chinescan.core.config.settings import Settings
+from chinescan.core.errors import StorageError
 from chinescan.core.dashboard_alerts import AlertStateError, DashboardAlerts
 from chinescan.core.dashboard_intelligence import DashboardIntelligence
 from chinescan.core.diagnostics import build_report, health_report
@@ -70,6 +72,7 @@ from chinescan.core.models.finding import EvidenceLocation, Finding, FindingExpl
 from chinescan.core.organizations import OrganizationService
 from chinescan.core.engagement_security import EngagementSecurityService
 from chinescan.core.execution_governance import ExecutionGovernanceService, GovernedDomainWorker
+from chinescan.core.identity import IdentityError, IdentityService
 from chinescan.core.repository_assessment import RepositoryAssessmentService, RepositorySnapshotStore
 from chinescan.core.execution_adapters import (
     GovernedLogAnalysisAdapter,
@@ -160,6 +163,29 @@ class LoginRequest(BaseModel):
     @classmethod
     def validate_email(cls, value: str) -> str:
         return normalize_email(value)
+
+
+class InvitationAcceptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str = Field(min_length=16, max_length=256)
+    password: str | None = Field(default=None, min_length=1, max_length=1024)
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class PasswordChangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    current_password: str = Field(min_length=1, max_length=1024)
+    new_password: str = Field(min_length=12, max_length=128)
+
+
+class TotpCodeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str = Field(min_length=6, max_length=64)
+
+
+class AccountStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["active", "disabled", "revoked", "suspended"]
 
 
 class SignupRequest(BaseModel):
@@ -592,15 +618,27 @@ def create_app(
     settings: Settings | None = None,
     github_import_test_file_transport: bool = False,
     test_only_project_operation_rate_limit: int | None = None,
+    start_governed_worker: bool = True,
 ) -> FastAPI:
     """Create an app; the optional project-limit override is only for isolated tests."""
     configure_logging()
     active_settings = settings or Settings(_env_file=None)
     repository = SQLiteRepository(database_path)
     organization_service = OrganizationService(repository)
+    identity_service = IdentityService(organization_service)
     engagement_security_service = EngagementSecurityService(repository, organization_service)
-    execution_governance = ExecutionGovernanceService(engagement_security_service)
-    governed_domain_worker = GovernedDomainWorker(repository, execution_governance)
+    from chinescan.core.resource_governance import ResourceLimits
+
+    resource_limits = ResourceLimits.from_settings(active_settings)
+    execution_governance = ExecutionGovernanceService(
+        engagement_security_service,
+        resource_limits=resource_limits,
+    )
+    governed_domain_worker = GovernedDomainWorker(
+        repository,
+        execution_governance,
+        shutdown_grace_seconds=resource_limits.shutdown_grace_seconds,
+    )
     dashboard_alerts = DashboardAlerts(repository)
     dashboard_intelligence = DashboardIntelligence(repository, dashboard_alerts)
     auth_failure_windows: dict[str, deque[float]] = {}
@@ -611,7 +649,7 @@ def create_app(
         else active_settings.session_absolute_ttl_seconds
     )
     idle_ttl_seconds = active_settings.session_idle_ttl_seconds
-    sessions = SessionStore(absolute_ttl_seconds, idle_ttl_seconds)
+    sessions = SessionStore(absolute_ttl_seconds, idle_ttl_seconds, engine=repository.engine)
     credentials = Path(credential_path)
     try:
         migrate_legacy_operator(credentials)
@@ -627,9 +665,14 @@ def create_app(
                     stable_identity = ensure_operator_identity_id(
                         credentials, stable_identity or str(uuid4())
                     )
-                organization_service.ensure_operator(
-                    stored_operator_email, operator_auth_epoch(credentials), stable_identity
+                op_epoch = operator_auth_epoch(credentials)
+                effective_epoch = identity_service.active_auth_epoch_for_operator(
+                    stable_identity, op_epoch
                 )
+                _op_user, _op_org = organization_service.ensure_operator(
+                    stored_operator_email, effective_epoch, stable_identity
+                )
+                identity_service.migrate_operator_credentials(credentials, _op_user["id"])
         except Exception:
             # Authentication remains closed until the idempotent identity and
             # ownership bootstrap succeeds on a later retry.
@@ -838,25 +881,45 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
-        jobs.start()
-        governed_domain_worker.start()
-        chain_jobs.start()
-        log_jobs.start()
-        project_malware_jobs.start()
+        local_worker_managers = (
+            jobs,
+            chain_jobs,
+            log_jobs,
+            project_malware_jobs,
+        )
+        started_local_workers: list[Any] = []
+        for manager in local_worker_managers:
+            try:
+                manager.start()
+            except StorageError:
+                # A local worker is unavailable until operator bootstrap has established
+                # the personal organization. Keep diagnostic/auth endpoints available.
+                logging.getLogger("chinescan.worker").warning(
+                    "local_worker_start_denied", extra={"worker": type(manager).__name__}
+                )
+            else:
+                started_local_workers.append(manager)
+        if start_governed_worker and os.environ.get("CHINESCAN_STANDALONE_WORKER") != "1":
+            governed_domain_worker.start()
         github_imports.start_worker()
         if malware_jobs is not None:
-            malware_jobs.start()
+            try:
+                malware_jobs.start()
+                started_local_workers.append(malware_jobs)
+            except StorageError:
+                logging.getLogger("chinescan.worker").warning(
+                    "local_worker_start_denied",
+                    extra={"worker": type(malware_jobs).__name__},
+                )
         try:
             yield
         finally:
             governed_domain_worker.stop()
-            if malware_jobs is not None:
-                malware_jobs.stop()
-            log_jobs.stop()
-            project_malware_jobs.stop()
             github_imports.stop_worker()
-            jobs.stop()
-            chain_jobs.stop()
+            for manager in reversed(started_local_workers):
+                stop = getattr(manager, "stop", None) or getattr(manager, "stop_worker", None)
+                if stop is not None:
+                    stop()
         repository.close()
 
     application = FastAPI(
@@ -879,6 +942,7 @@ def create_app(
     application.state.dashboard_alerts = dashboard_alerts
     application.state.dashboard_intelligence = dashboard_intelligence
     application.state.organization_service = organization_service
+    application.state.identity_service = identity_service
     application.state.engagement_security_service = engagement_security_service
     application.state.execution_governance = execution_governance
     application.state.governed_domain_worker = governed_domain_worker
@@ -1049,17 +1113,28 @@ def create_app(
                 return limited
         path = request.url.path
         organization_api = path.startswith("/api/organizations/") or path == "/api/organizations"
-        identity_api = path == "/api/auth/me" or path in {
-            "/api/auth/session",
-            "/api/auth/csrf",
-            "/api/ready",
-            "/api/diagnostics",
-        }
+        identity_api = (
+            path == "/api/auth/me"
+            or path in {
+                "/api/auth/session",
+                "/api/auth/csrf",
+                "/api/auth/password/change",
+                "/api/auth/totp",
+                "/api/auth/totp/enroll",
+                "/api/auth/totp/confirm",
+                "/api/auth/totp/disable",
+                "/api/auth/totp/recovery-codes",
+                "/api/ready",
+                "/api/diagnostics",
+            }
+            or path.startswith("/api/auth/users/")
+        )
         public_auth_api = path in {
             "/api/auth/login",
             "/api/auth/signup",
             "/api/auth/forgot-password",
             "/api/auth/reset-password",
+            "/api/auth/invitations/accept",
         }
         unsupported_version_alias = path.startswith("/api/v") and not path.startswith(
             "/api/v1/"
@@ -1084,9 +1159,38 @@ def create_app(
                 denied.headers["X-Request-ID"] = request_id
                 denied.headers["X-API-Version"] = "1"
                 return denied
+            if not session.user_id:
+                denied = JSONResponse(
+                    status_code=401, content={"detail": "Authentication required."}
+                )
+                denied.headers["X-Request-ID"] = request_id
+                denied.headers["X-API-Version"] = "1"
+                return denied
+            organization_member_resource = path in {
+                "/api/scans", "/api/cases", "/api/findings", "/api/reports"
+            } or any(
+                path.startswith(prefix)
+                for prefix in ("/api/scans/", "/api/cases/", "/api/findings/", "/api/reports/")
+            )
+            operator_only_prefixes = (
+                "/api/projects",
+                "/api/code",
+                "/api/log",
+                "/api/malware",
+                "/api/chain",
+                "/api/alerts",
+                "/api/dashboard",
+                "/api/github",
+                "/api/fs",
+                "/api/organization-migration-report",
+                "/api/organization-bootstrap-report",
+            )
             if (
-                not organization_service.operator_user_id
-                or session.user_id != organization_service.operator_user_id
+                not organization_member_resource
+                and (
+                    not organization_service.operator_user_id
+                    or session.user_id != organization_service.operator_user_id
+                )
             ):
                 denied = JSONResponse(
                     status_code=403, content={"detail": "Local operator access required."}
@@ -1103,17 +1207,6 @@ def create_app(
                 denied.headers["X-Request-ID"] = request_id
                 denied.headers["X-API-Version"] = "1"
                 return denied
-            operator_only_prefixes = (
-                "/api/projects",
-                "/api/code",
-                "/api/log",
-                "/api/malware",
-                "/api/chain",
-                "/api/alerts",
-                "/api/dashboard",
-                "/api/github",
-                "/api/fs",
-            )
             if path.startswith(operator_only_prefixes):
                 personal_id = organization_service.personal_organization_id(session.user_id)
                 if not personal_id or organization_id != personal_id:
@@ -1124,7 +1217,31 @@ def create_app(
                     denied.headers["X-API-Version"] = "1"
                     return denied
             request.state.organization_id = organization_id
-            with repository.organization_context(organization_id):
+            organization_scoped_resource = organization_member_resource or path.startswith(
+                operator_only_prefixes
+            )
+            if organization_scoped_resource:
+                membership_role = organization_service.membership_role(
+                    session.user_id, organization_id
+                )
+                if request.method in {"POST", "PUT", "PATCH", "DELETE"} and membership_role not in {
+                    "owner", "admin", "member"
+                }:
+                    denied = JSONResponse(
+                        status_code=403,
+                        content={"detail": "Organization role does not allow this action."},
+                    )
+                    denied.headers["X-Request-ID"] = request_id
+                    denied.headers["X-API-Version"] = "1"
+                    return denied
+                authorization_scope = repository.member_context(
+                    organization_id,
+                    session.user_id,
+                    write=request.method in {"POST", "PUT", "PATCH", "DELETE"},
+                )
+            else:
+                authorization_scope = repository.organization_context(organization_id)
+            with authorization_scope:
                 response = await call_next(request)
         else:
             response = await call_next(request)
@@ -1185,13 +1302,13 @@ def create_app(
         session = sessions.get(token)
         if session is None:
             raise HTTPException(status_code=401, detail="Authentication required.")
-        try:
-            if not secrets.compare_digest(session.auth_epoch, operator_auth_epoch(credentials)):
-                sessions.revoke(token)
-                raise HTTPException(status_code=401, detail="Authentication required.")
-        except CredentialError:
-            sessions.revoke(token)
-            raise HTTPException(status_code=401, detail="Authentication required.") from None
+        if (
+            session.user_id
+            and organization_service.operator_user_id
+            and session.user_id == organization_service.operator_user_id
+            and operator_status(credentials) == "active"
+        ):
+            identity_service.migrate_operator_credentials(credentials, session.user_id)
         persistent_user = (
             organization_service.get_active_user(session.user_id) if session.user_id else None
         )
@@ -1212,12 +1329,20 @@ def create_app(
                 status_code=429, detail="Diagnostics rate limit reached; retry shortly."
             )
 
+    def require_local_operator_diagnostics(session: Session) -> None:
+        if (
+            not organization_service.operator_user_id
+            or session.user_id != organization_service.operator_user_id
+        ):
+            raise HTTPException(status_code=404, detail="Resource not found.")
+
     @application.get("/api/health")
     def health() -> dict[str, Any]:
         return health_report(started_at=application.state.started_at, bind_address="127.0.0.1")
 
     @application.get("/api/ready")
-    def ready(request: Request, _session: Session = Depends(current_session)) -> Response:  # noqa: B008
+    def ready(request: Request, session: Session = Depends(current_session)) -> Response:  # noqa: B008
+        require_local_operator_diagnostics(session)
         allow_diagnostics(request)
         report = build_report(
             settings=active_settings,
@@ -1254,8 +1379,9 @@ def create_app(
     @application.get("/api/diagnostics")
     def diagnostics(
         request: Request,
-        _session: Session = Depends(current_session),  # noqa: B008
+        session: Session = Depends(current_session),  # noqa: B008
     ) -> dict[str, Any]:
+        require_local_operator_diagnostics(session)
         allow_diagnostics(request)
         return build_report(
             settings=active_settings,
@@ -1264,6 +1390,15 @@ def create_app(
             frontend_dist=FRONTEND_DIST,
             errors=application.state.diagnostic_errors,
         )
+
+    @application.get("/api/diagnostics/execution-resources")
+    def execution_resource_diagnostics(
+        request: Request,
+        session: Session = Depends(current_session),  # noqa: B008
+    ) -> dict[str, Any]:
+        require_local_operator_diagnostics(session)
+        allow_diagnostics(request)
+        return execution_governance.get_global_resource_diagnostics()
 
     def require_csrf(
         request: Request,
@@ -1274,21 +1409,21 @@ def create_app(
         import secrets
 
         if not csrf_header or not secrets.compare_digest(session.csrf_token, csrf_header):
-            dashboard_intelligence.refresh_alerts(
-                [
-                    {
-                        "key": "csrf-block:" + str(getattr(request.state, "request_id", uuid4())),
-                        "kind": "authorization_block",
-                        "summary": "A same-origin request failed the CSRF authorization check.",
-                        "module": "Security Dashboard",
-                    }
-                ]
+            if not session.user_id:
+                raise HTTPException(status_code=401, detail="Authentication required.")
+            dashboard_intelligence.record_security_signal(
+                {
+                    "key": "csrf-block:" + str(getattr(request.state, "request_id", uuid4())),
+                    "kind": "authorization_block",
+                    "summary": "A same-origin request failed the CSRF authorization check.",
+                    "module": "Security Dashboard",
+                }
             )
             raise HTTPException(status_code=403, detail="CSRF validation failed.")
         return session
 
     organization_router = create_organization_router(
-        organization_service, current_session, require_csrf
+        organization_service, current_session, require_csrf, identity=identity_service
     )
     application.router.routes.extend(organization_router.routes)
 
@@ -1433,7 +1568,7 @@ def create_app(
         except GitHubImportError as exc:
             raise github_import_error(exc) from exc
 
-    auth_lockout = ProgressiveLockout()
+    auth_lockout = ProgressiveLockout(engine=repository.engine)
 
     def lockout_keys(request: Request, email: str) -> list[str]:
         ip = request.client.host if request.client else "unknown"
@@ -1450,19 +1585,22 @@ def create_app(
     def auth_session(token: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> dict[str, Any]:
         session = sessions.get(token)
         if session is not None:
-            try:
-                if not secrets.compare_digest(session.auth_epoch, operator_auth_epoch(credentials)):
-                    session = None
-            except CredentialError:
-                session = None
+            if (
+                session.user_id
+                and organization_service.operator_user_id
+                and session.user_id == organization_service.operator_user_id
+                and operator_status(credentials) == "active"
+            ):
+                identity_service.migrate_operator_credentials(credentials, session.user_id)
             persistent_user = (
                 organization_service.get_active_user(session.user_id)
-                if session is not None and session.user_id else None
+                if session.user_id else None
             )
-            if session is not None and (
+            if (
                 not persistent_user
                 or not secrets.compare_digest(persistent_user["auth_epoch"], session.auth_epoch)
             ):
+                sessions.revoke(token)
                 session = None
         email = session.email if session else None
         local, separator, domain = email.partition("@") if email else ("", "", "")
@@ -1483,15 +1621,28 @@ def create_app(
         retry = auth_lockout.retry_after(keys)
         if retry:
             raise lockout_response(retry)
-        try:
-            valid = verify_operator(credentials, payload.email, payload.password)
-            if valid and operator_totp_enabled(credentials):
-                valid = bool(payload.totp_code) and verify_operator_totp(
-                    credentials, payload.totp_code or ""
-                )
-        except Exception:
-            valid = False
-        if not valid:
+        if operator_status(credentials) == "active":
+            try:
+                op_email = operator_email(credentials)
+                if op_email and normalize_email(payload.email) == op_email:
+                    stable_identity = operator_identity_id(credentials)
+                    if stable_identity is None:
+                        stable_identity = ensure_operator_identity_id(
+                            credentials,
+                            organization_service.user_id_for_email(op_email) or str(uuid4()),
+                        )
+                    op_epoch = operator_auth_epoch(credentials)
+                    effective_epoch = identity_service.active_auth_epoch_for_operator(
+                        stable_identity, op_epoch
+                    )
+                    op_user, _op_org = organization_service.ensure_operator(
+                        op_email, effective_epoch, stable_identity
+                    )
+                    identity_service.migrate_operator_credentials(credentials, op_user["id"])
+            except Exception:
+                pass
+        user = identity_service.authenticate(payload.email, payload.password, payload.totp_code)
+        if user is None:
             retry = auth_lockout.fail(keys)
             now = time.monotonic()
             scope = hashlib.sha256("|".join(keys).encode("utf-8", errors="replace")).hexdigest()
@@ -1500,33 +1651,23 @@ def create_app(
                 failures.popleft()
             failures.append(now)
             if len(failures) >= 5:
-                dashboard_intelligence.refresh_alerts(
-                    [dashboard_intelligence.repeated_auth_signal(scope)]
+                dashboard_intelligence.record_security_signal(
+                    dashboard_intelligence.repeated_auth_signal(scope)
                 )
             if retry:
                 raise lockout_response(retry)
             raise HTTPException(status_code=401, detail="Invalid email or password.")
         auth_lockout.succeed(keys)
         sessions.revoke(request.cookies.get(COOKIE_NAME))
-        stored_email = normalize_email(payload.email)
-        try:
-            stable_identity = operator_identity_id(credentials)
-            if stable_identity is None:
-                stable_identity = ensure_operator_identity_id(
-                    credentials,
-                    organization_service.user_id_for_email(stored_email) or str(uuid4()),
-                )
-            user, _personal_org = organization_service.ensure_operator(
-                stored_email, operator_auth_epoch(credentials), stable_identity
-            )
-        except Exception:
-            raise HTTPException(
-                status_code=503, detail="Account identity is temporarily unavailable."
-            ) from None
         opaque, session = sessions.create(
-            stored_email, operator_auth_epoch(credentials), user_id=user["id"]
+            user["email_normalized"], user["auth_epoch"], user_id=user["id"]
         )
-        application.state.local_operator_user_id = user["id"]
+        if (
+            organization_service.operator_user_id is None
+            and operator_status(credentials) == "active"
+            and operator_email(credentials) == user["email_normalized"]
+        ):
+            application.state.local_operator_user_id = user["id"]
         response.set_cookie(
             COOKIE_NAME,
             opaque,
@@ -1562,6 +1703,7 @@ def create_app(
             user, _personal_org = organization_service.ensure_operator(
                 stored_email, operator_auth_epoch(credentials), stable_identity
             )
+            identity_service.migrate_operator_credentials(credentials, user["id"])
         except Exception:
             # The credential source remains intact; application startup/login
             # retries the idempotent identity bootstrap and never rolls it back.
@@ -1612,6 +1754,10 @@ def create_app(
                 status_code=400, detail="Reset could not be completed. Request a new local token."
             )
         auth_lockout.succeed(keys)
+        if organization_service.operator_user_id:
+            identity_service.migrate_operator_credentials(
+                credentials, organization_service.operator_user_id
+            )
         sessions.revoke_all()
         return {"status": "Password reset. Sign in with your new password."}
 
@@ -1626,6 +1772,175 @@ def create_app(
             COOKIE_NAME, path="/", secure=secure_cookie, httponly=True, samesite="strict"
         )
         return {"status": "logged_out"}
+
+    @application.post("/api/auth/invitations/accept", status_code=200)
+    def accept_invitation(
+        payload: InvitationAcceptRequest,
+        request: Request,
+        response: Response,
+        token: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    ) -> dict[str, Any]:
+        ip = request.client.host if request.client else "unknown"
+        keys = [f"invite-ip:{ip}"]
+        retry = auth_lockout.retry_after(keys)
+        if retry:
+            raise lockout_response(retry)
+        authenticated_user_id: str | None = None
+        existing_session = sessions.get(token)
+        if existing_session and existing_session.user_id:
+            active = organization_service.get_active_user(existing_session.user_id)
+            if active and secrets.compare_digest(
+                active["auth_epoch"], existing_session.auth_epoch
+            ):
+                authenticated_user_id = active["id"]
+        try:
+            accepted = identity_service.accept_invitation(
+                payload.token,
+                password=payload.password,
+                display_name=payload.display_name,
+                authenticated_user_id=authenticated_user_id,
+            )
+        except IdentityError as exc:
+            retry = auth_lockout.fail(keys)
+            if retry:
+                raise lockout_response(retry) from None
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        auth_lockout.succeed(keys)
+        user = accepted["user"]
+        opaque, session = sessions.rotate(
+            token, user["email_normalized"], user["auth_epoch"], user_id=user["id"]
+        )
+        response.set_cookie(
+            COOKIE_NAME,
+            opaque,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+            max_age=absolute_ttl_seconds,
+            path="/",
+        )
+        return {
+            "email": session.email,
+            "csrf_token": session.csrf_token,
+            "organization_id": accepted["organization_id"],
+            "role": accepted["role"],
+        }
+
+    @application.post("/api/auth/password/change")
+    def change_password(
+        payload: PasswordChangeRequest,
+        response: Response,
+        session: Session = Depends(current_session),  # noqa: B008
+        _csrf: Session = Depends(require_csrf),  # noqa: B008
+        token: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    ) -> dict[str, str]:
+        if not session.user_id:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        try:
+            new_epoch = identity_service.change_password(
+                session.user_id, payload.current_password, payload.new_password
+            )
+        except IdentityError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        if new_epoch is None:
+            raise HTTPException(status_code=401, detail="Current password is invalid.")
+        sessions.revoke_user_sessions(session.user_id)
+        opaque, rotated = sessions.create(
+            session.email, new_epoch, user_id=session.user_id
+        )
+        response.set_cookie(
+            COOKIE_NAME,
+            opaque,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+            max_age=absolute_ttl_seconds,
+            path="/",
+        )
+        return {"status": "password_changed", "csrf_token": rotated.csrf_token}
+
+    @application.get("/api/auth/totp")
+    def totp_status(session: Session = Depends(current_session)) -> dict[str, Any]:  # noqa: B008
+        if not session.user_id:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        return identity_service.totp_status(session.user_id)
+
+    @application.post("/api/auth/totp/enroll")
+    def totp_enroll(
+        session: Session = Depends(current_session),  # noqa: B008
+        _csrf: Session = Depends(require_csrf),  # noqa: B008
+    ) -> dict[str, str]:
+        if not session.user_id:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        try:
+            secret = identity_service.start_totp_enrollment(session.user_id)
+        except IdentityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        from urllib.parse import quote
+
+        label = quote(session.email)
+        uri = f"otpauth://totp/ChiNeScan:{label}?secret={secret}&issuer=ChiNeScan"
+        return {"secret": secret, "otpauth_uri": uri}
+
+    @application.post("/api/auth/totp/confirm")
+    def totp_confirm(
+        payload: TotpCodeRequest,
+        session: Session = Depends(current_session),  # noqa: B008
+        _csrf: Session = Depends(require_csrf),  # noqa: B008
+    ) -> dict[str, Any]:
+        if not session.user_id:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        codes = identity_service.confirm_totp_enrollment(session.user_id, payload.code)
+        if codes is None:
+            raise HTTPException(status_code=400, detail="Authenticator verification failed.")
+        return {"totp_enabled": True, "recovery_codes": codes}
+
+    @application.post("/api/auth/totp/disable")
+    def totp_disable(
+        payload: TotpCodeRequest,
+        session: Session = Depends(current_session),  # noqa: B008
+        _csrf: Session = Depends(require_csrf),  # noqa: B008
+    ) -> dict[str, Any]:
+        if not session.user_id:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        if not identity_service.disable_totp(session.user_id, payload.code):
+            raise HTTPException(status_code=400, detail="Authenticator verification failed.")
+        return {"totp_enabled": False}
+
+    @application.post("/api/auth/totp/recovery-codes")
+    def totp_regenerate_recovery_codes(
+        payload: TotpCodeRequest,
+        session: Session = Depends(current_session),  # noqa: B008
+        _csrf: Session = Depends(require_csrf),  # noqa: B008
+    ) -> dict[str, Any]:
+        if not session.user_id:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        codes = identity_service.regenerate_recovery_codes(session.user_id, payload.code)
+        if codes is None:
+            raise HTTPException(status_code=400, detail="Authenticator verification failed.")
+        return {"recovery_codes": codes}
+
+    @application.patch("/api/auth/users/{user_id}/status")
+    def update_user_status(
+        user_id: str,
+        payload: AccountStatusRequest,
+        session: Session = Depends(current_session),  # noqa: B008
+        _csrf: Session = Depends(require_csrf),  # noqa: B008
+    ) -> dict[str, Any]:
+        if not session.user_id:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        try:
+            updated = identity_service.set_account_status(
+                session.user_id, user_id, payload.status
+            )
+        except IdentityError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Resource not found.")
+        return {
+            key: updated[key]
+            for key in ("id", "email_normalized", "display_name", "status", "updated_at")
+        }
 
     @application.get("/api/overview", response_model=OverviewResponse)
     def overview(_session: Session = Depends(current_session)) -> dict[str, Any]:  # noqa: B008
@@ -2165,13 +2480,15 @@ def create_app(
         request: Request,
         last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
         after: int = Query(default=0, ge=0),
-        _session: Session = Depends(current_session),  # noqa: B008
+        session: Session = Depends(current_session),  # noqa: B008
         token: str | None = Cookie(default=None, alias=COOKIE_NAME),
     ) -> StreamingResponse:
         try:
             cursor = max(after, int(last_event_id or "0"))
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid event cursor.") from None
+        organization_id = getattr(request.state, "organization_id", None)
+        user_id = session.user_id
 
         async def stream() -> AsyncIterator[str]:
             nonlocal cursor
@@ -2182,7 +2499,9 @@ def create_app(
                     return
                 now_mono = time.monotonic()
                 if now_mono - last_refresh >= 15:
-                    dashboard_intelligence.refresh_alerts()
+                    if organization_id and user_id:
+                        with repository.member_context(organization_id, user_id, write=False):
+                            dashboard_intelligence.refresh_alerts()
                     last_refresh = now_mono
                 items = dashboard_alerts.events_after(cursor)
                 for item in items:
@@ -2722,6 +3041,7 @@ def create_app(
         except (CaseWorkflowError, ReportingError) as exc:
             raise _case_http_error(exc) from exc
 
+    @application.get("/api/reports/{scan_id}/{output_format}")
     @application.get("/api/scans/{scan_id}/report/{output_format}")
     def scan_report(
         scan_id: str,
@@ -2754,11 +3074,14 @@ def create_app(
                     status_code=413,
                     detail="Complete JSON report exceeds the configured count or byte limit.",
                 ) from exc
+            if str(exc).startswith("Scan not found:"):
+                raise HTTPException(status_code=404, detail="Scan not found.") from exc
             raise _case_http_error(exc) from exc
 
     @application.get("/api/scans/{scan_id}/findings.jsonl")
     def scan_findings_jsonl(
         scan_id: str,
+        request: Request,
         _session: Session = Depends(current_session),  # noqa: B008
     ) -> StreamingResponse:
         if len(scan_id) > 255:
@@ -2775,6 +3098,10 @@ def create_app(
                 detail="Scan contains duplicate finding IDs; export was not started.",
             )
         chain_scan = "chain" in scan.project_types or scan.scanner == "chain_trace"
+        organization_id = getattr(request.state, "organization_id", None)
+        principal_id = _session.user_id
+        if not organization_id or not principal_id:
+            raise HTTPException(status_code=404, detail="Scan not found.")
 
         def stream() -> Iterator[str]:
             manifest = {
@@ -2791,8 +3118,17 @@ def create_app(
             returned = 0
             for start in range(0, len(finding_ids), 100):
                 ids = finding_ids[start : start + 100]
-                with db_lock:
-                    records = repository.get_many("finding", ids)
+                try:
+                    with repository.member_context(
+                        organization_id, principal_id, write=False
+                    ), db_lock:
+                        records = repository.get_many("finding", ids)
+                except StorageError:
+                    yield json.dumps(
+                        {"type": "error", "code": "record_unavailable_or_unsafe"},
+                        sort_keys=True,
+                    ) + "\n"
+                    return
                 try:
                     if len(records) != len(ids):
                         raise ValueError("finding unavailable")

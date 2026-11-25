@@ -15,6 +15,7 @@ from chinescan.core.orchestration.code_scan import (
     make_finding,
 )
 from chinescan.core.storage.sqlite import SQLiteRepository
+from conftest import authorize_test_operator
 
 FIXTURES = Path(__file__).parents[2] / "fixtures"
 
@@ -192,6 +193,7 @@ def test_oversized_scan_persists_failed_verdict_and_coverage_gap(tmp_path: Path)
     project.mkdir()
     (project / "large.py").write_bytes(b"x" * 1_000_001)
     repository = SQLiteRepository(tmp_path / "failed-scan.sqlite3")
+    authorize_test_operator(repository)
     try:
         try:
             CodeScanService([BuiltinRuleScanner()], repository).scan(project)
@@ -247,6 +249,7 @@ def test_orchestration_deduplicates_isolates_and_persists(tmp_path: Path) -> Non
             raise ScannerError("test failure")
 
     repository = SQLiteRepository(tmp_path / "scan.sqlite3")
+    authorize_test_operator(repository)
     try:
         result = CodeScanService(
             [BuiltinRuleScanner(), DuplicateScanner(), BrokenScanner()], repository
@@ -285,7 +288,7 @@ def test_fingerprint_is_stable_and_severity_independent(tmp_path: Path) -> None:
     assert low.fingerprint == high.fingerprint
 
 
-def test_code_cli_json_summary(tmp_path: Path, monkeypatch) -> None:
+def test_code_cli_json_summary(tmp_path: Path, monkeypatch, local_operator_credentials) -> None:
     monkeypatch.setenv("CHINESCAN_DATABASE_PATH", str(tmp_path / "cli.sqlite3"))
     result = CliRunner().invoke(
         app,
@@ -306,7 +309,9 @@ def test_code_cli_json_summary(tmp_path: Path, monkeypatch) -> None:
     assert len(list((tmp_path / "custom-reports").glob("*"))) == 2
 
 
-def test_code_cli_no_save_report_and_fail_on_gaps(tmp_path: Path, monkeypatch) -> None:
+def test_code_cli_no_save_report_and_fail_on_gaps(
+    tmp_path: Path, monkeypatch, local_operator_credentials
+) -> None:
     monkeypatch.setenv("CHINESCAN_DATABASE_PATH", str(tmp_path / "no-save.sqlite3"))
     reports = tmp_path / "auto-reports"
     disabled = CliRunner().invoke(
@@ -325,7 +330,9 @@ def test_code_cli_no_save_report_and_fail_on_gaps(tmp_path: Path, monkeypatch) -
     assert "--fail-on-gaps" in failed.stderr
 
 
-def test_code_cli_report_store_warning_keeps_exit_code(tmp_path: Path, monkeypatch) -> None:
+def test_code_cli_report_store_warning_keeps_exit_code(
+    tmp_path: Path, monkeypatch, local_operator_credentials
+) -> None:
     monkeypatch.setenv("CHINESCAN_DATABASE_PATH", str(tmp_path / "warning.sqlite3"))
     blocker = tmp_path / "reports-file"
     blocker.write_text("x", encoding="utf-8")
@@ -338,7 +345,9 @@ def test_code_cli_report_store_warning_keeps_exit_code(tmp_path: Path, monkeypat
     assert "Warning:" in result.stderr
 
 
-def test_code_cli_severity_threshold_is_configurable(tmp_path: Path, monkeypatch) -> None:
+def test_code_cli_severity_threshold_is_configurable(
+    tmp_path: Path, monkeypatch, local_operator_credentials
+) -> None:
     monkeypatch.setenv("CHINESCAN_DATABASE_PATH", str(tmp_path / "threshold.sqlite3"))
     target = str(FIXTURES / "sample-python-project")
     high = CliRunner().invoke(app, ["code", target, "--fail-on", "high", "--format", "json"])

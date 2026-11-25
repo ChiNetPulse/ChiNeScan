@@ -72,10 +72,13 @@ def test_scan_history_trends_validates_window_and_clock() -> None:
         scan_history_trends([], [], [], now=datetime(2026, 10, 26))
 
 
-def test_trends_cli_reads_local_records_without_target_values(tmp_path, monkeypatch) -> None:
+def test_trends_cli_reads_local_records_without_target_values(
+    tmp_path, monkeypatch, local_operator_credentials, authorize_local_repository
+) -> None:
     database = tmp_path / "history.sqlite3"
     monkeypatch.setenv("CHINESCAN_DATABASE_PATH", str(database))
     repository = SQLiteRepository(database)
+    authorize_local_repository(repository)
     scan = Scan(
         scan_id="s-1",
         target_id="private-target-id",
