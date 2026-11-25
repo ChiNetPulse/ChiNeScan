@@ -1,12 +1,14 @@
 """Phase 2D Alembic roundtrip and downgrade guard verification script."""
+
 from __future__ import annotations
 
 import os
 import sys
 import tempfile
-from sqlalchemy import create_engine, text
-from alembic.config import Config
+
 from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, text
 
 
 def run_roundtrip() -> None:
@@ -59,15 +61,17 @@ def run_guard() -> None:
 
     engine = create_engine(url)
     with engine.connect() as conn:
-        conn.execute(text(
-            "INSERT INTO execution_action_attempts "
-            "(id, job_id, organization_id, engagement_id, action_sequence, "
-            "lease_generation, worker_id, adapter_id, operation, "
-            "authorization_id, approval_id, request_digest, state, "
-            "created_at, updated_at) "
-            "VALUES ('g1','j1','o1','e1',1,1,'w1','a1','op1','auth1',"
-            "NULL,'digest1','authorized','2026-01-01','2026-01-01')"
-        ))
+        conn.execute(
+            text(
+                "INSERT INTO execution_action_attempts "
+                "(id, job_id, organization_id, engagement_id, action_sequence, "
+                "lease_generation, worker_id, adapter_id, operation, "
+                "authorization_id, approval_id, request_digest, state, "
+                "created_at, updated_at) "
+                "VALUES ('g1','j1','o1','e1',1,1,'w1','a1','op1','auth1',"
+                "NULL,'digest1','authorized','2026-01-01','2026-01-01')"
+            )
+        )
         conn.commit()
 
     try:

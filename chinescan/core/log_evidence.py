@@ -164,17 +164,18 @@ class LogEvidenceStore:
                     while chunk := stream.read(1024 * 1024):
                         size += len(chunk)
                         total += len(chunk)
-                        if (
-                            size > MAX_FILE_BYTES
-                            or total > min(self.max_snapshot_bytes, MAX_TOTAL_BYTES)
+                        if size > MAX_FILE_BYTES or total > min(
+                            self.max_snapshot_bytes, MAX_TOTAL_BYTES
                         ):
                             raise LogEvidenceError("evidence_total_size_limit")
                         file_digest.update(chunk)
-                entries.append({
-                    "path": relative_path.as_posix(),
-                    "size_bytes": size,
-                    "sha256": file_digest.hexdigest(),
-                })
+                entries.append(
+                    {
+                        "path": relative_path.as_posix(),
+                        "size_bytes": size,
+                        "sha256": file_digest.hexdigest(),
+                    }
+                )
             except LogEvidenceError:
                 raise
             except (OSError, ValueError) as exc:
@@ -207,22 +208,30 @@ class LogEvidenceStore:
         with self.engine.connect() as connection:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             try:
-                expired = connection.execute(select(
-                    log_evidence_quota_reservations.c.id,
-                    log_evidence_quota_reservations.c.reserved_bytes,
-                ).where(
-                    log_evidence_quota_reservations.c.organization_id == organization_id,
-                    log_evidence_quota_reservations.c.expires_at <= reserved_at
-                )).all()
-                connection.execute(log_evidence_quota_reservations.delete().where(
-                    log_evidence_quota_reservations.c.organization_id == organization_id,
-                    log_evidence_quota_reservations.c.expires_at <= reserved_at,
-                ))
+                expired = connection.execute(
+                    select(
+                        log_evidence_quota_reservations.c.id,
+                        log_evidence_quota_reservations.c.reserved_bytes,
+                    ).where(
+                        log_evidence_quota_reservations.c.organization_id == organization_id,
+                        log_evidence_quota_reservations.c.expires_at <= reserved_at,
+                    )
+                ).all()
+                connection.execute(
+                    log_evidence_quota_reservations.delete().where(
+                        log_evidence_quota_reservations.c.organization_id == organization_id,
+                        log_evidence_quota_reservations.c.expires_at <= reserved_at,
+                    )
+                )
                 for expired_row in expired:
                     security._audit(
-                        connection, organization_id, engagement_id, user_id,
+                        connection,
+                        organization_id,
+                        engagement_id,
+                        user_id,
                         "log_evidence.quota_reservation_expired",
-                        "log_evidence_quota_reservation", str(expired_row.id),
+                        "log_evidence_quota_reservation",
+                        str(expired_row.id),
                         details={"reserved_bytes": int(expired_row.reserved_bytes)},
                     )
                 active = connection.execute(
@@ -237,28 +246,38 @@ class LogEvidenceStore:
                     .group_by(log_evidence_snapshots.c.sha256)
                 ).all()
                 used = sum(int(row[1]) for row in active)
-                reserved = int(connection.execute(
-                    select(
-                        func.coalesce(
-                            func.sum(log_evidence_quota_reservations.c.reserved_bytes), 0
+                reserved = int(
+                    connection.execute(
+                        select(
+                            func.coalesce(
+                                func.sum(log_evidence_quota_reservations.c.reserved_bytes), 0
+                            )
+                        ).where(
+                            log_evidence_quota_reservations.c.organization_id == organization_id,
+                            log_evidence_quota_reservations.c.expires_at > reserved_at,
                         )
-                    ).where(
-                        log_evidence_quota_reservations.c.organization_id == organization_id,
-                        log_evidence_quota_reservations.c.expires_at > reserved_at,
-                    )
-                ).scalar_one())
+                    ).scalar_one()
+                )
                 duplicate = any(row[0] == digest for row in active)
                 reserve_bytes = 0 if duplicate else size_bytes
                 if used + reserved + reserve_bytes > self.organization_quota_bytes:
                     raise LogEvidenceError("evidence_organization_quota_exceeded")
-                connection.execute(log_evidence_quota_reservations.insert().values(
-                    id=reservation_id, organization_id=organization_id,
-                    reserved_bytes=reserve_bytes, created_at=reserved_at,
-                    expires_at=reservation_expires,
-                ))
+                connection.execute(
+                    log_evidence_quota_reservations.insert().values(
+                        id=reservation_id,
+                        organization_id=organization_id,
+                        reserved_bytes=reserve_bytes,
+                        created_at=reserved_at,
+                        expires_at=reservation_expires,
+                    )
+                )
                 security._audit(
-                    connection, organization_id, engagement_id, user_id,
-                    "log_evidence.quota_reserved", "log_evidence_quota_reservation",
+                    connection,
+                    organization_id,
+                    engagement_id,
+                    user_id,
+                    "log_evidence.quota_reserved",
+                    "log_evidence_quota_reservation",
                     reservation_id,
                     details={"reserved_bytes": reserve_bytes, "sha256": digest},
                 )
@@ -273,8 +292,10 @@ class LogEvidenceStore:
         try:
             if destination.exists():
                 if not self._verify_content(
-                    destination, {"manifest_version": MANIFEST_VERSION, "entries": entries},
-                    digest, size_bytes,
+                    destination,
+                    {"manifest_version": MANIFEST_VERSION, "entries": entries},
+                    digest,
+                    size_bytes,
                 ):
                     raise LogEvidenceError("evidence_existing_snapshot_corrupt")
             else:
@@ -346,59 +367,104 @@ class LogEvidenceStore:
                     ):
                         connection.rollback()
                         raise LogEvidenceError("evidence_registration_forbidden")
-                    org = connection.execute(select(organizations.c.id).where(
-                        organizations.c.id == organization_id,
-                        organizations.c.status == "active",
-                    )).first()
-                    engagement = connection.execute(select(engagements.c.id).where(
-                        engagements.c.id == engagement_id,
-                        engagements.c.organization_id == organization_id,
-                        engagements.c.status == "active",
-                    )).first()
+                    org = connection.execute(
+                        select(organizations.c.id).where(
+                            organizations.c.id == organization_id,
+                            organizations.c.status == "active",
+                        )
+                    ).first()
+                    engagement = connection.execute(
+                        select(engagements.c.id).where(
+                            engagements.c.id == engagement_id,
+                            engagements.c.organization_id == organization_id,
+                            engagements.c.status == "active",
+                        )
+                    ).first()
                     if not org or not engagement:
                         connection.rollback()
                         raise LogEvidenceError("evidence_registration_forbidden")
-                    connection.execute(engagement_assets.insert().values(
-                        id=asset_id, organization_id=organization_id, client_id=None,
-                        engagement_id=engagement_id, asset_type="log_evidence", target=target,
-                        description=redact(label.strip())[:120], status="active",
-                        created_by=user_id, created_at=now, updated_at=now,
-                    ))
-                    connection.execute(log_evidence_snapshots.insert().values(
-                        id=snapshot_id, organization_id=organization_id,
-                        engagement_id=engagement_id, asset_id=asset_id,
-                        registered_by=user_id, source_format=source_format,
-                        label=redact(label.strip())[:120], sha256=digest,
-                        size_bytes=size_bytes, file_count=len(entries), manifest=manifest,
-                        manifest_version=MANIFEST_VERSION, created_at=now,
-                        status="available", legal_hold=0, hold_reason=None, deleted_at=None,
-                    ))
-                    connection.execute(log_evidence_quota_reservations.delete().where(
-                        log_evidence_quota_reservations.c.id == reservation_id
-                    ))
+                    connection.execute(
+                        engagement_assets.insert().values(
+                            id=asset_id,
+                            organization_id=organization_id,
+                            client_id=None,
+                            engagement_id=engagement_id,
+                            asset_type="log_evidence",
+                            target=target,
+                            description=redact(label.strip())[:120],
+                            status="active",
+                            created_by=user_id,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    connection.execute(
+                        log_evidence_snapshots.insert().values(
+                            id=snapshot_id,
+                            organization_id=organization_id,
+                            engagement_id=engagement_id,
+                            asset_id=asset_id,
+                            registered_by=user_id,
+                            source_format=source_format,
+                            label=redact(label.strip())[:120],
+                            sha256=digest,
+                            size_bytes=size_bytes,
+                            file_count=len(entries),
+                            manifest=manifest,
+                            manifest_version=MANIFEST_VERSION,
+                            created_at=now,
+                            status="available",
+                            legal_hold=0,
+                            hold_reason=None,
+                            deleted_at=None,
+                        )
+                    )
+                    connection.execute(
+                        log_evidence_quota_reservations.delete().where(
+                            log_evidence_quota_reservations.c.id == reservation_id
+                        )
+                    )
                     security._audit(
-                        connection, organization_id, engagement_id, user_id,
+                        connection,
+                        organization_id,
+                        engagement_id,
+                        user_id,
                         "log_evidence.quota_reservation_released",
-                        "log_evidence_quota_reservation", reservation_id,
+                        "log_evidence_quota_reservation",
+                        reservation_id,
                         details={"reserved_bytes": reserve_bytes, "outcome": "committed"},
                     )
                     security._audit(
-                        connection, organization_id, engagement_id, user_id,
-                        "log_evidence.registered", "log_evidence", snapshot_id,
-                        details={"asset_id": asset_id, "sha256": digest,
-                                 "size_bytes": size_bytes, "file_count": len(entries),
-                                 "source_format": source_format},
+                        connection,
+                        organization_id,
+                        engagement_id,
+                        user_id,
+                        "log_evidence.registered",
+                        "log_evidence",
+                        snapshot_id,
+                        details={
+                            "asset_id": asset_id,
+                            "sha256": digest,
+                            "size_bytes": size_bytes,
+                            "file_count": len(entries),
+                            "source_format": source_format,
+                        },
                     )
                     connection.commit()
                 except Exception:
                     connection.rollback()
                     raise
             return {
-                "asset_id": asset_id, "snapshot_id": snapshot_id,
-                "target": target, "label": redact(label.strip())[:120],
-                "source_format": source_format, "sha256": digest,
-                "size_bytes": size_bytes, "file_count": len(entries),
-                "status": "available", "retention": "retained_until_explicit_authorized_deletion",
+                "asset_id": asset_id,
+                "snapshot_id": snapshot_id,
+                "target": target,
+                "label": redact(label.strip())[:120],
+                "source_format": source_format,
+                "sha256": digest,
+                "size_bytes": size_bytes,
+                "file_count": len(entries),
+                "status": "available",
+                "retention": "retained_until_explicit_authorized_deletion",
             }
         except Exception:
             with self.engine.begin() as connection:
@@ -408,13 +474,19 @@ class LogEvidenceStore:
                     )
                 ).scalar_one_or_none()
                 if reservation is not None:
-                    connection.execute(log_evidence_quota_reservations.delete().where(
-                        log_evidence_quota_reservations.c.id == reservation_id
-                    ))
+                    connection.execute(
+                        log_evidence_quota_reservations.delete().where(
+                            log_evidence_quota_reservations.c.id == reservation_id
+                        )
+                    )
                     security._audit(
-                        connection, organization_id, engagement_id, user_id,
+                        connection,
+                        organization_id,
+                        engagement_id,
+                        user_id,
                         "log_evidence.quota_reservation_released",
-                        "log_evidence_quota_reservation", reservation_id,
+                        "log_evidence_quota_reservation",
+                        reservation_id,
                         details={"reserved_bytes": int(reservation), "outcome": "failed"},
                     )
             if stage and stage.exists():
@@ -427,13 +499,15 @@ class LogEvidenceStore:
         self, organization_id: str, engagement_id: str, asset_id: str, snapshot_id: str
     ) -> tuple[dict[str, Any] | None, Path | None]:
         with self.engine.connect() as connection:
-            row = connection.execute(select(log_evidence_snapshots).where(
-                log_evidence_snapshots.c.id == snapshot_id,
-                log_evidence_snapshots.c.organization_id == organization_id,
-                log_evidence_snapshots.c.engagement_id == engagement_id,
-                log_evidence_snapshots.c.asset_id == asset_id,
-                log_evidence_snapshots.c.status == "available",
-            )).first()
+            row = connection.execute(
+                select(log_evidence_snapshots).where(
+                    log_evidence_snapshots.c.id == snapshot_id,
+                    log_evidence_snapshots.c.organization_id == organization_id,
+                    log_evidence_snapshots.c.engagement_id == engagement_id,
+                    log_evidence_snapshots.c.asset_id == asset_id,
+                    log_evidence_snapshots.c.status == "available",
+                )
+            ).first()
             if row is None:
                 return None, None
             item = dict(row._mapping)
@@ -444,24 +518,38 @@ class LogEvidenceStore:
             valid = False
         if not valid:
             with self.engine.begin() as connection:
-                connection.execute(update(log_evidence_snapshots).where(
-                    log_evidence_snapshots.c.id == snapshot_id,
-                    log_evidence_snapshots.c.organization_id == organization_id,
-                    log_evidence_snapshots.c.status == "available",
-                ).values(status="corrupt" if path.exists() else "missing"))
-                connection.execute(assessment_audit_events.insert().values(
-                    id=str(uuid4()), organization_id=organization_id,
-                    engagement_id=engagement_id, actor_user_id=item["registered_by"],
-                    action="log_evidence.integrity_failed", resource_type="log_evidence",
-                    resource_id=snapshot_id, decision="DENY",
-                    reason_code="LOG_EVIDENCE_INTEGRITY_FAILED", occurred_at=now_iso(),
-                    details={"asset_id": asset_id, "sha256": item["sha256"]},
-                ))
+                connection.execute(
+                    update(log_evidence_snapshots)
+                    .where(
+                        log_evidence_snapshots.c.id == snapshot_id,
+                        log_evidence_snapshots.c.organization_id == organization_id,
+                        log_evidence_snapshots.c.status == "available",
+                    )
+                    .values(status="corrupt" if path.exists() else "missing")
+                )
+                connection.execute(
+                    assessment_audit_events.insert().values(
+                        id=str(uuid4()),
+                        organization_id=organization_id,
+                        engagement_id=engagement_id,
+                        actor_user_id=item["registered_by"],
+                        action="log_evidence.integrity_failed",
+                        resource_type="log_evidence",
+                        resource_id=snapshot_id,
+                        decision="DENY",
+                        reason_code="LOG_EVIDENCE_INTEGRITY_FAILED",
+                        occurred_at=now_iso(),
+                        details={"asset_id": asset_id, "sha256": item["sha256"]},
+                    )
+                )
             return None, None
         return item, path
 
     def list_for(
-        self, user_id: str, organization_id: str, engagement_id: str,
+        self,
+        user_id: str,
+        organization_id: str,
+        engagement_id: str,
         security: EngagementSecurityService,
     ) -> list[dict[str, Any]] | None:
         """Return path-free evidence metadata only to an active assigned operator."""
@@ -512,25 +600,37 @@ class LogEvidenceStore:
 
     def _has_active_job(self, snapshot_id: str) -> bool:
         with self.engine.connect() as connection:
-            return connection.execute(select(execution_jobs.c.id).where(
-                execution_jobs.c.log_evidence_snapshot_id == snapshot_id,
-                execution_jobs.c.status.in_(("queued", "claimed", "running")),
-            )).first() is not None
+            return (
+                connection.execute(
+                    select(execution_jobs.c.id).where(
+                        execution_jobs.c.log_evidence_snapshot_id == snapshot_id,
+                        execution_jobs.c.status.in_(("queued", "claimed", "running")),
+                    )
+                ).first()
+                is not None
+            )
 
     def _snapshot_id_for_asset(
         self, organization_id: str, engagement_id: str, asset_id: str
     ) -> str | None:
         with self.engine.connect() as connection:
-            result = connection.execute(select(log_evidence_snapshots.c.id).where(
-                log_evidence_snapshots.c.organization_id == organization_id,
-                log_evidence_snapshots.c.engagement_id == engagement_id,
-                log_evidence_snapshots.c.asset_id == asset_id,
-            )).scalar_one_or_none()
+            result = connection.execute(
+                select(log_evidence_snapshots.c.id).where(
+                    log_evidence_snapshots.c.organization_id == organization_id,
+                    log_evidence_snapshots.c.engagement_id == engagement_id,
+                    log_evidence_snapshots.c.asset_id == asset_id,
+                )
+            ).scalar_one_or_none()
             return str(result) if result is not None else None
 
     def place_hold_for_asset(
-        self, user_id: str, organization_id: str, engagement_id: str,
-        asset_id: str, reason: str, security: EngagementSecurityService,
+        self,
+        user_id: str,
+        organization_id: str,
+        engagement_id: str,
+        asset_id: str,
+        reason: str,
+        security: EngagementSecurityService,
     ) -> bool:
         snapshot_id = self._snapshot_id_for_asset(organization_id, engagement_id, asset_id)
         if snapshot_id is None:
@@ -540,8 +640,12 @@ class LogEvidenceStore:
         )
 
     def delete_asset(
-        self, user_id: str, organization_id: str, engagement_id: str,
-        asset_id: str, security: EngagementSecurityService,
+        self,
+        user_id: str,
+        organization_id: str,
+        engagement_id: str,
+        asset_id: str,
+        security: EngagementSecurityService,
     ) -> bool:
         snapshot_id = self._snapshot_id_for_asset(organization_id, engagement_id, asset_id)
         if snapshot_id is None:
@@ -551,33 +655,55 @@ class LogEvidenceStore:
         )
 
     def place_hold(
-        self, user_id: str, organization_id: str, engagement_id: str,
-        snapshot_id: str, reason: str, security: EngagementSecurityService,
+        self,
+        user_id: str,
+        organization_id: str,
+        engagement_id: str,
+        snapshot_id: str,
+        reason: str,
+        security: EngagementSecurityService,
     ) -> bool:
         if not reason.strip() or len(reason) > 500:
             raise LogEvidenceError("evidence_hold_reason_invalid")
         with self.engine.begin() as connection:
             if not security._can_manage(connection, user_id, organization_id, engagement_id):
                 return False
-            row = connection.execute(select(log_evidence_snapshots).where(
-                log_evidence_snapshots.c.id == snapshot_id,
-                log_evidence_snapshots.c.organization_id == organization_id,
-                log_evidence_snapshots.c.engagement_id == engagement_id,
-            )).first()
+            row = connection.execute(
+                select(log_evidence_snapshots).where(
+                    log_evidence_snapshots.c.id == snapshot_id,
+                    log_evidence_snapshots.c.organization_id == organization_id,
+                    log_evidence_snapshots.c.engagement_id == engagement_id,
+                )
+            ).first()
             if not row or row.status == "deleted":
                 return False
-            connection.execute(update(log_evidence_snapshots).where(
-                log_evidence_snapshots.c.id == snapshot_id,
-                log_evidence_snapshots.c.organization_id == organization_id,
-            ).values(legal_hold=1, hold_reason=redact(reason.strip())[:500]))
-            security._audit(connection, organization_id, engagement_id, user_id,
-                            "log_evidence.hold_placed", "log_evidence", snapshot_id,
-                            details={"reason": redact(reason.strip())[:200]})
+            connection.execute(
+                update(log_evidence_snapshots)
+                .where(
+                    log_evidence_snapshots.c.id == snapshot_id,
+                    log_evidence_snapshots.c.organization_id == organization_id,
+                )
+                .values(legal_hold=1, hold_reason=redact(reason.strip())[:500])
+            )
+            security._audit(
+                connection,
+                organization_id,
+                engagement_id,
+                user_id,
+                "log_evidence.hold_placed",
+                "log_evidence",
+                snapshot_id,
+                details={"reason": redact(reason.strip())[:200]},
+            )
             return True
 
     def delete_explicitly(
-        self, user_id: str, organization_id: str, engagement_id: str,
-        snapshot_id: str, security: EngagementSecurityService,
+        self,
+        user_id: str,
+        organization_id: str,
+        engagement_id: str,
+        snapshot_id: str,
+        security: EngagementSecurityService,
     ) -> bool:
         with self.engine.connect() as connection:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
@@ -585,37 +711,54 @@ class LogEvidenceStore:
                 if not security._can_manage(connection, user_id, organization_id, engagement_id):
                     connection.rollback()
                     return False
-                row = connection.execute(select(log_evidence_snapshots).where(
-                    log_evidence_snapshots.c.id == snapshot_id,
-                    log_evidence_snapshots.c.organization_id == organization_id,
-                    log_evidence_snapshots.c.engagement_id == engagement_id,
-                )).first()
+                row = connection.execute(
+                    select(log_evidence_snapshots).where(
+                        log_evidence_snapshots.c.id == snapshot_id,
+                        log_evidence_snapshots.c.organization_id == organization_id,
+                        log_evidence_snapshots.c.engagement_id == engagement_id,
+                    )
+                ).first()
                 if not row or row.status != "available" or row.legal_hold:
                     connection.rollback()
                     return False
-                engagement = connection.execute(select(engagements.c.status).where(
-                    engagements.c.id == engagement_id,
-                    engagements.c.organization_id == organization_id,
-                )).scalar_one_or_none()
+                engagement = connection.execute(
+                    select(engagements.c.status).where(
+                        engagements.c.id == engagement_id,
+                        engagements.c.organization_id == organization_id,
+                    )
+                ).scalar_one_or_none()
                 if engagement not in {"completed", "archived"}:
                     connection.rollback()
                     return False
-                active = connection.execute(select(execution_jobs.c.id).where(
-                    execution_jobs.c.log_evidence_snapshot_id == snapshot_id,
-                    execution_jobs.c.status.in_(("queued", "claimed", "running")),
-                )).first()
+                active = connection.execute(
+                    select(execution_jobs.c.id).where(
+                        execution_jobs.c.log_evidence_snapshot_id == snapshot_id,
+                        execution_jobs.c.status.in_(("queued", "claimed", "running")),
+                    )
+                ).first()
                 if active:
                     connection.rollback()
                     return False
-                connection.execute(update(log_evidence_snapshots).where(
-                    log_evidence_snapshots.c.id == snapshot_id,
-                    log_evidence_snapshots.c.organization_id == organization_id,
-                    log_evidence_snapshots.c.status == "available",
-                    log_evidence_snapshots.c.legal_hold == 0,
-                ).values(status="deleted", deleted_at=now_iso()))
-                security._audit(connection, organization_id, engagement_id, user_id,
-                                "log_evidence.deletion_recorded", "log_evidence", snapshot_id,
-                                details={"sha256": row.sha256, "size_bytes": row.size_bytes})
+                connection.execute(
+                    update(log_evidence_snapshots)
+                    .where(
+                        log_evidence_snapshots.c.id == snapshot_id,
+                        log_evidence_snapshots.c.organization_id == organization_id,
+                        log_evidence_snapshots.c.status == "available",
+                        log_evidence_snapshots.c.legal_hold == 0,
+                    )
+                    .values(status="deleted", deleted_at=now_iso())
+                )
+                security._audit(
+                    connection,
+                    organization_id,
+                    engagement_id,
+                    user_id,
+                    "log_evidence.deletion_recorded",
+                    "log_evidence",
+                    snapshot_id,
+                    details={"sha256": row.sha256, "size_bytes": row.size_bytes},
+                )
                 connection.commit()
             except Exception:
                 connection.rollback()
@@ -625,8 +768,13 @@ class LogEvidenceStore:
         except (OSError, LogEvidenceError):
             with self.engine.begin() as connection:
                 security._audit(
-                    connection, organization_id, engagement_id, user_id,
-                    "log_evidence.deletion_failed", "log_evidence", snapshot_id,
+                    connection,
+                    organization_id,
+                    engagement_id,
+                    user_id,
+                    "log_evidence.deletion_failed",
+                    "log_evidence",
+                    snapshot_id,
                     details={"sha256": row.sha256, "reason_code": "STORAGE_DELETE_FAILED"},
                 )
             raise LogEvidenceError("evidence_storage_delete_failed") from None
@@ -634,11 +782,13 @@ class LogEvidenceStore:
 
     def _remove_if_unreferenced(self, organization_id: str, digest: str) -> None:
         with self.engine.connect() as connection:
-            refs = connection.execute(select(log_evidence_snapshots.c.id).where(
-                log_evidence_snapshots.c.organization_id == organization_id,
-                log_evidence_snapshots.c.sha256 == digest,
-                log_evidence_snapshots.c.status == "available",
-            )).first()
+            refs = connection.execute(
+                select(log_evidence_snapshots.c.id).where(
+                    log_evidence_snapshots.c.organization_id == organization_id,
+                    log_evidence_snapshots.c.sha256 == digest,
+                    log_evidence_snapshots.c.status == "available",
+                )
+            ).first()
         if refs:
             return
         path = self._path(organization_id, digest)
@@ -653,7 +803,8 @@ class LogEvidenceStore:
         path: Path, manifest: dict[str, Any], digest: str, expected_size: int
     ) -> bool:
         if (
-            not path.is_dir() or is_reparse_or_link(path)
+            not path.is_dir()
+            or is_reparse_or_link(path)
             or not 0 <= expected_size <= MAX_TOTAL_BYTES
         ):
             return False

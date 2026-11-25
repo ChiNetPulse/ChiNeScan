@@ -243,13 +243,13 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
     execution_tables = {"execution_jobs"}
     execution_provenance_tables = {"execution_result_provenance"}
     repository_tables = {
-        "repository_snapshots", "repository_asset_bindings",
-        "repository_attestations", "repository_quota_reservations",
+        "repository_snapshots",
+        "repository_asset_bindings",
+        "repository_attestations",
+        "repository_quota_reservations",
     }
     log_evidence_tables = {"log_evidence_snapshots", "log_evidence_quota_reservations"}
-    malware_evidence_tables = {
-        "malware_evidence_snapshots", "malware_evidence_quota_reservations"
-    }
+    malware_evidence_tables = {"malware_evidence_snapshots", "malware_evidence_quota_reservations"}
     identity_tables = {
         "user_credentials",
         "user_recovery_codes",
@@ -331,32 +331,60 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
     ):
         return revision, "execution provenance tables do not match the supported schema"
     if revision == "0010_governed_repository_assets" and app_extras != (
-        dashboard_tables | organization_tables | engagement_security_tables
-        | execution_tables | execution_provenance_tables | repository_tables
+        dashboard_tables
+        | organization_tables
+        | engagement_security_tables
+        | execution_tables
+        | execution_provenance_tables
+        | repository_tables
     ):
         return revision, "repository assessment tables do not match the supported schema"
     if revision == "0011_governed_log_evidence" and app_extras != (
-        dashboard_tables | organization_tables | engagement_security_tables
-        | execution_tables | execution_provenance_tables | repository_tables
+        dashboard_tables
+        | organization_tables
+        | engagement_security_tables
+        | execution_tables
+        | execution_provenance_tables
+        | repository_tables
         | log_evidence_tables
     ):
         return revision, "log evidence tables do not match the supported schema"
-    if revision in {"0012_governed_malware_evidence", "0013_governed_chain_trace"} and app_extras != (
-        dashboard_tables | organization_tables | engagement_security_tables
-        | execution_tables | execution_provenance_tables | repository_tables
-        | log_evidence_tables | malware_evidence_tables
+    if revision in {
+        "0012_governed_malware_evidence",
+        "0013_governed_chain_trace",
+    } and app_extras != (
+        dashboard_tables
+        | organization_tables
+        | engagement_security_tables
+        | execution_tables
+        | execution_provenance_tables
+        | repository_tables
+        | log_evidence_tables
+        | malware_evidence_tables
     ):
         return revision, "malware evidence tables do not match the supported schema"
     if revision == "0014_multi_user_identity_sessions" and app_extras != (
-        dashboard_tables | organization_tables | engagement_security_tables
-        | execution_tables | execution_provenance_tables | repository_tables
-        | log_evidence_tables | malware_evidence_tables | identity_tables
+        dashboard_tables
+        | organization_tables
+        | engagement_security_tables
+        | execution_tables
+        | execution_provenance_tables
+        | repository_tables
+        | log_evidence_tables
+        | malware_evidence_tables
+        | identity_tables
     ):
         return revision, "identity and session tables do not match the supported schema"
     if revision == "0015_durable_job_leases_actions" and app_extras != (
-        dashboard_tables | organization_tables | engagement_security_tables
-        | execution_tables | execution_provenance_tables | repository_tables
-        | log_evidence_tables | malware_evidence_tables | identity_tables
+        dashboard_tables
+        | organization_tables
+        | engagement_security_tables
+        | execution_tables
+        | execution_provenance_tables
+        | repository_tables
+        | log_evidence_tables
+        | malware_evidence_tables
+        | identity_tables
         | durable_job_tables
     ):
         return revision, "durable job lease and action tables do not match the supported schema"
@@ -454,98 +482,223 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         "0015_durable_job_leases_actions",
     }:
         required = {
-            "id", "organization_id", "engagement_id", "requester_user_id", "asset_id",
-            "target", "asset_type", "technique", "action_class", "scope_revision_id",
-            "authorization_id", "approval_id", "request_digest", "execution_context",
-            "idempotency_key", "status", "created_at", "expires_at", "result_summary",
+            "id",
+            "organization_id",
+            "engagement_id",
+            "requester_user_id",
+            "asset_id",
+            "target",
+            "asset_type",
+            "technique",
+            "action_class",
+            "scope_revision_id",
+            "authorization_id",
+            "approval_id",
+            "request_digest",
+            "execution_context",
+            "idempotency_key",
+            "status",
+            "created_at",
+            "expires_at",
+            "result_summary",
             "approval_consumed_at",
             "cancellation_requested_at",
             "cancellation_requested_by",
             "cancellation_observed_at",
         }
-        actual = {
-            row["name"] for row in connection.execute("PRAGMA table_info(execution_jobs)")
-        }
+        actual = {row["name"] for row in connection.execute("PRAGMA table_info(execution_jobs)")}
         if not required <= actual:
             return revision, "execution job table does not match the supported schema"
-        if revision in {"0009_execution_result_provenance", "0010_governed_repository_assets", "0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
+        if revision in {
+            "0009_execution_result_provenance",
+            "0010_governed_repository_assets",
+            "0011_governed_log_evidence",
+            "0012_governed_malware_evidence",
+            "0013_governed_chain_trace",
+            "0014_multi_user_identity_sessions",
+            "0015_durable_job_leases_actions",
+        }:
             job_columns = required | {"authorization_document_sha256"}
             if not job_columns <= actual:
                 return revision, "execution provenance job schema is incomplete"
             provenance_columns = {
                 row["name"]
-                for row in connection.execute(
-                    'PRAGMA table_info("execution_result_provenance")'
-                )
+                for row in connection.execute('PRAGMA table_info("execution_result_provenance")')
             }
-            if not {
-                "record_type", "record_id", "job_id", "organization_id", "engagement_id",
-                "created_at",
-            } <= provenance_columns:
+            if (
+                not {
+                    "record_type",
+                    "record_id",
+                    "job_id",
+                    "organization_id",
+                    "engagement_id",
+                    "created_at",
+                }
+                <= provenance_columns
+            ):
                 return revision, "execution result provenance schema is incomplete"
-            if revision in {"0010_governed_repository_assets", "0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
+            if revision in {
+                "0010_governed_repository_assets",
+                "0011_governed_log_evidence",
+                "0012_governed_malware_evidence",
+                "0013_governed_chain_trace",
+                "0014_multi_user_identity_sessions",
+                "0015_durable_job_leases_actions",
+            }:
                 job_columns |= {
-                    "policy_request_digest", "repository_binding_id", "repository_snapshot_id",
-                    "repository_snapshot_sha256", "repository_manifest_version",
-                    "repository_attestation_id", "repository_scanner_version",
-                    "repository_scan_bounds", "repository_attestation_version",
-                    "adapter_id", "adapter_version", "exclusion_policy_version",
+                    "policy_request_digest",
+                    "repository_binding_id",
+                    "repository_snapshot_id",
+                    "repository_snapshot_sha256",
+                    "repository_manifest_version",
+                    "repository_attestation_id",
+                    "repository_scanner_version",
+                    "repository_scan_bounds",
+                    "repository_attestation_version",
+                    "adapter_id",
+                    "adapter_version",
+                    "exclusion_policy_version",
                 }
                 if not job_columns <= actual:
                     return revision, "repository execution context schema is incomplete"
                 for table_name, expected_columns in {
-                    "repository_snapshots": {"id", "organization_id", "sha256", "size_bytes", "manifest", "status", "delete_after", "legal_hold"},
-                    "repository_asset_bindings": {"id", "organization_id", "engagement_id", "asset_id", "project_registry_id", "snapshot_id", "snapshot_sha256"},
-                    "repository_attestations": {"id", "organization_id", "engagement_id", "asset_id", "authorization_id", "scope_revision_id", "actor_user_id", "attestation_text", "attestation_version"},
-                    "repository_quota_reservations": {"id", "organization_id", "reserved_bytes", "content_digest", "expires_at"},
+                    "repository_snapshots": {
+                        "id",
+                        "organization_id",
+                        "sha256",
+                        "size_bytes",
+                        "manifest",
+                        "status",
+                        "delete_after",
+                        "legal_hold",
+                    },
+                    "repository_asset_bindings": {
+                        "id",
+                        "organization_id",
+                        "engagement_id",
+                        "asset_id",
+                        "project_registry_id",
+                        "snapshot_id",
+                        "snapshot_sha256",
+                    },
+                    "repository_attestations": {
+                        "id",
+                        "organization_id",
+                        "engagement_id",
+                        "asset_id",
+                        "authorization_id",
+                        "scope_revision_id",
+                        "actor_user_id",
+                        "attestation_text",
+                        "attestation_version",
+                    },
+                    "repository_quota_reservations": {
+                        "id",
+                        "organization_id",
+                        "reserved_bytes",
+                        "content_digest",
+                        "expires_at",
+                    },
                 }.items():
-                    actual_repo = {row["name"] for row in connection.execute(f'PRAGMA table_info("{table_name}")')}
+                    actual_repo = {
+                        row["name"]
+                        for row in connection.execute(f'PRAGMA table_info("{table_name}")')
+                    }
                     if not expected_columns <= actual_repo:
                         return revision, "repository assessment schema is incomplete"
-            if revision in {"0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
+            if revision in {
+                "0011_governed_log_evidence",
+                "0012_governed_malware_evidence",
+                "0013_governed_chain_trace",
+                "0014_multi_user_identity_sessions",
+                "0015_durable_job_leases_actions",
+            }:
                 job_columns |= {
-                    "log_evidence_snapshot_id", "log_evidence_sha256",
-                    "log_evidence_manifest_version", "log_evidence_source_format",
-                    "log_analysis_version", "log_ruleset_version",
+                    "log_evidence_snapshot_id",
+                    "log_evidence_sha256",
+                    "log_evidence_manifest_version",
+                    "log_evidence_source_format",
+                    "log_analysis_version",
+                    "log_ruleset_version",
                 }
                 if not job_columns <= actual:
                     return revision, "log evidence execution context schema is incomplete"
                 for table_name, expected_table_columns in {
                     "log_evidence_snapshots": {
-                        "id", "organization_id", "engagement_id", "asset_id", "registered_by",
-                        "source_format", "sha256", "size_bytes", "file_count", "manifest",
-                        "manifest_version", "status", "legal_hold", "deleted_at",
+                        "id",
+                        "organization_id",
+                        "engagement_id",
+                        "asset_id",
+                        "registered_by",
+                        "source_format",
+                        "sha256",
+                        "size_bytes",
+                        "file_count",
+                        "manifest",
+                        "manifest_version",
+                        "status",
+                        "legal_hold",
+                        "deleted_at",
                     },
                     "log_evidence_quota_reservations": {
-                        "id", "organization_id", "reserved_bytes", "created_at", "expires_at",
+                        "id",
+                        "organization_id",
+                        "reserved_bytes",
+                        "created_at",
+                        "expires_at",
                     },
                 }.items():
                     actual_columns = {
-                        row["name"] for row in connection.execute(f'PRAGMA table_info("{table_name}")')
+                        row["name"]
+                        for row in connection.execute(f'PRAGMA table_info("{table_name}")')
                     }
                     if not expected_table_columns <= actual_columns:
                         return revision, "log evidence schema is incomplete"
-            if revision in {"0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
+            if revision in {
+                "0012_governed_malware_evidence",
+                "0013_governed_chain_trace",
+                "0014_multi_user_identity_sessions",
+                "0015_durable_job_leases_actions",
+            }:
                 job_columns |= {
-                    "malware_evidence_snapshot_id", "malware_evidence_sha256",
-                    "malware_evidence_manifest_sha256", "malware_evidence_manifest_version",
+                    "malware_evidence_snapshot_id",
+                    "malware_evidence_sha256",
+                    "malware_evidence_manifest_sha256",
+                    "malware_evidence_manifest_version",
                     "malware_analysis_version",
                 }
                 if not job_columns <= actual:
                     return revision, "malware evidence execution context schema is incomplete"
                 for table_name, expected_table_columns in {
                     "malware_evidence_snapshots": {
-                        "id", "organization_id", "engagement_id", "asset_id", "registered_by",
-                        "source_registry_id", "original_filename", "classification", "object_key",
-                        "sha256", "size_bytes", "manifest", "manifest_sha256", "status",
-                        "legal_hold", "deleted_at",
+                        "id",
+                        "organization_id",
+                        "engagement_id",
+                        "asset_id",
+                        "registered_by",
+                        "source_registry_id",
+                        "original_filename",
+                        "classification",
+                        "object_key",
+                        "sha256",
+                        "size_bytes",
+                        "manifest",
+                        "manifest_sha256",
+                        "status",
+                        "legal_hold",
+                        "deleted_at",
                     },
                     "malware_evidence_quota_reservations": {
-                        "id", "organization_id", "reserved_bytes", "created_at", "expires_at",
+                        "id",
+                        "organization_id",
+                        "reserved_bytes",
+                        "created_at",
+                        "expires_at",
                     },
                 }.items():
                     actual_columns = {
-                        row["name"] for row in connection.execute(f'PRAGMA table_info("{table_name}")')
+                        row["name"]
+                        for row in connection.execute(f'PRAGMA table_info("{table_name}")')
                     }
                     if not expected_table_columns <= actual_columns:
                         return revision, "malware evidence schema is incomplete"
@@ -563,13 +716,24 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
                     return revision, "durable job lease schema is incomplete"
                 for table_name, expected_table_columns in {
                     "execution_action_attempts": {
-                        "id", "job_id", "organization_id", "engagement_id",
-                        "action_sequence", "lease_generation", "worker_id",
-                        "adapter_id", "operation", "authorization_id",
-                        "request_digest", "state",
+                        "id",
+                        "job_id",
+                        "organization_id",
+                        "engagement_id",
+                        "action_sequence",
+                        "lease_generation",
+                        "worker_id",
+                        "adapter_id",
+                        "operation",
+                        "authorization_id",
+                        "request_digest",
+                        "state",
                     },
                     "worker_leases": {
-                        "worker_id", "status", "started_at", "last_heartbeat_at",
+                        "worker_id",
+                        "status",
+                        "started_at",
+                        "last_heartbeat_at",
                     },
                 }.items():
                     actual_columns = {
@@ -811,9 +975,13 @@ def _manifest(path: Path) -> dict[str, Any]:
             raise ValueError
         if "repository_snapshots" in value and not isinstance(value["repository_snapshots"], list):
             raise ValueError
-        if "log_evidence_snapshots" in value and not isinstance(value["log_evidence_snapshots"], list):
+        if "log_evidence_snapshots" in value and not isinstance(
+            value["log_evidence_snapshots"], list
+        ):
             raise ValueError
-        if "malware_evidence_snapshots" in value and not isinstance(value["malware_evidence_snapshots"], list):
+        if "malware_evidence_snapshots" in value and not isinstance(
+            value["malware_evidence_snapshots"], list
+        ):
             raise ValueError
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise RecoveryInputError("Backup manifest fields are malformed.") from exc
@@ -826,7 +994,10 @@ def _manifest(path: Path) -> dict[str, Any]:
 def _repository_snapshot_rows(database: Path) -> list[dict[str, Any]]:
     connection = _connect_readonly(database, immutable=True)
     try:
-        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
         if "repository_snapshots" not in tables:
             return []
         rows = connection.execute(
@@ -836,14 +1007,25 @@ def _repository_snapshot_rows(database: Path) -> list[dict[str, Any]]:
         result = []
         for row in rows:
             try:
-                manifest = json.loads(row["manifest"]) if isinstance(row["manifest"], str) else row["manifest"]
-                canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                result.append({
-                    "snapshot_id": row["id"], "organization_id": row["organization_id"],
-                    "sha256": row["sha256"], "size_bytes": row["size_bytes"],
-                    "manifest_version": row["manifest_version"], "status": row["status"],
-                    "manifest_sha256": hashlib.sha256(canonical).hexdigest(),
-                })
+                manifest = (
+                    json.loads(row["manifest"])
+                    if isinstance(row["manifest"], str)
+                    else row["manifest"]
+                )
+                canonical = json.dumps(
+                    manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+                result.append(
+                    {
+                        "snapshot_id": row["id"],
+                        "organization_id": row["organization_id"],
+                        "sha256": row["sha256"],
+                        "size_bytes": row["size_bytes"],
+                        "manifest_version": row["manifest_version"],
+                        "status": row["status"],
+                        "manifest_sha256": hashlib.sha256(canonical).hexdigest(),
+                    }
+                )
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise RecoveryInputError("Repository snapshot metadata is malformed.") from exc
         return result
@@ -906,13 +1088,17 @@ def _has_unsafe_existing_ancestor(path: Path) -> bool:
     return _is_link_or_reparse(current)
 
 
-def _copy_repository_snapshots(database: Path, staging: Path, managed_root: Path | None = None) -> list[dict[str, Any]]:
+def _copy_repository_snapshots(
+    database: Path, staging: Path, managed_root: Path | None = None
+) -> list[dict[str, Any]]:
     rows = _repository_snapshot_rows(database)
     if not rows:
         return []
     source_root = managed_root or database.parent / "repository-snapshots"
     if source_root.exists() and _is_link_or_reparse(source_root):
-        raise RecoveryError("Managed repository snapshot storage is unsafe; backup was not marked complete.")
+        raise RecoveryError(
+            "Managed repository snapshot storage is unsafe; backup was not marked complete."
+        )
     destination_root = staging / "repository-snapshots"
     copied: list[dict[str, Any]] = []
     for row in rows:
@@ -922,12 +1108,19 @@ def _copy_repository_snapshots(database: Path, staging: Path, managed_root: Path
         source = source_root / row["organization_id"] / row["sha256"]
         db = _connect_readonly(database, immutable=True)
         try:
-            raw = db.execute("SELECT manifest FROM repository_snapshots WHERE id=?", (row["snapshot_id"],)).fetchone()
+            raw = db.execute(
+                "SELECT manifest FROM repository_snapshots WHERE id=?", (row["snapshot_id"],)
+            ).fetchone()
             manifest = json.loads(raw[0]) if isinstance(raw[0], str) else raw[0]
         finally:
             db.close()
-        if not _verify_repository_snapshot_content(source, {**manifest, "size_bytes": row["size_bytes"]}):
-            raise RecoveryError("A referenced repository snapshot is missing or corrupt; backup was not marked complete.")
+        if not _verify_repository_snapshot_content(
+            source, {**manifest, "size_bytes": row["size_bytes"]}
+        ):
+            raise RecoveryError(
+                "A referenced repository snapshot is missing or corrupt; "
+                "backup was not marked complete."
+            )
         target = destination_root / row["organization_id"] / row["sha256"]
         target.parent.mkdir(parents=True, exist_ok=True)
         for directory, dirs, files in os.walk(source, topdown=True, followlinks=False):
@@ -962,14 +1155,25 @@ def _log_evidence_rows(database: Path) -> list[dict[str, Any]]:
         result = []
         for row in rows:
             try:
-                value = json.loads(row["manifest"]) if isinstance(row["manifest"], str) else row["manifest"]
-                canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                result.append({
-                    "snapshot_id": row["id"], "organization_id": row["organization_id"],
-                    "sha256": row["sha256"], "size_bytes": row["size_bytes"],
-                    "manifest_version": row["manifest_version"], "status": row["status"],
-                    "manifest_sha256": hashlib.sha256(canonical).hexdigest(),
-                })
+                value = (
+                    json.loads(row["manifest"])
+                    if isinstance(row["manifest"], str)
+                    else row["manifest"]
+                )
+                canonical = json.dumps(
+                    value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+                result.append(
+                    {
+                        "snapshot_id": row["id"],
+                        "organization_id": row["organization_id"],
+                        "sha256": row["sha256"],
+                        "size_bytes": row["size_bytes"],
+                        "manifest_version": row["manifest_version"],
+                        "status": row["status"],
+                        "manifest_sha256": hashlib.sha256(canonical).hexdigest(),
+                    }
+                )
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise RecoveryInputError("Log evidence snapshot metadata is malformed.") from exc
         return result
@@ -985,7 +1189,9 @@ def _copy_log_evidence(
         return []
     source_root = managed_root or database.parent / "log-evidence-snapshots"
     if source_root.exists() and _is_link_or_reparse(source_root):
-        raise RecoveryError("Managed log evidence storage is unsafe; backup was not marked complete.")
+        raise RecoveryError(
+            "Managed log evidence storage is unsafe; backup was not marked complete."
+        )
     destination_root = staging / "log-evidence-snapshots"
     db = _connect_readonly(database, immutable=True)
     try:
@@ -993,14 +1199,22 @@ def _copy_log_evidence(
             if row["status"] == "deleted":
                 continue
             if row["status"] != "available":
-                raise RecoveryError("A referenced log evidence snapshot is unavailable; backup was not marked complete.")
+                raise RecoveryError(
+                    "A referenced log evidence snapshot is unavailable; "
+                    "backup was not marked complete."
+                )
             raw = db.execute(
                 "SELECT manifest FROM log_evidence_snapshots WHERE id=?", (row["snapshot_id"],)
             ).fetchone()
             value = json.loads(raw[0]) if isinstance(raw[0], str) else raw[0]
             source = source_root / row["organization_id"] / row["sha256"]
-            if not _verify_repository_snapshot_content(source, {**value, "size_bytes": row["size_bytes"]}):
-                raise RecoveryError("A referenced log evidence snapshot is missing or corrupt; backup was not marked complete.")
+            if not _verify_repository_snapshot_content(
+                source, {**value, "size_bytes": row["size_bytes"]}
+            ):
+                raise RecoveryError(
+                    "A referenced log evidence snapshot is missing or corrupt; "
+                    "backup was not marked complete."
+                )
             target = destination_root / row["organization_id"] / row["sha256"]
             target.parent.mkdir(parents=True, exist_ok=True)
             for directory, dirs, files in os.walk(source, topdown=True, followlinks=False):
@@ -1010,7 +1224,9 @@ def _copy_log_evidence(
                 for name in dirs:
                     child = current / name
                     if _is_link_or_reparse(child):
-                        raise RecoveryError("Log evidence snapshot contains an unsafe linked directory.")
+                        raise RecoveryError(
+                            "Log evidence snapshot contains an unsafe linked directory."
+                        )
                     (output_dir / name).mkdir(exist_ok=True)
                 for name in files:
                     child = current / name
@@ -1037,35 +1253,45 @@ def _malware_evidence_rows(database: Path) -> list[dict[str, Any]]:
         for row in rows:
             try:
                 object_key = row["object_key"]
-                if not isinstance(object_key, str) or len(object_key) != 64 or any(
-                    character not in "0123456789abcdef" for character in object_key
+                if (
+                    not isinstance(object_key, str)
+                    or len(object_key) != 64
+                    or any(character not in "0123456789abcdef" for character in object_key)
                 ):
                     raise ValueError("invalid managed object key")
-                manifest = json.loads(row["manifest"]) if isinstance(row["manifest"], str) else row["manifest"]
+                manifest = (
+                    json.loads(row["manifest"])
+                    if isinstance(row["manifest"], str)
+                    else row["manifest"]
+                )
                 expected_manifest = {
                     "manifest_version": row["manifest_version"],
-                    "files": [{
-                        "path": "sample",
-                        "size_bytes": row["size_bytes"],
-                        "sha256": row["sha256"],
-                    }],
+                    "files": [
+                        {
+                            "path": "sample",
+                            "size_bytes": row["size_bytes"],
+                            "sha256": row["sha256"],
+                        }
+                    ],
                 }
                 if manifest != expected_manifest or row["manifest_version"] != 1:
                     raise ValueError("manifest does not describe the immutable sample")
                 canonical = json.dumps(
                     manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
                 ).encode("utf-8")
-                result.append({
-                    "snapshot_id": row["id"],
-                    "organization_id": row["organization_id"],
-                    "sha256": row["sha256"],
-                    "manifest_sha256": row["manifest_sha256"],
-                    "verified_manifest_sha256": hashlib.sha256(canonical).hexdigest(),
-                    "size_bytes": row["size_bytes"],
-                    "manifest_version": row["manifest_version"],
-                    "status": row["status"],
-                    "object_key": object_key,
-                })
+                result.append(
+                    {
+                        "snapshot_id": row["id"],
+                        "organization_id": row["organization_id"],
+                        "sha256": row["sha256"],
+                        "manifest_sha256": row["manifest_sha256"],
+                        "verified_manifest_sha256": hashlib.sha256(canonical).hexdigest(),
+                        "size_bytes": row["size_bytes"],
+                        "manifest_version": row["manifest_version"],
+                        "status": row["status"],
+                        "object_key": object_key,
+                    }
+                )
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise RecoveryInputError("Malware evidence metadata is malformed.") from exc
         return result
@@ -1092,8 +1318,10 @@ def _copy_malware_evidence(
     try:
         for row in rows:
             safe_key = row["object_key"]
-            if not isinstance(safe_key, str) or len(safe_key) != 64 or any(
-                character not in "0123456789abcdef" for character in safe_key
+            if (
+                not isinstance(safe_key, str)
+                or len(safe_key) != 64
+                or any(character not in "0123456789abcdef" for character in safe_key)
             ):
                 raise RecoveryError("Malware evidence object identity is invalid.")
             row["object_key"] = safe_key
@@ -1104,7 +1332,9 @@ def _copy_malware_evidence(
                 result.append(row)
                 continue
             if row["status"] != "available":
-                raise RecoveryError("Referenced malware evidence is unavailable; backup is incomplete.")
+                raise RecoveryError(
+                    "Referenced malware evidence is unavailable; backup is incomplete."
+                )
             source = source_root / safe_key
             if (
                 _is_link_or_reparse(source)
@@ -1125,7 +1355,9 @@ def _copy_malware_evidence(
 
 
 def _publish_malware_evidence(
-    backup_directory: Path, staging: Path, managed_root: Path | None,
+    backup_directory: Path,
+    staging: Path,
+    managed_root: Path | None,
     published: list[Path],
 ) -> None:
     rows = _malware_evidence_rows(staging / DATABASE_FILENAME)
@@ -1153,8 +1385,14 @@ def _publish_malware_evidence(
             raise RecoveryError("Bundled malware evidence failed integrity verification.")
         target = target_root / key
         if target.exists() or target.is_symlink():
-            if _is_link_or_reparse(target) or not target.is_file() or _sha256(target) != row["sha256"]:
-                raise RecoveryInputError("Managed malware object already exists with different content.")
+            if (
+                _is_link_or_reparse(target)
+                or not target.is_file()
+                or _sha256(target) != row["sha256"]
+            ):
+                raise RecoveryInputError(
+                    "Managed malware object already exists with different content."
+                )
             continue
         temporary = target_root / f".{key}.restore-partial"
         if temporary.exists() or temporary.is_symlink():
@@ -1219,7 +1457,14 @@ def verify_backup(backup_directory: Path | str) -> VerificationResult:
     ):
         db_structural, revision, issues, unsupported = _verify_database(database, immutable=True)
         structural.extend(db_structural)
-    if revision in {"0010_governed_repository_assets", "0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
+    if revision in {
+        "0010_governed_repository_assets",
+        "0011_governed_log_evidence",
+        "0012_governed_malware_evidence",
+        "0013_governed_chain_trace",
+        "0014_multi_user_identity_sessions",
+        "0015_durable_job_leases_actions",
+    }:
         declared = manifest.get("repository_snapshots")
         actual = _repository_snapshot_rows(database)
         if not isinstance(declared, list) or declared != actual:
@@ -1227,18 +1472,36 @@ def verify_backup(backup_directory: Path | str) -> VerificationResult:
         else:
             for snapshot in actual:
                 if snapshot["status"] in {"available", "deleting"}:
-                    content = directory / "repository-snapshots" / snapshot["organization_id"] / snapshot["sha256"]
+                    content = (
+                        directory
+                        / "repository-snapshots"
+                        / snapshot["organization_id"]
+                        / snapshot["sha256"]
+                    )
                     db = _connect_readonly(database, immutable=True)
                     try:
-                        raw = db.execute("SELECT manifest FROM repository_snapshots WHERE id=?", (snapshot["snapshot_id"],)).fetchone()
-                        snapshot_manifest = json.loads(raw[0]) if isinstance(raw[0], str) else raw[0]
+                        raw = db.execute(
+                            "SELECT manifest FROM repository_snapshots WHERE id=?",
+                            (snapshot["snapshot_id"],),
+                        ).fetchone()
+                        snapshot_manifest = (
+                            json.loads(raw[0]) if isinstance(raw[0], str) else raw[0]
+                        )
                     finally:
                         db.close()
-                    if not _verify_repository_snapshot_content(content, {**snapshot_manifest, "size_bytes": snapshot["size_bytes"]}):
+                    if not _verify_repository_snapshot_content(
+                        content, {**snapshot_manifest, "size_bytes": snapshot["size_bytes"]}
+                    ):
                         structural.append("repository_snapshot_content_missing_or_corrupt")
                 elif snapshot["status"] in {"missing", "corrupt"}:
                     structural.append("repository_snapshot_content_missing_or_corrupt")
-    if revision in {"0011_governed_log_evidence", "0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
+    if revision in {
+        "0011_governed_log_evidence",
+        "0012_governed_malware_evidence",
+        "0013_governed_chain_trace",
+        "0014_multi_user_identity_sessions",
+        "0015_durable_job_leases_actions",
+    }:
         declared = manifest.get("log_evidence_snapshots")
         actual = _log_evidence_rows(database)
         if not isinstance(declared, list) or declared != actual:
@@ -1246,14 +1509,21 @@ def verify_backup(backup_directory: Path | str) -> VerificationResult:
         else:
             for snapshot in actual:
                 if snapshot["status"] == "available":
-                    content = directory / "log-evidence-snapshots" / snapshot["organization_id"] / snapshot["sha256"]
+                    content = (
+                        directory
+                        / "log-evidence-snapshots"
+                        / snapshot["organization_id"]
+                        / snapshot["sha256"]
+                    )
                     db = _connect_readonly(database, immutable=True)
                     try:
                         raw = db.execute(
                             "SELECT manifest FROM log_evidence_snapshots WHERE id=?",
                             (snapshot["snapshot_id"],),
                         ).fetchone()
-                        snapshot_manifest = json.loads(raw[0]) if isinstance(raw[0], str) else raw[0]
+                        snapshot_manifest = (
+                            json.loads(raw[0]) if isinstance(raw[0], str) else raw[0]
+                        )
                     finally:
                         db.close()
                     if not _verify_repository_snapshot_content(
@@ -1262,10 +1532,18 @@ def verify_backup(backup_directory: Path | str) -> VerificationResult:
                         structural.append("log_evidence_content_missing_or_corrupt")
                 elif snapshot["status"] not in {"deleted"}:
                     structural.append("log_evidence_content_missing_or_corrupt")
-    if revision in {"0012_governed_malware_evidence", "0013_governed_chain_trace", "0014_multi_user_identity_sessions", "0015_durable_job_leases_actions"}:
+    if revision in {
+        "0012_governed_malware_evidence",
+        "0013_governed_chain_trace",
+        "0014_multi_user_identity_sessions",
+        "0015_durable_job_leases_actions",
+    }:
         declared = manifest.get("malware_evidence_snapshots")
         actual_rows = _malware_evidence_rows(database)
-        actual = [{key: value for key, value in row.items() if key != "verified_manifest_sha256"} for row in actual_rows]
+        actual = [
+            {key: value for key, value in row.items() if key != "verified_manifest_sha256"}
+            for row in actual_rows
+        ]
         if not isinstance(declared, list) or declared != actual:
             structural.append("malware_evidence_manifest_mismatch")
         else:
@@ -1416,14 +1694,18 @@ def backup_database(
             raise RecoveryError("Completed backup failed structural verification.")
         backup_id = str(uuid4())
         repository_snapshot_rows = _copy_repository_snapshots(
-            staging_database, staging, source_path.expanduser().resolve(strict=False).parent / "repository-snapshots"
+            staging_database,
+            staging,
+            source_path.expanduser().resolve(strict=False).parent / "repository-snapshots",
         )
         log_evidence_rows = _copy_log_evidence(
-            staging_database, staging,
+            staging_database,
+            staging,
             source_path.expanduser().resolve(strict=False).parent / "log-evidence-snapshots",
         )
         malware_evidence_rows = _copy_malware_evidence(
-            staging_database, staging,
+            staging_database,
+            staging,
             Path(malware_evidence_root) if malware_evidence_root is not None else None,
         )
         manifest = {
@@ -1591,7 +1873,9 @@ def restore_backup(
             except Exception as exc:
                 raise RecoveryError("Managed log evidence storage could not be secured.") from exc
         _publish_malware_evidence(
-            backup_directory, staging_dir, Path(malware_evidence_root) if malware_evidence_root is not None else None,
+            backup_directory,
+            staging_dir,
+            Path(malware_evidence_root) if malware_evidence_root is not None else None,
             published_malware_objects,
         )
         try:

@@ -5,11 +5,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from conftest import authorize_test_operator
 
 from chinescan.core.fs_policy import FilesystemBrowserService
 from chinescan.core.projects import ProjectError, ProjectFileRegistry, ProjectService
 from chinescan.core.storage.sqlite import SQLiteRepository
-from conftest import authorize_test_operator
 
 
 def project_fixture(tmp_path: Path) -> tuple[SQLiteRepository, ProjectService, Path]:

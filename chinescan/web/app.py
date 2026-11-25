@@ -26,7 +26,7 @@ from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Requ
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.routing import Match
 
@@ -39,11 +39,23 @@ from chinescan.core.cases import (
     CaseWorkflow,
     CaseWorkflowError,
 )
+from chinescan.core.chain_trace_execution import (
+    GovernedChainImportAdapter,
+    GovernedChainProviderAdapter,
+)
 from chinescan.core.config.settings import Settings
-from chinescan.core.errors import StorageError
 from chinescan.core.dashboard_alerts import AlertStateError, DashboardAlerts
 from chinescan.core.dashboard_intelligence import DashboardIntelligence
 from chinescan.core.diagnostics import build_report, health_report
+from chinescan.core.engagement_security import EngagementSecurityService
+from chinescan.core.errors import StorageError
+from chinescan.core.execution_adapters import (
+    GovernedLogAnalysisAdapter,
+    GovernedMalwareStaticTriageAdapter,
+    RepositoryCodeAssessmentAdapter,
+    build_default_adapter_registry,
+)
+from chinescan.core.execution_governance import ExecutionGovernanceService, GovernedDomainWorker
 from chinescan.core.external_reports import (
     MAX_EXTERNAL_REPORT_BYTES,
     ExternalReportError,
@@ -55,10 +67,13 @@ from chinescan.core.fs_policy import (
     policy_paths,
 )
 from chinescan.core.github_import import GitHubImportError, GitHubImportService, session_binding
+from chinescan.core.identity import IdentityError, IdentityService
+from chinescan.core.log_evidence import LogEvidenceStore
 from chinescan.core.log_locations import LogLocationService
 from chinescan.core.logging.redaction import redact
 from chinescan.core.logging.structured import configure_logging
 from chinescan.core.malware_ack import MalwareAcknowledgementError, MalwareAcknowledgements
+from chinescan.core.malware_evidence import MalwareEvidenceStore
 from chinescan.core.malware_project_scan import ProjectMalwareJobs, ProjectMalwareScanner
 from chinescan.core.models.common import (
     Confidence,
@@ -69,23 +84,6 @@ from chinescan.core.models.common import (
     Severity,
 )
 from chinescan.core.models.finding import EvidenceLocation, Finding, FindingExplanation
-from chinescan.core.organizations import OrganizationService
-from chinescan.core.engagement_security import EngagementSecurityService
-from chinescan.core.execution_governance import ExecutionGovernanceService, GovernedDomainWorker
-from chinescan.core.identity import IdentityError, IdentityService
-from chinescan.core.repository_assessment import RepositoryAssessmentService, RepositorySnapshotStore
-from chinescan.core.execution_adapters import (
-    GovernedLogAnalysisAdapter,
-    GovernedMalwareStaticTriageAdapter,
-    RepositoryCodeAssessmentAdapter,
-    build_default_adapter_registry,
-)
-from chinescan.core.log_evidence import LogEvidenceStore
-from chinescan.core.chain_trace_execution import (
-    GovernedChainImportAdapter,
-    GovernedChainProviderAdapter,
-)
-from chinescan.core.malware_evidence import MalwareEvidenceStore
 from chinescan.core.models.investigation import (
     Alert,
     Case,
@@ -97,6 +95,7 @@ from chinescan.core.models.investigation import (
     TimelineEntry,
 )
 from chinescan.core.orchestration.code_scan import ScanBounds
+from chinescan.core.organizations import OrganizationService
 from chinescan.core.projects import ProjectError, ProjectService
 from chinescan.core.report_store import ReportStoreError, save_scan_reports
 from chinescan.core.reporting import (
@@ -105,6 +104,10 @@ from chinescan.core.reporting import (
     render_case_report,
     render_report,
     scan_data,
+)
+from chinescan.core.repository_assessment import (
+    RepositoryAssessmentService,
+    RepositorySnapshotStore,
 )
 from chinescan.core.storage.sqlite import SQLiteRepository
 from chinescan.malware_analysis.managed import (
@@ -120,30 +123,27 @@ from chinescan.web.auth import (
     Session,
     SessionStore,
     create_operator,
+    ensure_operator_identity_id,
     migrate_legacy_operator,
     normalize_email,
-    ensure_operator_identity_id,
     operator_auth_epoch,
     operator_email,
     operator_identity_id,
     operator_status,
-    operator_totp_enabled,
     perform_dummy_verification,
     reset_operator_password,
-    verify_operator,
-    verify_operator_totp,
 )
 from chinescan.web.chain_trace_jobs import ChainTraceJobManager
 from chinescan.web.code_jobs import CodeJobManager, ProjectConfigurationError, ProjectRegistry
-from chinescan.web.log_jobs import LogJobManager, LogSourceError, LogSourceRegistry
-from chinescan.web.malware_jobs import MalwareDashboardManager
-from chinescan.web.organization_api import create_organization_router
 from chinescan.web.engagement_security_api import create_engagement_security_router
 from chinescan.web.execution_api import create_chain_execution_router, create_execution_router
 from chinescan.web.log_evidence_api import create_log_evidence_router
+from chinescan.web.log_jobs import LogJobManager, LogSourceError, LogSourceRegistry
 from chinescan.web.malware_evidence_api import create_malware_evidence_router
-from chinescan.web.repository_execution_api import create_repository_router
+from chinescan.web.malware_jobs import MalwareDashboardManager
+from chinescan.web.organization_api import create_organization_router
 from chinescan.web.rate_limit import InProcessRateLimiter
+from chinescan.web.repository_execution_api import create_repository_router
 
 COOKIE_NAME = "chinescan_session"
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
@@ -773,7 +773,9 @@ def create_app(
         organization_quota_bytes=active_settings.log_evidence_org_quota_bytes,
     )
     log_analysis_adapter = GovernedLogAnalysisAdapter(repository, log_evidence_store)
-    chain_label_paths = (str(active_settings.chain_labels_path),) if active_settings.chain_labels_path else ()
+    chain_label_paths = (
+        (str(active_settings.chain_labels_path),) if active_settings.chain_labels_path else ()
+    )
     chain_import_adapter = GovernedChainImportAdapter(
         repository, log_evidence_store, tuple(chain_label_paths)
     )
@@ -1115,7 +1117,8 @@ def create_app(
         organization_api = path.startswith("/api/organizations/") or path == "/api/organizations"
         identity_api = (
             path == "/api/auth/me"
-            or path in {
+            or path
+            in {
                 "/api/auth/session",
                 "/api/auth/csrf",
                 "/api/auth/password/change",
@@ -1136,12 +1139,9 @@ def create_app(
             "/api/auth/reset-password",
             "/api/auth/invitations/accept",
         }
-        unsupported_version_alias = path.startswith("/api/v") and not path.startswith(
-            "/api/v1/"
-        )
+        unsupported_version_alias = path.startswith("/api/v") and not path.startswith("/api/v1/")
         has_matching_api_route = any(
-            route.matches(request.scope)[0] is not Match.NONE
-            for route in application.router.routes
+            route.matches(request.scope)[0] is not Match.NONE for route in application.router.routes
         )
         if (
             path.startswith("/api/")
@@ -1167,7 +1167,10 @@ def create_app(
                 denied.headers["X-API-Version"] = "1"
                 return denied
             organization_member_resource = path in {
-                "/api/scans", "/api/cases", "/api/findings", "/api/reports"
+                "/api/scans",
+                "/api/cases",
+                "/api/findings",
+                "/api/reports",
             } or any(
                 path.startswith(prefix)
                 for prefix in ("/api/scans/", "/api/cases/", "/api/findings/", "/api/reports/")
@@ -1185,12 +1188,9 @@ def create_app(
                 "/api/organization-migration-report",
                 "/api/organization-bootstrap-report",
             )
-            if (
-                not organization_member_resource
-                and (
-                    not organization_service.operator_user_id
-                    or session.user_id != organization_service.operator_user_id
-                )
+            if not organization_member_resource and (
+                not organization_service.operator_user_id
+                or session.user_id != organization_service.operator_user_id
             ):
                 denied = JSONResponse(
                     status_code=403, content={"detail": "Local operator access required."}
@@ -1199,9 +1199,7 @@ def create_app(
                 denied.headers["X-API-Version"] = "1"
                 return denied
             selected = request.headers.get("x-chinescan-organization-id")
-            organization_id = organization_service.membership_context(
-                session.user_id, selected
-            )
+            organization_id = organization_service.membership_context(session.user_id, selected)
             if organization_id is None:
                 denied = JSONResponse(status_code=404, content={"detail": "Resource not found."})
                 denied.headers["X-Request-ID"] = request_id
@@ -1225,7 +1223,9 @@ def create_app(
                     session.user_id, organization_id
                 )
                 if request.method in {"POST", "PUT", "PATCH", "DELETE"} and membership_role not in {
-                    "owner", "admin", "member"
+                    "owner",
+                    "admin",
+                    "member",
                 }:
                     denied = JSONResponse(
                         status_code=403,
@@ -1312,9 +1312,8 @@ def create_app(
         persistent_user = (
             organization_service.get_active_user(session.user_id) if session.user_id else None
         )
-        if (
-            not persistent_user
-            or not secrets.compare_digest(persistent_user["auth_epoch"], session.auth_epoch)
+        if not persistent_user or not secrets.compare_digest(
+            persistent_user["auth_epoch"], session.auth_epoch
         ):
             sessions.revoke(token)
             raise HTTPException(status_code=401, detail="Authentication required.")
@@ -1443,14 +1442,21 @@ def create_app(
     application.router.routes.extend(chain_execution_router.routes)
 
     log_evidence_router = create_log_evidence_router(
-        log_evidence_store, engagement_security_service, log_registry,
-        execution_governance, current_session, require_csrf,
+        log_evidence_store,
+        engagement_security_service,
+        log_registry,
+        execution_governance,
+        current_session,
+        require_csrf,
     )
     application.router.routes.extend(log_evidence_router.routes)
 
     repository_router = create_repository_router(
-        repository_assessment_service, execution_governance, governed_domain_worker,
-        current_session, require_csrf,
+        repository_assessment_service,
+        execution_governance,
+        governed_domain_worker,
+        current_session,
+        require_csrf,
     )
     application.router.routes.extend(repository_router.routes)
     if malware_evidence_store is not None and sample_registry is not None:
@@ -1593,12 +1599,10 @@ def create_app(
             ):
                 identity_service.migrate_operator_credentials(credentials, session.user_id)
             persistent_user = (
-                organization_service.get_active_user(session.user_id)
-                if session.user_id else None
+                organization_service.get_active_user(session.user_id) if session.user_id else None
             )
-            if (
-                not persistent_user
-                or not secrets.compare_digest(persistent_user["auth_epoch"], session.auth_epoch)
+            if not persistent_user or not secrets.compare_digest(
+                persistent_user["auth_epoch"], session.auth_epoch
             ):
                 sessions.revoke(token)
                 session = None
@@ -1789,9 +1793,7 @@ def create_app(
         existing_session = sessions.get(token)
         if existing_session and existing_session.user_id:
             active = organization_service.get_active_user(existing_session.user_id)
-            if active and secrets.compare_digest(
-                active["auth_epoch"], existing_session.auth_epoch
-            ):
+            if active and secrets.compare_digest(active["auth_epoch"], existing_session.auth_epoch):
                 authenticated_user_id = active["id"]
         try:
             accepted = identity_service.accept_invitation(
@@ -1845,9 +1847,7 @@ def create_app(
         if new_epoch is None:
             raise HTTPException(status_code=401, detail="Current password is invalid.")
         sessions.revoke_user_sessions(session.user_id)
-        opaque, rotated = sessions.create(
-            session.email, new_epoch, user_id=session.user_id
-        )
+        opaque, rotated = sessions.create(session.email, new_epoch, user_id=session.user_id)
         response.set_cookie(
             COOKIE_NAME,
             opaque,
@@ -1930,9 +1930,7 @@ def create_app(
         if not session.user_id:
             raise HTTPException(status_code=401, detail="Authentication required.")
         try:
-            updated = identity_service.set_account_status(
-                session.user_id, user_id, payload.status
-            )
+            updated = identity_service.set_account_status(session.user_id, user_id, payload.status)
         except IdentityError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
         if updated is None:
@@ -3119,15 +3117,19 @@ def create_app(
             for start in range(0, len(finding_ids), 100):
                 ids = finding_ids[start : start + 100]
                 try:
-                    with repository.member_context(
-                        organization_id, principal_id, write=False
-                    ), db_lock:
+                    with (
+                        repository.member_context(organization_id, principal_id, write=False),
+                        db_lock,
+                    ):
                         records = repository.get_many("finding", ids)
                 except StorageError:
-                    yield json.dumps(
-                        {"type": "error", "code": "record_unavailable_or_unsafe"},
-                        sort_keys=True,
-                    ) + "\n"
+                    yield (
+                        json.dumps(
+                            {"type": "error", "code": "record_unavailable_or_unsafe"},
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    )
                     return
                 try:
                     if len(records) != len(ids):

@@ -8,7 +8,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeVar
 
 from chinescan.core.logging.redaction import redact
 from chinescan.core.models.investigation import Alert, Event, Indicator, Scan, Target, TimelineEntry
@@ -24,7 +23,6 @@ from chinescan.log_analysis.ioc_matching import correlate_iocs, extract_event_io
 LOG_ANALYSIS_VERSION = "chinescan-log-analysis-v1"
 LOG_RULESET_VERSION = "builtin-detections-v1"
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
-_T = TypeVar("_T")
 
 
 def _sanitize_text(value: str) -> str:
@@ -43,12 +41,12 @@ def _sanitize(value: object) -> object:
     return value
 
 
-def _sanitize_model(model: _T) -> _T:
+def _sanitize_model[T](model: T) -> T:
     fields = getattr(type(model), "model_fields", None)
     copier = getattr(model, "model_copy", None)
     if not isinstance(fields, dict) or copier is None:
         return model
-    result: _T = copier(update={name: _sanitize(getattr(model, name)) for name in fields})
+    result: T = copier(update={name: _sanitize(getattr(model, name)) for name in fields})
     return result
 
 

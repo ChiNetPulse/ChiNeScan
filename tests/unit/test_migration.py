@@ -144,9 +144,12 @@ def test_repository_migration_preserves_records_and_enforces_tenant_binding(
                         "'active',:user,:now,:now)"
                     ),
                     {
-                        "id": f"asset-{suffix}", "org": f"org-{suffix}",
-                        "engagement": f"engagement-{suffix}", "target": f"{suffix}.example.test",
-                        "user": f"user-{suffix}", "now": now,
+                        "id": f"asset-{suffix}",
+                        "org": f"org-{suffix}",
+                        "engagement": f"engagement-{suffix}",
+                        "target": f"{suffix}.example.test",
+                        "user": f"user-{suffix}",
+                        "now": now,
                     },
                 )
             connection.execute(
@@ -158,15 +161,25 @@ def test_repository_migration_preserves_records_and_enforces_tenant_binding(
         command.upgrade(config, "head")
         with engine.connect() as connection:
             assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
-            assert connection.execute(
-                text("SELECT payload FROM records WHERE record_type='case' AND record_id='legacy'")
-            ).scalar_one() == '{"title":"Preserve"}'
-            assert connection.execute(
-                text("SELECT target FROM engagement_assets WHERE id='asset-a'")
-            ).scalar_one() == "a.example.test"
-            assert connection.execute(
-                text("SELECT version_num FROM alembic_version")
-                ).scalar_one() == "0015_durable_job_leases_actions"
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT payload FROM records "
+                        "WHERE record_type='case' AND record_id='legacy'"
+                    )
+                ).scalar_one()
+                == '{"title":"Preserve"}'
+            )
+            assert (
+                connection.execute(
+                    text("SELECT target FROM engagement_assets WHERE id='asset-a'")
+                ).scalar_one()
+                == "a.example.test"
+            )
+            assert (
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                == "0015_durable_job_leases_actions"
+            )
 
         with engine.begin() as connection:
             connection.execute(
@@ -223,9 +236,11 @@ def test_malware_backend_revision_upgrades_existing_records_without_rewrite(tmp_
         with pytest.raises(StorageError, match="authorized organization context"):
             repository.get("case", "legacy")
         with repository.engine.connect() as connection:
-            assert json.loads(connection.exec_driver_sql(
-                "SELECT payload FROM records WHERE record_type='case' AND record_id='legacy'"
-            ).scalar_one()) == {"title": "Keep"}
+            assert json.loads(
+                connection.exec_driver_sql(
+                    "SELECT payload FROM records WHERE record_type='case' AND record_id='legacy'"
+                ).scalar_one()
+            ) == {"title": "Keep"}
             from alembic.runtime.migration import MigrationContext
 
             assert (
@@ -254,43 +269,102 @@ def test_malware_evidence_migration_enforces_tenant_constraints_and_downgrades_e
     try:
         with engine.begin() as connection:
             for suffix in ("a", "b"):
-                connection.execute(text(
-                    "INSERT INTO users (id,email_normalized,display_name,status,auth_epoch,created_at,updated_at) "
-                    "VALUES (:id,:email,:name,'active','epoch',:now,:now)"
-                ), {"id": f"user-{suffix}", "email": f"{suffix}@example.test", "name": suffix, "now": now})
-                connection.execute(text(
-                    "INSERT INTO organizations (id,name,slug,status,owner_user_id,created_at,updated_at) "
-                    "VALUES (:id,:name,:slug,'active',:user,:now,:now)"
-                ), {"id": f"org-{suffix}", "name": suffix, "slug": f"org-{suffix}", "user": f"user-{suffix}", "now": now})
-                connection.execute(text(
-                    "INSERT INTO organization_memberships "
-                    "(id,organization_id,user_id,role,status,created_at,updated_at) "
-                    "VALUES (:id,:org,:user,'owner','active',:now,:now)"
-                ), {"id": f"membership-{suffix}", "org": f"org-{suffix}", "user": f"user-{suffix}", "now": now})
-                connection.execute(text(
-                    "INSERT INTO engagements (id,organization_id,client_id,name,description,status,created_at,updated_at) "
-                    "VALUES (:id,:org,NULL,'engagement','synthetic','active',:now,:now)"
-                ), {"id": f"engagement-{suffix}", "org": f"org-{suffix}", "now": now})
-                connection.execute(text(
-                    "INSERT INTO engagement_assets "
-                    "(id,organization_id,client_id,engagement_id,asset_type,target,status,created_by,created_at,updated_at) "
-                    "VALUES (:id,:org,NULL,:engagement,'malware_evidence',:target,'active',:user,:now,:now)"
-                ), {"id": f"asset-{suffix}", "org": f"org-{suffix}", "engagement": f"engagement-{suffix}",
-                    "target": f"malware:asset-{suffix}", "user": f"user-{suffix}", "now": now})
-        manifest = json.dumps({"manifest_version": 1, "files": [{"path": "sample", "size_bytes": 4, "sha256": "a" * 64}]})
+                connection.execute(
+                    text(
+                        "INSERT INTO users "
+                        "(id,email_normalized,display_name,status,"
+                        "auth_epoch,created_at,updated_at) "
+                        "VALUES (:id,:email,:name,'active','epoch',:now,:now)"
+                    ),
+                    {
+                        "id": f"user-{suffix}",
+                        "email": f"{suffix}@example.test",
+                        "name": suffix,
+                        "now": now,
+                    },
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO organizations "
+                        "(id,name,slug,status,owner_user_id,created_at,updated_at) "
+                        "VALUES (:id,:name,:slug,'active',:user,:now,:now)"
+                    ),
+                    {
+                        "id": f"org-{suffix}",
+                        "name": suffix,
+                        "slug": f"org-{suffix}",
+                        "user": f"user-{suffix}",
+                        "now": now,
+                    },
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO organization_memberships "
+                        "(id,organization_id,user_id,role,status,created_at,updated_at) "
+                        "VALUES (:id,:org,:user,'owner','active',:now,:now)"
+                    ),
+                    {
+                        "id": f"membership-{suffix}",
+                        "org": f"org-{suffix}",
+                        "user": f"user-{suffix}",
+                        "now": now,
+                    },
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO engagements "
+                        "(id,organization_id,client_id,name,description,status,"
+                        "created_at,updated_at) "
+                        "VALUES (:id,:org,NULL,'engagement','synthetic','active',:now,:now)"
+                    ),
+                    {"id": f"engagement-{suffix}", "org": f"org-{suffix}", "now": now},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO engagement_assets "
+                        "(id,organization_id,client_id,engagement_id,asset_type,target,"
+                        "status,created_by,created_at,updated_at) "
+                        "VALUES (:id,:org,NULL,:engagement,'malware_evidence',"
+                        ":target,'active',:user,:now,:now)"
+                    ),
+                    {
+                        "id": f"asset-{suffix}",
+                        "org": f"org-{suffix}",
+                        "engagement": f"engagement-{suffix}",
+                        "target": f"malware:asset-{suffix}",
+                        "user": f"user-{suffix}",
+                        "now": now,
+                    },
+                )
+        manifest = json.dumps(
+            {
+                "manifest_version": 1,
+                "files": [{"path": "sample", "size_bytes": 4, "sha256": "a" * 64}],
+            }
+        )
         values = {
-            "id": "snapshot-valid", "organization_id": "org-a", "engagement_id": "engagement-a",
-            "asset_id": "asset-a", "registered_by": "user-a", "source_registry_id": "synthetic",
-            "original_filename": "sample.bin", "classification": "unknown", "object_key": "b" * 64,
-            "sha256": "a" * 64, "manifest": manifest, "manifest_sha256": hashlib.sha256(
+            "id": "snapshot-valid",
+            "organization_id": "org-a",
+            "engagement_id": "engagement-a",
+            "asset_id": "asset-a",
+            "registered_by": "user-a",
+            "source_registry_id": "synthetic",
+            "original_filename": "sample.bin",
+            "classification": "unknown",
+            "object_key": "b" * 64,
+            "sha256": "a" * 64,
+            "manifest": manifest,
+            "manifest_sha256": hashlib.sha256(
                 json.dumps(json.loads(manifest), sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest(), "now": now,
+            ).hexdigest(),
+            "now": now,
         }
         insert_sql = text(
             "INSERT INTO malware_evidence_snapshots "
             "(id,organization_id,engagement_id,asset_id,registered_by,source_registry_id,original_filename,"
             "classification,object_key,sha256,size_bytes,file_type,manifest,manifest_sha256,manifest_version,"
-            "created_at,status,legal_hold) VALUES (:id,:organization_id,:engagement_id,:asset_id,:registered_by,"
+            "created_at,status,legal_hold) "
+            "VALUES (:id,:organization_id,:engagement_id,:asset_id,:registered_by,"
             ":source_registry_id,:original_filename,:classification,:object_key,:sha256,4,'unknown',:manifest,"
             ":manifest_sha256,1,:now,'available',0)"
         )
@@ -298,24 +372,40 @@ def test_malware_evidence_migration_enforces_tenant_constraints_and_downgrades_e
             assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
         with pytest.raises(IntegrityError):
             with engine.begin() as connection:
-                connection.execute(insert_sql, values | {"id": "cross-org", "organization_id": "org-a",
-                    "engagement_id": "engagement-a", "asset_id": "asset-a", "registered_by": "user-b",
-                    "object_key": "c" * 64})
+                connection.execute(
+                    insert_sql,
+                    values
+                    | {
+                        "id": "cross-org",
+                        "organization_id": "org-a",
+                        "engagement_id": "engagement-a",
+                        "asset_id": "asset-a",
+                        "registered_by": "user-b",
+                        "object_key": "c" * 64,
+                    },
+                )
         with engine.begin() as connection:
             connection.execute(insert_sql, values)
         with engine.connect() as connection:
-            assert connection.execute(text(
-                "SELECT COUNT(*) FROM malware_evidence_snapshots WHERE id='snapshot-valid'"
-            )).scalar_one() == 1
-            assert connection.execute(text(
-                "SELECT version_num FROM alembic_version"
-            )).scalar_one() == "0015_durable_job_leases_actions"
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT COUNT(*) FROM malware_evidence_snapshots WHERE id='snapshot-valid'"
+                    )
+                ).scalar_one()
+                == 1
+            )
+            assert (
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                == "0015_durable_job_leases_actions"
+            )
         with pytest.raises(RuntimeError, match="history exists"):
             command.downgrade(config, "0011_governed_log_evidence")
         with engine.connect() as connection:
-            assert connection.execute(text(
-                "SELECT version_num FROM alembic_version"
-            )).scalar_one() == "0013_governed_chain_trace"
+            assert (
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                == "0013_governed_chain_trace"
+            )
     finally:
         engine.dispose()
 
@@ -351,9 +441,7 @@ def test_engagement_security_migration_upgrades_and_empty_downgrade_is_safe(
             "cancellation_requested_at",
             "cancellation_requested_by",
             "cancellation_observed_at",
-        } <= {
-            column["name"] for column in inspect(engine).get_columns("execution_jobs")
-        }
+        } <= {column["name"] for column in inspect(engine).get_columns("execution_jobs")}
         assert "authorization_document_sha256" in {
             column["name"] for column in inspect(engine).get_columns("execution_jobs")
         }
@@ -376,9 +464,7 @@ def test_engagement_security_migration_upgrades_and_empty_downgrade_is_safe(
     command.upgrade(config, "head")
     engine = create_engine(f"sqlite:///{database.as_posix()}")
     try:
-        assert {
-            "assessment_audit_events", "execution_jobs", "execution_result_provenance"
-        } <= set(
+        assert {"assessment_audit_events", "execution_jobs", "execution_result_provenance"} <= set(
             inspect(engine).get_table_names()
         )
     finally:
@@ -444,9 +530,7 @@ def test_engagement_audit_metadata_matches_migrated_foreign_keys(tmp_path: Path)
                 for item in inspect(engine).get_foreign_keys("execution_result_provenance")
             )
 
-        assert provenance_foreign_keys(metadata_engine) == provenance_foreign_keys(
-            migrated_engine
-        )
+        assert provenance_foreign_keys(metadata_engine) == provenance_foreign_keys(migrated_engine)
         for engine in (metadata_engine, migrated_engine):
             with engine.connect() as connection:
                 trigger_names = set(

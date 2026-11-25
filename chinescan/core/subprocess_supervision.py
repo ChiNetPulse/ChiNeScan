@@ -148,9 +148,7 @@ def resolve_executable(executable: str) -> str:
     return resolved
 
 
-def _terminate_process_tree(
-    process: subprocess.Popen[bytes], job: _ProcessTreeJob | None
-) -> None:
+def _terminate_process_tree(process: subprocess.Popen[bytes], job: _ProcessTreeJob | None) -> None:
     """Terminate a child process and its descendants cleanly across Windows and POSIX."""
     if getattr(process, "_handle", None) is None and os.name == "nt":
         process.kill()
@@ -228,11 +226,7 @@ def run_supervised_subprocess(
 
     executable = resolve_executable(command[0])
     args = [executable, *command[1:]]
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key.upper() in env_allowlist
-    }
+    env = {key: value for key, value in os.environ.items() if key.upper() in env_allowlist}
     if extra_env:
         env.update(extra_env)
 

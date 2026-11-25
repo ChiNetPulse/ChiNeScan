@@ -154,12 +154,16 @@ class ExecutionGovernanceService:
                             ).validate_parameters(chain_request)
                         except (TypeError, ValueError):
                             raise ValueError("Assessment parameters are invalid.") from None
-                        if item.get("execution_context", {}).get("chain_context") != requested_context:
-                            raise ValueError("Idempotency key was already used for another request.")
+                        if (
+                            item.get("execution_context", {}).get("chain_context")
+                            != requested_context
+                        ):
+                            raise ValueError(
+                                "Idempotency key was already used for another request."
+                            )
                     if (
                         requested_target is not None
-                        and normalize_target(item["asset_type"], requested_target)
-                        != item["target"]
+                        and normalize_target(item["asset_type"], requested_target) != item["target"]
                     ):
                         raise ValueError("Idempotency key was already used for another target.")
                     connection.commit()
@@ -260,32 +264,50 @@ class ExecutionGovernanceService:
                 policy_request_digest = decision["request_digest"]
                 request_digest = policy_request_digest
                 if asset.asset_type == "repository":
-                    binding = connection.execute(select(repository_asset_bindings).where(
-                        repository_asset_bindings.c.id == repository_binding_id,
-                        repository_asset_bindings.c.organization_id == organization_id,
-                        repository_asset_bindings.c.engagement_id == engagement_id,
-                        repository_asset_bindings.c.asset_id == asset_id,
-                    )).first()
+                    binding = connection.execute(
+                        select(repository_asset_bindings).where(
+                            repository_asset_bindings.c.id == repository_binding_id,
+                            repository_asset_bindings.c.organization_id == organization_id,
+                            repository_asset_bindings.c.engagement_id == engagement_id,
+                            repository_asset_bindings.c.asset_id == asset_id,
+                        )
+                    ).first()
                     if not binding:
                         connection.rollback()
-                        return {**decision, "decision": "DENY", "reason_code": "REPOSITORY_BINDING_UNAVAILABLE", "explanation": "The repository binding is unavailable."}
+                        return {
+                            **decision,
+                            "decision": "DENY",
+                            "reason_code": "REPOSITORY_BINDING_UNAVAILABLE",
+                            "explanation": "The repository binding is unavailable.",
+                        }
                     binding_data = dict(binding._mapping)
-                    snapshot = connection.execute(select(repository_snapshots).where(
-                        repository_snapshots.c.id == binding_data["snapshot_id"],
-                        repository_snapshots.c.organization_id == organization_id,
-                        repository_snapshots.c.status == "available",
-                    )).first()
-                    attestation = connection.execute(select(repository_attestations).where(
-                        repository_attestations.c.id == repository_attestation_id,
-                        repository_attestations.c.organization_id == organization_id,
-                        repository_attestations.c.engagement_id == engagement_id,
-                        repository_attestations.c.asset_id == asset_id,
-                        repository_attestations.c.authorization_id == decision["authorization_id"],
-                        repository_attestations.c.scope_revision_id == decision["scope_revision_id"],
-                    )).first()
+                    snapshot = connection.execute(
+                        select(repository_snapshots).where(
+                            repository_snapshots.c.id == binding_data["snapshot_id"],
+                            repository_snapshots.c.organization_id == organization_id,
+                            repository_snapshots.c.status == "available",
+                        )
+                    ).first()
+                    attestation = connection.execute(
+                        select(repository_attestations).where(
+                            repository_attestations.c.id == repository_attestation_id,
+                            repository_attestations.c.organization_id == organization_id,
+                            repository_attestations.c.engagement_id == engagement_id,
+                            repository_attestations.c.asset_id == asset_id,
+                            repository_attestations.c.authorization_id
+                            == decision["authorization_id"],
+                            repository_attestations.c.scope_revision_id
+                            == decision["scope_revision_id"],
+                        )
+                    ).first()
                     if not snapshot or not attestation or technique != REPOSITORY_TECHNIQUE:
                         connection.rollback()
-                        return {**decision, "decision": "DENY", "reason_code": "REPOSITORY_ATTESTATION_OR_SNAPSHOT_INVALID", "explanation": "The repository attestation or snapshot is unavailable."}
+                        return {
+                            **decision,
+                            "decision": "DENY",
+                            "reason_code": "REPOSITORY_ATTESTATION_OR_SNAPSHOT_INVALID",
+                            "explanation": "The repository attestation or snapshot is unavailable.",
+                        }
                     snapshot_data = dict(snapshot._mapping)
                     attestation_data = dict(attestation._mapping)
                     repository_context = {
@@ -299,7 +321,9 @@ class ExecutionGovernanceService:
                         "adapter_version": "1",
                         "scanner_version": snapshot_data["scanner_version"],
                         "scan_bounds": self.repository_scan_bounds,
-                        "exclusion_policy_version": snapshot_data["manifest"].get("exclusion_policy"),
+                        "exclusion_policy_version": snapshot_data["manifest"].get(
+                            "exclusion_policy"
+                        ),
                     }
                     digest_context = {
                         "policy_request_digest": policy_request_digest,
@@ -312,13 +336,18 @@ class ExecutionGovernanceService:
                         "action_class": decision["action_class"],
                         "scope_revision_id": decision["scope_revision_id"],
                         "authorization_id": decision["authorization_id"],
-                        "authorization_document_sha256": connection.execute(select(authorization_documents.c.sha256).where(
-                            authorization_documents.c.organization_id == organization_id,
-                            authorization_documents.c.authorization_id == decision["authorization_id"],
-                        )).scalar_one_or_none(),
+                        "authorization_document_sha256": connection.execute(
+                            select(authorization_documents.c.sha256).where(
+                                authorization_documents.c.organization_id == organization_id,
+                                authorization_documents.c.authorization_id
+                                == decision["authorization_id"],
+                            )
+                        ).scalar_one_or_none(),
                         **repository_context,
                     }
-                    request_digest = hashlib.sha256(json.dumps(digest_context, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                    request_digest = hashlib.sha256(
+                        json.dumps(digest_context, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
 
                 if asset.asset_type == "log_evidence":
                     evidence_snapshot = connection.execute(
@@ -329,7 +358,10 @@ class ExecutionGovernanceService:
                             log_evidence_snapshots.c.status == "available",
                         )
                     ).first()
-                    if not evidence_snapshot or technique not in {"log_analysis", CHAIN_IMPORT_TECHNIQUE}:
+                    if not evidence_snapshot or technique not in {
+                        "log_analysis",
+                        CHAIN_IMPORT_TECHNIQUE,
+                    }:
                         connection.rollback()
                         return {
                             **decision,
@@ -343,9 +375,15 @@ class ExecutionGovernanceService:
                         "log_evidence_sha256": evidence_data["sha256"],
                         "log_evidence_manifest_version": evidence_data["manifest_version"],
                         "log_evidence_source_format": evidence_data["source_format"],
-                        "log_analysis_version": "chinescan-log-analysis-v1" if technique == "log_analysis" else None,
-                        "log_ruleset_version": "builtin-detections-v1" if technique == "log_analysis" else None,
-                        "adapter_id": "builtin.governed-log-analysis" if technique == "log_analysis" else "builtin.governed-chain-import",
+                        "log_analysis_version": "chinescan-log-analysis-v1"
+                        if technique == "log_analysis"
+                        else None,
+                        "log_ruleset_version": "builtin-detections-v1"
+                        if technique == "log_analysis"
+                        else None,
+                        "adapter_id": "builtin.governed-log-analysis"
+                        if technique == "log_analysis"
+                        else "builtin.governed-chain-import",
                         "adapter_version": "1",
                     }
                     if technique == CHAIN_IMPORT_TECHNIQUE:
@@ -364,7 +402,8 @@ class ExecutionGovernanceService:
                         "authorization_document_sha256": connection.execute(
                             select(authorization_documents.c.sha256).where(
                                 authorization_documents.c.organization_id == organization_id,
-                                authorization_documents.c.authorization_id == decision["authorization_id"],
+                                authorization_documents.c.authorization_id
+                                == decision["authorization_id"],
                             )
                         ).scalar_one_or_none(),
                         **log_context,
@@ -377,16 +416,35 @@ class ExecutionGovernanceService:
                 if asset.asset_type == "chain_address":
                     if technique != CHAIN_PROVIDER_TECHNIQUE:
                         connection.rollback()
-                        return {**decision, "decision": "DENY", "reason_code": "CHAIN_PROVIDER_UNSUPPORTED", "explanation": "No enabled adapter supports this chain operation."}
+                        return {
+                            **decision,
+                            "decision": "DENY",
+                            "reason_code": "CHAIN_PROVIDER_UNSUPPORTED",
+                            "explanation": "No enabled adapter supports this chain operation.",
+                        }
                     parts = asset.target.split(":")
                     if len(parts) != 4 or parts[0] != "chain" or parts[2] != "etherscan-v2":
                         connection.rollback()
-                        return {**decision, "decision": "DENY", "reason_code": "CHAIN_TARGET_INVALID", "explanation": "The registered chain target is invalid."}
+                        return {
+                            **decision,
+                            "decision": "DENY",
+                            "reason_code": "CHAIN_TARGET_INVALID",
+                            "explanation": "The registered chain target is invalid.",
+                        }
                     chain = CHAINS.get(parts[1])
                     if not chain or chain.family != "evm" or not chain.chain_id:
                         connection.rollback()
-                        return {**decision, "decision": "DENY", "reason_code": "CHAIN_PROVIDER_UNSUPPORTED", "explanation": "No configured provider supports this chain."}
-                    chain_context = {"chain": chain.name, "address": normalize_address(chain, parts[3]), "provider": "etherscan-v2"}
+                        return {
+                            **decision,
+                            "decision": "DENY",
+                            "reason_code": "CHAIN_PROVIDER_UNSUPPORTED",
+                            "explanation": "No configured provider supports this chain.",
+                        }
+                    chain_context = {
+                        "chain": chain.name,
+                        "address": normalize_address(chain, parts[3]),
+                        "provider": "etherscan-v2",
+                    }
                     chain_adapter_context = {
                         "adapter_id": adapter.capabilities.adapter_id,
                         "adapter_version": "1",
@@ -402,14 +460,19 @@ class ExecutionGovernanceService:
                         "action_class": decision["action_class"],
                         "scope_revision_id": decision["scope_revision_id"],
                         "authorization_id": decision["authorization_id"],
-                        "authorization_document_sha256": connection.execute(select(authorization_documents.c.sha256).where(
-                            authorization_documents.c.organization_id == organization_id,
-                            authorization_documents.c.authorization_id == decision["authorization_id"],
-                        )).scalar_one_or_none(),
+                        "authorization_document_sha256": connection.execute(
+                            select(authorization_documents.c.sha256).where(
+                                authorization_documents.c.organization_id == organization_id,
+                                authorization_documents.c.authorization_id
+                                == decision["authorization_id"],
+                            )
+                        ).scalar_one_or_none(),
                         "chain_context": chain_context,
                         **chain_adapter_context,
                     }
-                    request_digest = hashlib.sha256(json.dumps(digest_context, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                    request_digest = hashlib.sha256(
+                        json.dumps(digest_context, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
 
                 if asset.asset_type == "malware_evidence":
                     malware_snapshot = connection.execute(
@@ -452,7 +515,8 @@ class ExecutionGovernanceService:
                         "authorization_document_sha256": connection.execute(
                             select(authorization_documents.c.sha256).where(
                                 authorization_documents.c.organization_id == organization_id,
-                                authorization_documents.c.authorization_id == decision["authorization_id"],
+                                authorization_documents.c.authorization_id
+                                == decision["authorization_id"],
                             )
                         ).scalar_one_or_none(),
                         **malware_context,
@@ -464,8 +528,7 @@ class ExecutionGovernanceService:
                 authorization_document_sha256 = connection.execute(
                     select(authorization_documents.c.sha256).where(
                         authorization_documents.c.organization_id == organization_id,
-                        authorization_documents.c.authorization_id
-                        == decision["authorization_id"],
+                        authorization_documents.c.authorization_id == decision["authorization_id"],
                     )
                 ).scalar_one_or_none()
 
@@ -521,7 +584,9 @@ class ExecutionGovernanceService:
                     "approval_id": approval_id,
                     "policy_decision_id": decision_id,
                     "request_digest": request_digest,
-                    "policy_request_digest": policy_request_digest if (repository_context or log_context or malware_context or chain_context) else None,
+                    "policy_request_digest": policy_request_digest
+                    if (repository_context or log_context or malware_context or chain_context)
+                    else None,
                     **repository_context,
                     **log_context,
                     **malware_context,
@@ -546,28 +611,56 @@ class ExecutionGovernanceService:
                     "approval_id": approval_id,
                     "policy_decision_id": decision_id,
                     "request_digest": request_digest,
-                    "policy_request_digest": policy_request_digest if (repository_context or log_context or malware_context or chain_context) else None,
+                    "policy_request_digest": policy_request_digest
+                    if (repository_context or log_context or malware_context or chain_context)
+                    else None,
                     "repository_binding_id": repository_context.get("repository_binding_id"),
                     "repository_snapshot_id": repository_context.get("repository_snapshot_id"),
-                    "repository_snapshot_sha256": repository_context.get("repository_snapshot_sha256"),
-                    "repository_manifest_version": repository_context.get("repository_manifest_version"),
-                    "repository_attestation_id": repository_context.get("repository_attestation_id"),
-                    "repository_attestation_version": repository_context.get("repository_attestation_version"),
+                    "repository_snapshot_sha256": repository_context.get(
+                        "repository_snapshot_sha256"
+                    ),
+                    "repository_manifest_version": repository_context.get(
+                        "repository_manifest_version"
+                    ),
+                    "repository_attestation_id": repository_context.get(
+                        "repository_attestation_id"
+                    ),
+                    "repository_attestation_version": repository_context.get(
+                        "repository_attestation_version"
+                    ),
                     "repository_scanner_version": repository_context.get("scanner_version"),
                     "repository_scan_bounds": repository_context.get("scan_bounds"),
-                    "adapter_id": (repository_context or log_context or malware_context or chain_adapter_context).get("adapter_id"),
-                    "adapter_version": (repository_context or log_context or malware_context or chain_adapter_context).get("adapter_version"),
+                    "adapter_id": (
+                        repository_context
+                        or log_context
+                        or malware_context
+                        or chain_adapter_context
+                    ).get("adapter_id"),
+                    "adapter_version": (
+                        repository_context
+                        or log_context
+                        or malware_context
+                        or chain_adapter_context
+                    ).get("adapter_version"),
                     "exclusion_policy_version": repository_context.get("exclusion_policy_version"),
                     "log_evidence_snapshot_id": log_context.get("log_evidence_snapshot_id"),
                     "log_evidence_sha256": log_context.get("log_evidence_sha256"),
-                    "log_evidence_manifest_version": log_context.get("log_evidence_manifest_version"),
+                    "log_evidence_manifest_version": log_context.get(
+                        "log_evidence_manifest_version"
+                    ),
                     "log_evidence_source_format": log_context.get("log_evidence_source_format"),
                     "log_analysis_version": log_context.get("log_analysis_version"),
                     "log_ruleset_version": log_context.get("log_ruleset_version"),
-                    "malware_evidence_snapshot_id": malware_context.get("malware_evidence_snapshot_id"),
+                    "malware_evidence_snapshot_id": malware_context.get(
+                        "malware_evidence_snapshot_id"
+                    ),
                     "malware_evidence_sha256": malware_context.get("malware_evidence_sha256"),
-                    "malware_evidence_manifest_sha256": malware_context.get("malware_evidence_manifest_sha256"),
-                    "malware_evidence_manifest_version": malware_context.get("malware_evidence_manifest_version"),
+                    "malware_evidence_manifest_sha256": malware_context.get(
+                        "malware_evidence_manifest_sha256"
+                    ),
+                    "malware_evidence_manifest_version": malware_context.get(
+                        "malware_evidence_manifest_version"
+                    ),
                     "malware_analysis_version": malware_context.get("malware_analysis_version"),
                     "execution_context": context,
                     "idempotency_key": idempotency_key,
@@ -690,14 +783,10 @@ class ExecutionGovernanceService:
             if not job_result:
                 return None
             job = dict(job_result._mapping)
-            if not self.security._can_read(
-                connection, user_id, organization_id, engagement_id
-            ):
+            if not self.security._can_read(connection, user_id, organization_id, engagement_id):
                 return None
             try:
-                context = ExecutionContext.from_job(job).model_dump(
-                    mode="json", exclude_unset=True
-                )
+                context = ExecutionContext.from_job(job).model_dump(mode="json", exclude_unset=True)
             except (TypeError, ValueError):
                 return None
             links = connection.execute(
@@ -735,9 +824,7 @@ class ExecutionGovernanceService:
                     "action_class": job["action_class"],
                     "scope_revision_id": job["scope_revision_id"],
                     "authorization_id": job["authorization_id"],
-                    "authorization_document_sha256": job[
-                        "authorization_document_sha256"
-                    ],
+                    "authorization_document_sha256": job["authorization_document_sha256"],
                     "request_digest": job["request_digest"],
                     "approval_id": job["approval_id"],
                     "approval_consumption_outcome": approval_outcome,
@@ -1103,8 +1190,10 @@ class ExecutionGovernanceService:
                 "organization_id": item["organization_id"],
                 "engagement_id": item["engagement_id"],
                 "requester_user_id": item["requester_user_id"],
-                "asset_id": item["asset_id"], "target": item["target"],
-                "technique": item["technique"], "action_class": item["action_class"],
+                "asset_id": item["asset_id"],
+                "target": item["target"],
+                "technique": item["technique"],
+                "action_class": item["action_class"],
                 "scope_revision_id": item["scope_revision_id"],
                 "authorization_id": item["authorization_id"],
                 "authorization_document_sha256": item["authorization_document_sha256"],
@@ -1120,33 +1209,43 @@ class ExecutionGovernanceService:
                 "adapter_version": item.get("adapter_version"),
                 "exclusion_policy_version": item.get("exclusion_policy_version"),
             }
-            digest = hashlib.sha256(json.dumps(digest_context, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            digest = hashlib.sha256(
+                json.dumps(digest_context, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
             if digest != item["request_digest"]:
                 return False, "EXECUTION_CONTEXT_DIGEST_MISMATCH"
-            snapshot = connection.execute(select(repository_snapshots).where(
-                repository_snapshots.c.id == item["repository_snapshot_id"],
-                repository_snapshots.c.organization_id == item["organization_id"],
-                repository_snapshots.c.sha256 == item["repository_snapshot_sha256"],
-                repository_snapshots.c.manifest_version == item["repository_manifest_version"],
-                repository_snapshots.c.status == "available",
-            )).first()
-            binding = connection.execute(select(repository_asset_bindings).where(
-                repository_asset_bindings.c.id == item["repository_binding_id"],
-                repository_asset_bindings.c.organization_id == item["organization_id"],
-                repository_asset_bindings.c.engagement_id == item["engagement_id"],
-                repository_asset_bindings.c.asset_id == item["asset_id"],
-                repository_asset_bindings.c.snapshot_id == item["repository_snapshot_id"],
-                repository_asset_bindings.c.snapshot_sha256 == item["repository_snapshot_sha256"],
-            )).first()
-            attestation = connection.execute(select(repository_attestations).where(
-                repository_attestations.c.id == item["repository_attestation_id"],
-                repository_attestations.c.organization_id == item["organization_id"],
-                repository_attestations.c.engagement_id == item["engagement_id"],
-                repository_attestations.c.asset_id == item["asset_id"],
-                repository_attestations.c.authorization_id == item["authorization_id"],
-                repository_attestations.c.scope_revision_id == item["scope_revision_id"],
-                repository_attestations.c.attestation_version == item["repository_attestation_version"],
-            )).first()
+            snapshot = connection.execute(
+                select(repository_snapshots).where(
+                    repository_snapshots.c.id == item["repository_snapshot_id"],
+                    repository_snapshots.c.organization_id == item["organization_id"],
+                    repository_snapshots.c.sha256 == item["repository_snapshot_sha256"],
+                    repository_snapshots.c.manifest_version == item["repository_manifest_version"],
+                    repository_snapshots.c.status == "available",
+                )
+            ).first()
+            binding = connection.execute(
+                select(repository_asset_bindings).where(
+                    repository_asset_bindings.c.id == item["repository_binding_id"],
+                    repository_asset_bindings.c.organization_id == item["organization_id"],
+                    repository_asset_bindings.c.engagement_id == item["engagement_id"],
+                    repository_asset_bindings.c.asset_id == item["asset_id"],
+                    repository_asset_bindings.c.snapshot_id == item["repository_snapshot_id"],
+                    repository_asset_bindings.c.snapshot_sha256
+                    == item["repository_snapshot_sha256"],
+                )
+            ).first()
+            attestation = connection.execute(
+                select(repository_attestations).where(
+                    repository_attestations.c.id == item["repository_attestation_id"],
+                    repository_attestations.c.organization_id == item["organization_id"],
+                    repository_attestations.c.engagement_id == item["engagement_id"],
+                    repository_attestations.c.asset_id == item["asset_id"],
+                    repository_attestations.c.authorization_id == item["authorization_id"],
+                    repository_attestations.c.scope_revision_id == item["scope_revision_id"],
+                    repository_attestations.c.attestation_version
+                    == item["repository_attestation_version"],
+                )
+            ).first()
             if not snapshot or not binding or not attestation:
                 return False, "REPOSITORY_CONTEXT_UNAVAILABLE"
         elif item["asset_type"] == "log_evidence":
@@ -1173,7 +1272,11 @@ class ExecutionGovernanceService:
                 "adapter_version": item["adapter_version"],
             }
             if item["technique"] == CHAIN_IMPORT_TECHNIQUE:
-                if not isinstance(chain_binding, dict) or set(chain_binding) != {"chain", "seed", "depth"}:
+                if not isinstance(chain_binding, dict) or set(chain_binding) != {
+                    "chain",
+                    "seed",
+                    "depth",
+                }:
                     return False, "CHAIN_IMPORT_CONTEXT_INVALID"
                 digest_context["chain_context"] = chain_binding
             digest = hashlib.sha256(
@@ -1188,7 +1291,8 @@ class ExecutionGovernanceService:
                     log_evidence_snapshots.c.engagement_id == item["engagement_id"],
                     log_evidence_snapshots.c.asset_id == item["asset_id"],
                     log_evidence_snapshots.c.sha256 == item["log_evidence_sha256"],
-                    log_evidence_snapshots.c.manifest_version == item["log_evidence_manifest_version"],
+                    log_evidence_snapshots.c.manifest_version
+                    == item["log_evidence_manifest_version"],
                     log_evidence_snapshots.c.source_format == item["log_evidence_source_format"],
                     log_evidence_snapshots.c.status == "available",
                 )
@@ -1228,8 +1332,10 @@ class ExecutionGovernanceService:
                     malware_evidence_snapshots.c.engagement_id == item["engagement_id"],
                     malware_evidence_snapshots.c.asset_id == item["asset_id"],
                     malware_evidence_snapshots.c.sha256 == item["malware_evidence_sha256"],
-                    malware_evidence_snapshots.c.manifest_sha256 == item["malware_evidence_manifest_sha256"],
-                    malware_evidence_snapshots.c.manifest_version == item["malware_evidence_manifest_version"],
+                    malware_evidence_snapshots.c.manifest_sha256
+                    == item["malware_evidence_manifest_sha256"],
+                    malware_evidence_snapshots.c.manifest_version
+                    == item["malware_evidence_manifest_version"],
                     malware_evidence_snapshots.c.status == "available",
                 )
             ).first()
@@ -1247,7 +1353,8 @@ class ExecutionGovernanceService:
                 or len(parts) != 4
                 or parts[0] != "chain"
                 or parts[2] != "etherscan-v2"
-                or chain_binding != {"chain": parts[1], "address": parts[3], "provider": "etherscan-v2"}
+                or chain_binding
+                != {"chain": parts[1], "address": parts[3], "provider": "etherscan-v2"}
             ):
                 return False, "CHAIN_PROVIDER_CONTEXT_INVALID"
             digest_context = {
@@ -1372,9 +1479,7 @@ class ExecutionGovernanceService:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             try:
                 existing = connection.execute(
-                    select(worker_leases.c.worker_id).where(
-                        worker_leases.c.worker_id == worker_id
-                    )
+                    select(worker_leases.c.worker_id).where(worker_leases.c.worker_id == worker_id)
                 ).first()
                 if existing is None:
                     connection.execute(
@@ -2036,9 +2141,8 @@ class ExecutionGovernanceService:
                 if not attempt:
                     connection.rollback()
                     return False
-                if (
-                    lease_generation is not None
-                    and int(attempt.lease_generation) != int(lease_generation)
+                if lease_generation is not None and int(attempt.lease_generation) != int(
+                    lease_generation
                 ):
                     connection.rollback()
                     return False
@@ -2142,7 +2246,10 @@ class ExecutionGovernanceService:
     def recover_stale_jobs(
         self, *, now: float | None = None, include_stopped_workers: bool = True
     ) -> list[dict[str, Any]]:
-        """Idempotently recover expired or orphaned jobs, separating safe retries from uncertainty."""
+        """Idempotently recover expired or orphaned jobs.
+
+        Separates safe retries from uncertainty.
+        """
         ts = time.time() if now is None else float(now)
         stamp = now_iso()
         recovered: list[dict[str, Any]] = []
@@ -2387,7 +2494,9 @@ class ExecutionGovernanceService:
                             execution_jobs.c.lease_generation == lease_generation,
                         )
                     connection.execute(
-                        update_stmt.values(status="blocked", finished_at=now_iso(), error_code=reason)
+                        update_stmt.values(
+                            status="blocked", finished_at=now_iso(), error_code=reason
+                        )
                     )
                     self.security._audit(
                         connection,
@@ -2518,12 +2627,15 @@ class ExecutionGovernanceService:
 
     def sensitive_approval_consumed(self, job_id: str) -> bool:
         with self.engine.connect() as connection:
-            return connection.execute(
-                select(execution_jobs.c.approval_consumed_at).where(
-                    execution_jobs.c.id == job_id,
-                    execution_jobs.c.action_class == "sensitive",
-                )
-            ).scalar_one_or_none() is not None
+            return (
+                connection.execute(
+                    select(execution_jobs.c.approval_consumed_at).where(
+                        execution_jobs.c.id == job_id,
+                        execution_jobs.c.action_class == "sensitive",
+                    )
+                ).scalar_one_or_none()
+                is not None
+            )
 
     def finish_job(
         self,
@@ -2642,14 +2754,15 @@ class ExecutionGovernanceService:
 
     def partial_result(self, job_id: str) -> dict[str, Any]:
         with self.engine.connect() as connection:
-            row = connection.execute(select(
-                execution_jobs.c.scan_id, execution_jobs.c.result_summary,
-            ).where(execution_jobs.c.id == job_id)).first()
+            row = connection.execute(
+                select(
+                    execution_jobs.c.scan_id,
+                    execution_jobs.c.result_summary,
+                ).where(execution_jobs.c.id == job_id)
+            ).first()
             return dict(row._mapping) if row else {"scan_id": None, "result_summary": None}
 
-    def get_organization_resource_usage(
-        self, user_id: str, organization_id: str
-    ) -> dict[str, Any]:
+    def get_organization_resource_usage(self, user_id: str, organization_id: str) -> dict[str, Any]:
         """Return tenant-isolated queue and active execution counts for one organization."""
         with self.engine.connect() as connection:
             from chinescan.core.storage.sqlite import organization_memberships
@@ -2949,9 +3062,7 @@ class GovernedDomainWorker:
             with self.repository.member_context(
                 context.organization_id, context.requester_user_id, write=True
             ):
-                with self.repository.execution_provenance_context(
-                    context.model_dump(mode="json")
-                ):
+                with self.repository.execution_provenance_context(context.model_dump(mode="json")):
                     result = adapter.execute(context, parameters, control)
             if lease_lost.is_set():
                 self.governance.complete_action_attempt(

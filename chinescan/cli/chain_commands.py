@@ -15,7 +15,6 @@ from chinescan.chain_trace.registry import load_registry, normalize_address
 from chinescan.chain_trace.service import ChainTraceService
 from chinescan.cli.commands import _local_cli_repository, _settings
 from chinescan.core.report_store import ReportStoreError, save_scan_reports
-from chinescan.core.storage.sqlite import SQLiteRepository
 
 app = typer.Typer(help="Offline-first on-chain wallet tracing.")
 

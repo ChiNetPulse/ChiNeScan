@@ -10,10 +10,10 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from chinescan.cli.app import app
+from chinescan.cli.commands import _local_cli_repository
 from chinescan.core.cases import CaseWorkflow
 from chinescan.core.models.investigation import CaseStatus
 from chinescan.core.storage.recovery import verify_backup
-from chinescan.cli.commands import _local_cli_repository
 from chinescan.log_analysis.service import LogAnalysisService
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "sample-logs"

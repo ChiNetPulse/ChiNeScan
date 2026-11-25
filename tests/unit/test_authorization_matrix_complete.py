@@ -2,21 +2,18 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import insert, select
+from sqlalchemy import insert
 
 from chinescan.core.accounts import create_operator
 from chinescan.core.config.settings import Settings
 from chinescan.core.models.investigation import Scan, ScanVerdict, Target
 from chinescan.core.storage.sqlite import (
-    approval_requests,
-    execution_jobs,
     users,
 )
 from chinescan.web.app import COOKIE_NAME, create_app
@@ -266,26 +263,349 @@ def _build_matrix_workspace(tmp_path: Path):
     ("org_role", "assignment", "expected"),
     [
         # Viewer + every assignment: strictly read-only, assignments do NOT elevate
-        ("viewer", "lead", {"read_org": True, "read_eng": True, "manage": False, "assign_list": False, "assign_write": False, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": False, "read_job": True, "cancel_job": False, "decide_approval": False, "report": True, "destructive": False}),
-        ("viewer", "assessor", {"read_org": True, "read_eng": True, "manage": False, "assign_list": False, "assign_write": False, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": False, "read_job": True, "cancel_job": False, "decide_approval": False, "report": True, "destructive": False}),
-        ("viewer", "reviewer", {"read_org": True, "read_eng": True, "manage": False, "assign_list": False, "assign_write": False, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": False, "read_job": True, "cancel_job": False, "decide_approval": False, "report": True, "destructive": False}),
-        ("viewer", "observer", {"read_org": True, "read_eng": True, "manage": False, "assign_list": False, "assign_write": False, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": False, "read_job": True, "cancel_job": False, "decide_approval": False, "report": True, "destructive": False}),
-        ("viewer", None, {"read_org": True, "read_eng": True, "manage": False, "assign_list": False, "assign_write": False, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": False, "read_job": True, "cancel_job": False, "decide_approval": False, "report": True, "destructive": False}),
+        (
+            "viewer",
+            "lead",
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": False,
+                "assign_list": False,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": True,
+                "cancel_job": False,
+                "decide_approval": False,
+                "report": True,
+                "destructive": False,
+            },
+        ),
+        (
+            "viewer",
+            "assessor",
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": False,
+                "assign_list": False,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": True,
+                "cancel_job": False,
+                "decide_approval": False,
+                "report": True,
+                "destructive": False,
+            },
+        ),
+        (
+            "viewer",
+            "reviewer",
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": False,
+                "assign_list": False,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": True,
+                "cancel_job": False,
+                "decide_approval": False,
+                "report": True,
+                "destructive": False,
+            },
+        ),
+        (
+            "viewer",
+            "observer",
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": False,
+                "assign_list": False,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": True,
+                "cancel_job": False,
+                "decide_approval": False,
+                "report": True,
+                "destructive": False,
+            },
+        ),
+        (
+            "viewer",
+            None,
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": False,
+                "assign_list": False,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": True,
+                "cancel_job": False,
+                "decide_approval": False,
+                "report": True,
+                "destructive": False,
+            },
+        ),
         # Auditor + every assignment: strictly read-only, assignments do NOT elevate
-        ("auditor", "lead", {"read_org": True, "read_eng": True, "manage": False, "assign_list": False, "assign_write": False, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": False, "read_job": True, "cancel_job": False, "decide_approval": False, "report": True, "destructive": False}),
-        ("auditor", "assessor", {"read_org": True, "read_eng": True, "manage": False, "assign_list": False, "assign_write": False, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": False, "read_job": True, "cancel_job": False, "decide_approval": False, "report": True, "destructive": False}),
-        ("auditor", "reviewer", {"read_org": True, "read_eng": True, "manage": False, "assign_list": False, "assign_write": False, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": False, "read_job": True, "cancel_job": False, "decide_approval": False, "report": True, "destructive": False}),
-        ("auditor", "observer", {"read_org": True, "read_eng": True, "manage": False, "assign_list": False, "assign_write": False, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": False, "read_job": True, "cancel_job": False, "decide_approval": False, "report": True, "destructive": False}),
-        ("auditor", None, {"read_org": True, "read_eng": True, "manage": False, "assign_list": False, "assign_write": False, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": False, "read_job": True, "cancel_job": False, "decide_approval": False, "report": True, "destructive": False}),
+        (
+            "auditor",
+            "lead",
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": False,
+                "assign_list": False,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": True,
+                "cancel_job": False,
+                "decide_approval": False,
+                "report": True,
+                "destructive": False,
+            },
+        ),
+        (
+            "auditor",
+            "assessor",
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": False,
+                "assign_list": False,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": True,
+                "cancel_job": False,
+                "decide_approval": False,
+                "report": True,
+                "destructive": False,
+            },
+        ),
+        (
+            "auditor",
+            "reviewer",
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": False,
+                "assign_list": False,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": True,
+                "cancel_job": False,
+                "decide_approval": False,
+                "report": True,
+                "destructive": False,
+            },
+        ),
+        (
+            "auditor",
+            "observer",
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": False,
+                "assign_list": False,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": True,
+                "cancel_job": False,
+                "decide_approval": False,
+                "report": True,
+                "destructive": False,
+            },
+        ),
+        (
+            "auditor",
+            None,
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": False,
+                "assign_list": False,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": True,
+                "cancel_job": False,
+                "decide_approval": False,
+                "report": True,
+                "destructive": False,
+            },
+        ),
         # Member + assignments
-        ("member", "lead", {"read_org": True, "read_eng": True, "manage": True, "assign_list": True, "assign_write": True, "repo_asset": True, "evidence_read": True, "evidence_write": True, "submit_job": True, "read_job": True, "cancel_job": True, "decide_approval": True, "report": True, "destructive": True}),
-        ("member", "assessor", {"read_org": True, "read_eng": True, "manage": False, "assign_list": False, "assign_write": False, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": True, "read_job": True, "cancel_job": False, "decide_approval": False, "report": True, "destructive": True}),
-        ("member", "reviewer", {"read_org": True, "read_eng": True, "manage": False, "assign_list": True, "assign_write": False, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": False, "read_job": True, "cancel_job": False, "decide_approval": True, "report": True, "destructive": False}),
-        ("member", "observer", {"read_org": True, "read_eng": True, "manage": False, "assign_list": False, "assign_write": False, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": False, "read_job": True, "cancel_job": False, "decide_approval": False, "report": True, "destructive": False}),
-        ("member", None, {"read_org": True, "read_eng": False, "manage": False, "assign_list": False, "assign_write": False, "repo_asset": False, "evidence_read": False, "evidence_write": False, "submit_job": False, "read_job": False, "cancel_job": False, "decide_approval": False, "report": False, "destructive": False}),
+        (
+            "member",
+            "lead",
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": True,
+                "assign_list": True,
+                "assign_write": True,
+                "repo_asset": True,
+                "evidence_read": True,
+                "evidence_write": True,
+                "submit_job": True,
+                "read_job": True,
+                "cancel_job": True,
+                "decide_approval": True,
+                "report": True,
+                "destructive": True,
+            },
+        ),
+        (
+            "member",
+            "assessor",
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": False,
+                "assign_list": False,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": True,
+                "read_job": True,
+                "cancel_job": False,
+                "decide_approval": False,
+                "report": True,
+                "destructive": True,
+            },
+        ),
+        (
+            "member",
+            "reviewer",
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": False,
+                "assign_list": True,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": True,
+                "cancel_job": False,
+                "decide_approval": True,
+                "report": True,
+                "destructive": False,
+            },
+        ),
+        (
+            "member",
+            "observer",
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": False,
+                "assign_list": False,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": True,
+                "cancel_job": False,
+                "decide_approval": False,
+                "report": True,
+                "destructive": False,
+            },
+        ),
+        (
+            "member",
+            None,
+            {
+                "read_org": True,
+                "read_eng": False,
+                "manage": False,
+                "assign_list": False,
+                "assign_write": False,
+                "repo_asset": False,
+                "evidence_read": False,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": False,
+                "cancel_job": False,
+                "decide_approval": False,
+                "report": False,
+                "destructive": False,
+            },
+        ),
         # Admin without lead assignment: org-wide manage/review, but operate requires lead/assessor
-        ("admin", None, {"read_org": True, "read_eng": True, "manage": True, "assign_list": True, "assign_write": True, "repo_asset": False, "evidence_read": True, "evidence_write": False, "submit_job": False, "read_job": True, "cancel_job": True, "decide_approval": True, "report": True, "destructive": False}),
-        ("admin", "lead", {"read_org": True, "read_eng": True, "manage": True, "assign_list": True, "assign_write": True, "repo_asset": True, "evidence_read": True, "evidence_write": True, "submit_job": True, "read_job": True, "cancel_job": True, "decide_approval": True, "report": True, "destructive": True}),
+        (
+            "admin",
+            None,
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": True,
+                "assign_list": True,
+                "assign_write": True,
+                "repo_asset": False,
+                "evidence_read": True,
+                "evidence_write": False,
+                "submit_job": False,
+                "read_job": True,
+                "cancel_job": True,
+                "decide_approval": True,
+                "report": True,
+                "destructive": False,
+            },
+        ),
+        (
+            "admin",
+            "lead",
+            {
+                "read_org": True,
+                "read_eng": True,
+                "manage": True,
+                "assign_list": True,
+                "assign_write": True,
+                "repo_asset": True,
+                "evidence_read": True,
+                "evidence_write": True,
+                "submit_job": True,
+                "read_job": True,
+                "cancel_job": True,
+                "decide_approval": True,
+                "report": True,
+                "destructive": True,
+            },
+        ),
     ],
 )
 def test_role_assignment_operation_matrix(
@@ -400,7 +720,8 @@ def test_role_assignment_operation_matrix(
         )
         assert (r_jsonl.status_code == 200) == expected["report"]
 
-        # 12. Destructive operation (delete malware evidence on active engagement returns 404 when denied or blocked;
+        # 12. Destructive operation (delete malware evidence on active engagement returns 404
+        # when denied or blocked;
         # close engagement first as owner so eligible deletion succeeds for authorized roles only)
         orgs.update_engagement(owner_id, org_id, eng_id, status="completed")
         r_del = client.delete(
@@ -434,43 +755,64 @@ def test_membership_revocation_assignment_revocation_and_cross_org_fail_closed(
         headers = _login_as(app, client, member_id, "lifecycle@example.test")
 
         # Missing / invalid / foreign x-chinescan-organization-id fails closed (404)
-        assert client.get(
-            f"/api/reports/{ws['scan_id']}/json",
-            headers={**headers, "x-chinescan-organization-id": ws["other_org_id"]},
-        ).status_code == 404
-        assert client.get(
-            f"/api/reports/{ws['scan_id']}/json",
-            headers={**headers, "x-chinescan-organization-id": "nonexistent-org"},
-        ).status_code == 404
+        assert (
+            client.get(
+                f"/api/reports/{ws['scan_id']}/json",
+                headers={**headers, "x-chinescan-organization-id": ws["other_org_id"]},
+            ).status_code
+            == 404
+        )
+        assert (
+            client.get(
+                f"/api/reports/{ws['scan_id']}/json",
+                headers={**headers, "x-chinescan-organization-id": "nonexistent-org"},
+            ).status_code
+            == 404
+        )
 
         # Cross-organization engagement ID returns 404
-        assert client.get(
-            f"/api/organizations/{ws['other_org_id']}/engagements/{eng_id}",
-            headers=headers,
-        ).status_code == 404
+        assert (
+            client.get(
+                f"/api/organizations/{ws['other_org_id']}/engagements/{eng_id}",
+                headers=headers,
+            ).status_code
+            == 404
+        )
 
         # Active member+assessor can read engagement and submit job
-        assert client.get(
-            f"/api/organizations/{org_id}/engagements/{eng_id}", headers=headers
-        ).status_code == 200
+        assert (
+            client.get(
+                f"/api/organizations/{org_id}/engagements/{eng_id}", headers=headers
+            ).status_code
+            == 200
+        )
 
         # Revoke assignment -> engagement & report access denied
         orgs.change_assignment(owner_id, org_id, eng_id, member_id, status="revoked")
-        assert client.get(
-            f"/api/organizations/{org_id}/engagements/{eng_id}", headers=headers
-        ).status_code == 404
-        assert client.get(
-            f"/api/reports/{ws['scan_id']}/json",
-            headers={**headers, "x-chinescan-organization-id": org_id},
-        ).status_code == 404
+        assert (
+            client.get(
+                f"/api/organizations/{org_id}/engagements/{eng_id}", headers=headers
+            ).status_code
+            == 404
+        )
+        assert (
+            client.get(
+                f"/api/reports/{ws['scan_id']}/json",
+                headers={**headers, "x-chinescan-organization-id": org_id},
+            ).status_code
+            == 404
+        )
 
         # Reactivate assignment then revoke organization membership -> all access denied
         orgs.change_assignment(owner_id, org_id, eng_id, member_id, status="active")
         orgs.update_membership(owner_id, org_id, member_id, status="revoked")
         assert client.get(f"/api/organizations/{org_id}", headers=headers).status_code == 404
-        assert client.get(
-            f"/api/organizations/{org_id}/engagements/{eng_id}", headers=headers
-        ).status_code == 404
+        assert (
+            client.get(
+                f"/api/organizations/{org_id}/engagements/{eng_id}", headers=headers
+            ).status_code
+            == 404
+        )
     finally:
         app.state.repository.close()
 

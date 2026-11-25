@@ -4,7 +4,6 @@ from pathlib import Path
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
-from chinescan.core.storage.sqlite import SQLiteRepository
 from chinescan.web.app import create_app
 from chinescan.web.auth import create_operator
 

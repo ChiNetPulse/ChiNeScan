@@ -52,7 +52,8 @@ records = Table(
 # Phase 1B identity and engagement foundation. Keep legacy records in the
 # existing JSON table and scope them through record_ownership.
 users = Table(
-    "users", metadata,
+    "users",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("email_normalized", String(254), nullable=False, unique=True, index=True),
     Column("display_name", String(120), nullable=False),
@@ -62,7 +63,8 @@ users = Table(
     Column("updated_at", String(40), nullable=False),
 )
 organizations = Table(
-    "organizations", metadata,
+    "organizations",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("name", String(160), nullable=False),
     Column("slug", String(100), nullable=False, unique=True, index=True),
@@ -73,7 +75,8 @@ organizations = Table(
     ForeignKeyConstraint(["owner_user_id"], ["users.id"], ondelete="RESTRICT"),
 )
 organization_memberships = Table(
-    "organization_memberships", metadata,
+    "organization_memberships",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False, index=True),
     Column("user_id", String(36), nullable=False, index=True),
@@ -86,7 +89,8 @@ organization_memberships = Table(
     UniqueConstraint("organization_id", "user_id", name="uq_membership_org_user"),
 )
 clients = Table(
-    "clients", metadata,
+    "clients",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False, index=True),
     Column("name", String(160), nullable=False),
@@ -98,7 +102,8 @@ clients = Table(
     UniqueConstraint("id", "organization_id", name="uq_client_id_org"),
 )
 engagements = Table(
-    "engagements", metadata,
+    "engagements",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False, index=True),
     Column("client_id", String(36)),
@@ -110,13 +115,15 @@ engagements = Table(
     Column("updated_at", String(40), nullable=False),
     ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
     ForeignKeyConstraint(
-        ["client_id", "organization_id"], ["clients.id", "clients.organization_id"],
+        ["client_id", "organization_id"],
+        ["clients.id", "clients.organization_id"],
         ondelete="RESTRICT",
     ),
     UniqueConstraint("id", "organization_id", name="uq_engagement_id_org"),
 )
 engagement_assignments = Table(
-    "engagement_assignments", metadata,
+    "engagement_assignments",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False, index=True),
     Column("engagement_id", String(36), nullable=False, index=True),
@@ -127,7 +134,8 @@ engagement_assignments = Table(
     Column("updated_at", String(40), nullable=False),
     ForeignKeyConstraint(
         ["engagement_id", "organization_id"],
-        ["engagements.id", "engagements.organization_id"], ondelete="CASCADE",
+        ["engagements.id", "engagements.organization_id"],
+        ondelete="CASCADE",
     ),
     ForeignKeyConstraint(
         ["organization_id", "user_id"],
@@ -137,7 +145,8 @@ engagement_assignments = Table(
     UniqueConstraint("engagement_id", "user_id", name="uq_assignment_engagement_user"),
 )
 record_ownership = Table(
-    "record_ownership", metadata,
+    "record_ownership",
+    metadata,
     Column("record_type", String(80), primary_key=True),
     Column("record_id", String(255), primary_key=True),
     Column("organization_id", String(36), nullable=False, index=True),
@@ -156,13 +165,15 @@ record_ownership = Table(
     ),
 )
 organization_bootstrap_reports = Table(
-    "organization_bootstrap_reports", metadata,
+    "organization_bootstrap_reports",
+    metadata,
     Column("report_id", String(80), primary_key=True),
     Column("payload", JSON, nullable=False),
     Column("created_at", String(40), nullable=False),
 )
 organization_audit_events = Table(
-    "organization_audit_events", metadata,
+    "organization_audit_events",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False, index=True),
     Column("actor_user_id", String(36), nullable=False),
@@ -177,7 +188,8 @@ organization_audit_events = Table(
 # Phase 1C engagement assets, immutable scope revisions, authorization,
 # one-use approvals, and append-only policy decision evidence.
 engagement_assets = Table(
-    "engagement_assets", metadata,
+    "engagement_assets",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False, index=True),
     Column("client_id", String(36)),
@@ -191,12 +203,14 @@ engagement_assets = Table(
     Column("updated_at", String(40), nullable=False),
     ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
     ForeignKeyConstraint(
-        ["client_id", "organization_id"], ["clients.id", "clients.organization_id"],
+        ["client_id", "organization_id"],
+        ["clients.id", "clients.organization_id"],
         ondelete="RESTRICT",
     ),
     ForeignKeyConstraint(
         ["engagement_id", "organization_id"],
-        ["engagements.id", "engagements.organization_id"], ondelete="RESTRICT",
+        ["engagements.id", "engagements.organization_id"],
+        ondelete="RESTRICT",
     ),
     ForeignKeyConstraint(
         ["organization_id", "created_by"],
@@ -208,10 +222,18 @@ engagement_assets = Table(
         "id", "organization_id", "engagement_id", name="uq_engagement_asset_id_org_engagement"
     ),
     UniqueConstraint(
-        "organization_id", "engagement_id", "asset_type", "target",
+        "organization_id",
+        "engagement_id",
+        "asset_type",
+        "target",
         name="uq_engagement_asset_target",
     ),
-    CheckConstraint("asset_type IN ('domain','ip','cidr','url','repository','log_evidence','malware_evidence','chain_address')", name="ck_asset_type"),
+    CheckConstraint(
+        "asset_type IN ("
+        "'domain','ip','cidr','url','repository','log_evidence','malware_evidence','chain_address'"
+        ")",
+        name="ck_asset_type",
+    ),
     CheckConstraint("status IN ('active','inactive')", name="ck_asset_status"),
 )
 Index(
@@ -221,7 +243,8 @@ Index(
 )
 
 repository_snapshots = Table(
-    "repository_snapshots", metadata,
+    "repository_snapshots",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("sha256", String(64), nullable=False),
@@ -240,13 +263,21 @@ repository_snapshots = Table(
     UniqueConstraint("id", "organization_id", name="uq_repository_snapshot_id_org"),
     CheckConstraint("size_bytes BETWEEN 0 AND 10737418240", name="ck_repository_snapshot_size"),
     CheckConstraint("manifest_version > 0", name="ck_repository_manifest_version"),
-    CheckConstraint("status IN ('available','missing','corrupt','deleting','deleted')", name="ck_repository_snapshot_status"),
+    CheckConstraint(
+        "status IN ('available','missing','corrupt','deleting','deleted')",
+        name="ck_repository_snapshot_status",
+    ),
     CheckConstraint("legal_hold IN (0,1)", name="ck_repository_snapshot_hold"),
 )
-Index("ix_repository_snapshot_org_status", repository_snapshots.c.organization_id, repository_snapshots.c.status)
+Index(
+    "ix_repository_snapshot_org_status",
+    repository_snapshots.c.organization_id,
+    repository_snapshots.c.status,
+)
 
 repository_asset_bindings = Table(
-    "repository_asset_bindings", metadata,
+    "repository_asset_bindings",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("engagement_id", String(36), nullable=False),
@@ -258,19 +289,40 @@ repository_asset_bindings = Table(
     Column("created_by", String(36), nullable=False),
     Column("created_at", String(40), nullable=False),
     Column("display_label", String(120), nullable=False),
-    ForeignKeyConstraint(["asset_id", "organization_id", "engagement_id"], [
-        "engagement_assets.id", "engagement_assets.organization_id", "engagement_assets.engagement_id"
-    ], ondelete="RESTRICT"),
-    ForeignKeyConstraint(["snapshot_id", "organization_id"], ["repository_snapshots.id", "repository_snapshots.organization_id"], ondelete="RESTRICT"),
-    ForeignKeyConstraint(["organization_id", "created_by"], ["organization_memberships.organization_id", "organization_memberships.user_id"], ondelete="RESTRICT"),
+    ForeignKeyConstraint(
+        ["asset_id", "organization_id", "engagement_id"],
+        [
+            "engagement_assets.id",
+            "engagement_assets.organization_id",
+            "engagement_assets.engagement_id",
+        ],
+        ondelete="RESTRICT",
+    ),
+    ForeignKeyConstraint(
+        ["snapshot_id", "organization_id"],
+        ["repository_snapshots.id", "repository_snapshots.organization_id"],
+        ondelete="RESTRICT",
+    ),
+    ForeignKeyConstraint(
+        ["organization_id", "created_by"],
+        ["organization_memberships.organization_id", "organization_memberships.user_id"],
+        ondelete="RESTRICT",
+    ),
     UniqueConstraint("asset_id", name="uq_repository_binding_asset"),
-    UniqueConstraint("id", "organization_id", "engagement_id", "asset_id", name="uq_repository_binding_scope"),
+    UniqueConstraint(
+        "id", "organization_id", "engagement_id", "asset_id", name="uq_repository_binding_scope"
+    ),
     CheckConstraint("source_kind = 'local_project_registry'", name="ck_repository_source_kind"),
 )
-Index("ix_repository_binding_tenant", repository_asset_bindings.c.organization_id, repository_asset_bindings.c.engagement_id)
+Index(
+    "ix_repository_binding_tenant",
+    repository_asset_bindings.c.organization_id,
+    repository_asset_bindings.c.engagement_id,
+)
 
 repository_attestations = Table(
-    "repository_attestations", metadata,
+    "repository_attestations",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("engagement_id", String(36), nullable=False),
@@ -281,19 +333,51 @@ repository_attestations = Table(
     Column("attestation_version", String(40), nullable=False),
     Column("attestation_text", String(1000), nullable=False),
     Column("created_at", String(40), nullable=False),
-    ForeignKeyConstraint(["asset_id", "organization_id", "engagement_id"], [
-        "engagement_assets.id", "engagement_assets.organization_id", "engagement_assets.engagement_id"
-    ], ondelete="RESTRICT"),
-    ForeignKeyConstraint(["authorization_id", "organization_id"], ["authorization_records.id", "authorization_records.organization_id"], ondelete="RESTRICT"),
-    ForeignKeyConstraint(["scope_revision_id", "organization_id"], ["scope_revisions.id", "scope_revisions.organization_id"], ondelete="RESTRICT"),
-    ForeignKeyConstraint(["organization_id", "actor_user_id"], ["organization_memberships.organization_id", "organization_memberships.user_id"], ondelete="RESTRICT"),
-    UniqueConstraint("id", "organization_id", "engagement_id", "asset_id", "authorization_id", "scope_revision_id", name="uq_repository_attestation_binding"),
+    ForeignKeyConstraint(
+        ["asset_id", "organization_id", "engagement_id"],
+        [
+            "engagement_assets.id",
+            "engagement_assets.organization_id",
+            "engagement_assets.engagement_id",
+        ],
+        ondelete="RESTRICT",
+    ),
+    ForeignKeyConstraint(
+        ["authorization_id", "organization_id"],
+        ["authorization_records.id", "authorization_records.organization_id"],
+        ondelete="RESTRICT",
+    ),
+    ForeignKeyConstraint(
+        ["scope_revision_id", "organization_id"],
+        ["scope_revisions.id", "scope_revisions.organization_id"],
+        ondelete="RESTRICT",
+    ),
+    ForeignKeyConstraint(
+        ["organization_id", "actor_user_id"],
+        ["organization_memberships.organization_id", "organization_memberships.user_id"],
+        ondelete="RESTRICT",
+    ),
+    UniqueConstraint(
+        "id",
+        "organization_id",
+        "engagement_id",
+        "asset_id",
+        "authorization_id",
+        "scope_revision_id",
+        name="uq_repository_attestation_binding",
+    ),
     UniqueConstraint("id", "organization_id", name="uq_repository_attestation_id_org"),
 )
-Index("ix_repository_attestation_asset", repository_attestations.c.organization_id, repository_attestations.c.engagement_id, repository_attestations.c.asset_id)
+Index(
+    "ix_repository_attestation_asset",
+    repository_attestations.c.organization_id,
+    repository_attestations.c.engagement_id,
+    repository_attestations.c.asset_id,
+)
 
 repository_quota_reservations = Table(
-    "repository_quota_reservations", metadata,
+    "repository_quota_reservations",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("reserved_bytes", Integer, nullable=False),
@@ -306,7 +390,8 @@ repository_quota_reservations = Table(
 Index("ix_repository_reservation_org", repository_quota_reservations.c.organization_id)
 
 log_evidence_snapshots = Table(
-    "log_evidence_snapshots", metadata,
+    "log_evidence_snapshots",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("engagement_id", String(36), nullable=False),
@@ -326,7 +411,11 @@ log_evidence_snapshots = Table(
     Column("deleted_at", String(40)),
     ForeignKeyConstraint(
         ["asset_id", "organization_id", "engagement_id"],
-        ["engagement_assets.id", "engagement_assets.organization_id", "engagement_assets.engagement_id"],
+        [
+            "engagement_assets.id",
+            "engagement_assets.organization_id",
+            "engagement_assets.engagement_id",
+        ],
         ondelete="RESTRICT",
     ),
     ForeignKeyConstraint(
@@ -334,18 +423,27 @@ log_evidence_snapshots = Table(
         ["organization_memberships.organization_id", "organization_memberships.user_id"],
         ondelete="RESTRICT",
     ),
-    UniqueConstraint("id", "organization_id", "engagement_id", "asset_id", name="uq_log_snapshot_scope"),
+    UniqueConstraint(
+        "id", "organization_id", "engagement_id", "asset_id", name="uq_log_snapshot_scope"
+    ),
     UniqueConstraint("asset_id", name="uq_log_snapshot_asset"),
     CheckConstraint("size_bytes BETWEEN 0 AND 250000000", name="ck_log_snapshot_size"),
     CheckConstraint("file_count BETWEEN 1 AND 10000", name="ck_log_snapshot_file_count"),
     CheckConstraint("manifest_version = 1", name="ck_log_manifest_version"),
-    CheckConstraint("status IN ('available','missing','corrupt','deleted')", name="ck_log_snapshot_status"),
+    CheckConstraint(
+        "status IN ('available','missing','corrupt','deleted')", name="ck_log_snapshot_status"
+    ),
     CheckConstraint("legal_hold IN (0,1)", name="ck_log_snapshot_hold"),
 )
-Index("ix_log_snapshot_tenant", log_evidence_snapshots.c.organization_id, log_evidence_snapshots.c.engagement_id)
+Index(
+    "ix_log_snapshot_tenant",
+    log_evidence_snapshots.c.organization_id,
+    log_evidence_snapshots.c.engagement_id,
+)
 
 log_evidence_quota_reservations = Table(
-    "log_evidence_quota_reservations", metadata,
+    "log_evidence_quota_reservations",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("reserved_bytes", Integer, nullable=False),
@@ -357,7 +455,8 @@ log_evidence_quota_reservations = Table(
 Index("ix_log_reservation_org", log_evidence_quota_reservations.c.organization_id)
 
 malware_evidence_snapshots = Table(
-    "malware_evidence_snapshots", metadata,
+    "malware_evidence_snapshots",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("engagement_id", String(36), nullable=False),
@@ -380,7 +479,11 @@ malware_evidence_snapshots = Table(
     Column("deleted_at", String(40)),
     ForeignKeyConstraint(
         ["asset_id", "organization_id", "engagement_id"],
-        ["engagement_assets.id", "engagement_assets.organization_id", "engagement_assets.engagement_id"],
+        [
+            "engagement_assets.id",
+            "engagement_assets.organization_id",
+            "engagement_assets.engagement_id",
+        ],
         ondelete="RESTRICT",
     ),
     ForeignKeyConstraint(
@@ -388,18 +491,27 @@ malware_evidence_snapshots = Table(
         ["organization_memberships.organization_id", "organization_memberships.user_id"],
         ondelete="RESTRICT",
     ),
-    UniqueConstraint("id", "organization_id", "engagement_id", "asset_id", name="uq_malware_snapshot_scope"),
+    UniqueConstraint(
+        "id", "organization_id", "engagement_id", "asset_id", name="uq_malware_snapshot_scope"
+    ),
     UniqueConstraint("asset_id", name="uq_malware_snapshot_asset"),
     UniqueConstraint("object_key", name="uq_malware_snapshot_object"),
     CheckConstraint("size_bytes BETWEEN 1 AND 67108864", name="ck_malware_snapshot_size"),
     CheckConstraint("manifest_version = 1", name="ck_malware_manifest_version"),
-    CheckConstraint("status IN ('available','missing','corrupt','deleted')", name="ck_malware_snapshot_status"),
+    CheckConstraint(
+        "status IN ('available','missing','corrupt','deleted')", name="ck_malware_snapshot_status"
+    ),
     CheckConstraint("legal_hold IN (0,1)", name="ck_malware_snapshot_hold"),
 )
-Index("ix_malware_snapshot_tenant", malware_evidence_snapshots.c.organization_id, malware_evidence_snapshots.c.engagement_id)
+Index(
+    "ix_malware_snapshot_tenant",
+    malware_evidence_snapshots.c.organization_id,
+    malware_evidence_snapshots.c.engagement_id,
+)
 
 malware_evidence_quota_reservations = Table(
-    "malware_evidence_quota_reservations", metadata,
+    "malware_evidence_quota_reservations",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("reserved_bytes", Integer, nullable=False),
@@ -466,7 +578,8 @@ for _table, _operation in (
         DDL(
             f"CREATE TRIGGER {_table.name}_no_{_operation.lower()} "
             f"BEFORE {_operation} ON {_table.name} "
-            "BEGIN SELECT RAISE(ABORT, 'repository binding and attestation records are append-only'); END"
+            "BEGIN SELECT RAISE(ABORT, 'repository binding and attestation records "
+            "are append-only'); END"
         ).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
     )
 event.listen(
@@ -483,7 +596,8 @@ event.listen(
 )
 
 scope_revisions = Table(
-    "scope_revisions", metadata,
+    "scope_revisions",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("engagement_id", String(36), nullable=False),
@@ -496,7 +610,8 @@ scope_revisions = Table(
     Column("change_summary", String(2000), nullable=False),
     ForeignKeyConstraint(
         ["engagement_id", "organization_id"],
-        ["engagements.id", "engagements.organization_id"], ondelete="CASCADE",
+        ["engagements.id", "engagements.organization_id"],
+        ondelete="CASCADE",
     ),
     ForeignKeyConstraint(
         ["organization_id", "created_by"],
@@ -521,7 +636,8 @@ Index(
 )
 
 scope_rules = Table(
-    "scope_rules", metadata,
+    "scope_rules",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("scope_revision_id", String(36), nullable=False),
@@ -534,11 +650,13 @@ scope_rules = Table(
     Column("created_at", String(40), nullable=False),
     ForeignKeyConstraint(
         ["scope_revision_id", "organization_id"],
-        ["scope_revisions.id", "scope_revisions.organization_id"], ondelete="CASCADE",
+        ["scope_revisions.id", "scope_revisions.organization_id"],
+        ondelete="CASCADE",
     ),
     ForeignKeyConstraint(
         ["asset_id", "organization_id"],
-        ["engagement_assets.id", "engagement_assets.organization_id"], ondelete="RESTRICT",
+        ["engagement_assets.id", "engagement_assets.organization_id"],
+        ondelete="RESTRICT",
     ),
     CheckConstraint("effect IN ('include','exclude')", name="ck_scope_rule_effect"),
     CheckConstraint(
@@ -549,7 +667,8 @@ scope_rules = Table(
 Index("ix_scope_rules_revision", scope_rules.c.organization_id, scope_rules.c.scope_revision_id)
 
 authorization_records = Table(
-    "authorization_records", metadata,
+    "authorization_records",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("engagement_id", String(36), nullable=False),
@@ -566,15 +685,18 @@ authorization_records = Table(
     Column("updated_at", String(40), nullable=False),
     ForeignKeyConstraint(
         ["engagement_id", "organization_id"],
-        ["engagements.id", "engagements.organization_id"], ondelete="CASCADE",
+        ["engagements.id", "engagements.organization_id"],
+        ondelete="CASCADE",
     ),
     ForeignKeyConstraint(
-        ["client_id", "organization_id"], ["clients.id", "clients.organization_id"],
+        ["client_id", "organization_id"],
+        ["clients.id", "clients.organization_id"],
         ondelete="RESTRICT",
     ),
     ForeignKeyConstraint(
         ["scope_revision_id", "organization_id"],
-        ["scope_revisions.id", "scope_revisions.organization_id"], ondelete="RESTRICT",
+        ["scope_revisions.id", "scope_revisions.organization_id"],
+        ondelete="RESTRICT",
     ),
     ForeignKeyConstraint(
         ["organization_id", "recorded_by"],
@@ -592,7 +714,8 @@ Index(
 )
 
 authorization_documents = Table(
-    "authorization_documents", metadata,
+    "authorization_documents",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("authorization_id", String(36), nullable=False),
@@ -618,7 +741,8 @@ authorization_documents = Table(
 )
 
 approval_requests = Table(
-    "approval_requests", metadata,
+    "approval_requests",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("engagement_id", String(36), nullable=False),
@@ -640,7 +764,8 @@ approval_requests = Table(
     Column("decided_at", String(40)),
     ForeignKeyConstraint(
         ["engagement_id", "organization_id"],
-        ["engagements.id", "engagements.organization_id"], ondelete="CASCADE",
+        ["engagements.id", "engagements.organization_id"],
+        ondelete="CASCADE",
     ),
     UniqueConstraint("id", "organization_id", name="uq_approval_id_org"),
     ForeignKeyConstraint(
@@ -660,7 +785,8 @@ approval_requests = Table(
     ),
     ForeignKeyConstraint(
         ["scope_revision_id", "organization_id"],
-        ["scope_revisions.id", "scope_revisions.organization_id"], ondelete="RESTRICT",
+        ["scope_revisions.id", "scope_revisions.organization_id"],
+        ondelete="RESTRICT",
     ),
     ForeignKeyConstraint(
         ["authorization_id", "organization_id"],
@@ -689,7 +815,8 @@ Index(
 Index("ix_approval_requests_pending", approval_requests.c.decision, approval_requests.c.expires_at)
 
 assessment_audit_events = Table(
-    "assessment_audit_events", metadata,
+    "assessment_audit_events",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("engagement_id", String(36)),
@@ -704,7 +831,8 @@ assessment_audit_events = Table(
     ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
     ForeignKeyConstraint(
         ["engagement_id", "organization_id"],
-        ["engagements.id", "engagements.organization_id"], ondelete="CASCADE",
+        ["engagements.id", "engagements.organization_id"],
+        ondelete="CASCADE",
     ),
     ForeignKeyConstraint(
         ["organization_id", "actor_user_id"],
@@ -719,7 +847,8 @@ Index(
 )
 
 execution_jobs = Table(
-    "execution_jobs", metadata,
+    "execution_jobs",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("engagement_id", String(36), nullable=False),
@@ -781,7 +910,8 @@ execution_jobs = Table(
     Column("last_recovery_at", String(40)),
     ForeignKeyConstraint(
         ["engagement_id", "organization_id"],
-        ["engagements.id", "engagements.organization_id"], ondelete="CASCADE",
+        ["engagements.id", "engagements.organization_id"],
+        ondelete="CASCADE",
     ),
     ForeignKeyConstraint(
         ["organization_id", "requester_user_id"],
@@ -794,11 +924,13 @@ execution_jobs = Table(
             "engagement_assets.id",
             "engagement_assets.organization_id",
             "engagement_assets.engagement_id",
-        ], ondelete="RESTRICT",
+        ],
+        ondelete="RESTRICT",
     ),
     ForeignKeyConstraint(
         ["scope_revision_id", "organization_id"],
-        ["scope_revisions.id", "scope_revisions.organization_id"], ondelete="RESTRICT",
+        ["scope_revisions.id", "scope_revisions.organization_id"],
+        ondelete="RESTRICT",
     ),
     ForeignKeyConstraint(
         ["authorization_id", "organization_id"],
@@ -807,11 +939,17 @@ execution_jobs = Table(
     ),
     ForeignKeyConstraint(
         ["approval_id", "organization_id"],
-        ["approval_requests.id", "approval_requests.organization_id"], ondelete="RESTRICT",
+        ["approval_requests.id", "approval_requests.organization_id"],
+        ondelete="RESTRICT",
     ),
     ForeignKeyConstraint(
         ["repository_binding_id", "organization_id", "engagement_id", "asset_id"],
-        ["repository_asset_bindings.id", "repository_asset_bindings.organization_id", "repository_asset_bindings.engagement_id", "repository_asset_bindings.asset_id"],
+        [
+            "repository_asset_bindings.id",
+            "repository_asset_bindings.organization_id",
+            "repository_asset_bindings.engagement_id",
+            "repository_asset_bindings.asset_id",
+        ],
         ondelete="RESTRICT",
     ),
     ForeignKeyConstraint(
@@ -826,20 +964,36 @@ execution_jobs = Table(
     ),
     ForeignKeyConstraint(
         ["log_evidence_snapshot_id", "organization_id", "engagement_id", "asset_id"],
-        ["log_evidence_snapshots.id", "log_evidence_snapshots.organization_id", "log_evidence_snapshots.engagement_id", "log_evidence_snapshots.asset_id"],
+        [
+            "log_evidence_snapshots.id",
+            "log_evidence_snapshots.organization_id",
+            "log_evidence_snapshots.engagement_id",
+            "log_evidence_snapshots.asset_id",
+        ],
         ondelete="RESTRICT",
     ),
     ForeignKeyConstraint(
         ["malware_evidence_snapshot_id", "organization_id", "engagement_id", "asset_id"],
-        ["malware_evidence_snapshots.id", "malware_evidence_snapshots.organization_id", "malware_evidence_snapshots.engagement_id", "malware_evidence_snapshots.asset_id"],
+        [
+            "malware_evidence_snapshots.id",
+            "malware_evidence_snapshots.organization_id",
+            "malware_evidence_snapshots.engagement_id",
+            "malware_evidence_snapshots.asset_id",
+        ],
         ondelete="RESTRICT",
     ),
     UniqueConstraint(
-        "organization_id", "engagement_id", "requester_user_id", "idempotency_key",
+        "organization_id",
+        "engagement_id",
+        "requester_user_id",
+        "idempotency_key",
         name="uq_execution_job_idempotency",
     ),
     CheckConstraint(
-        "status IN ('queued','claimed','running','completed','blocked','cancelled','failed','reconciliation_required')",
+        "status IN ("
+        "'queued','claimed','running','completed','blocked','cancelled','failed',"
+        "'reconciliation_required'"
+        ")",
         name="ck_execution_job_status",
     ),
     CheckConstraint(
@@ -878,7 +1032,8 @@ event.listen(
 )
 
 execution_result_provenance = Table(
-    "execution_result_provenance", metadata,
+    "execution_result_provenance",
+    metadata,
     Column("record_type", String(80), primary_key=True),
     Column("record_id", String(255), primary_key=True),
     Column("job_id", String(36), nullable=False),
@@ -890,14 +1045,16 @@ execution_result_provenance = Table(
         name="ck_execution_result_provenance_type",
     ),
     ForeignKeyConstraint(
-        ["record_type", "record_id"], ["records.record_type", "records.record_id"],
+        ["record_type", "record_id"],
+        ["records.record_type", "records.record_id"],
         ondelete="RESTRICT",
     ),
     ForeignKeyConstraint(["job_id"], ["execution_jobs.id"], ondelete="RESTRICT"),
     ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="RESTRICT"),
     ForeignKeyConstraint(
         ["engagement_id", "organization_id"],
-        ["engagements.id", "engagements.organization_id"], ondelete="RESTRICT",
+        ["engagements.id", "engagements.organization_id"],
+        ondelete="RESTRICT",
     ),
 )
 Index(
@@ -909,7 +1066,8 @@ Index(
 
 # Phase 2C multi-user identity, persistent sessions, lockouts, and invitations.
 user_credentials = Table(
-    "user_credentials", metadata,
+    "user_credentials",
+    metadata,
     Column("user_id", String(36), primary_key=True),
     Column("password_hash", String(255)),
     Column("totp_enabled", Integer, nullable=False, server_default="0"),
@@ -926,7 +1084,8 @@ user_credentials = Table(
     CheckConstraint("totp_enabled IN (0, 1)", name="ck_user_credentials_totp_enabled"),
 )
 user_recovery_codes = Table(
-    "user_recovery_codes", metadata,
+    "user_recovery_codes",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("user_id", String(36), nullable=False, index=True),
     Column("code_hash", String(255), nullable=False),
@@ -935,7 +1094,8 @@ user_recovery_codes = Table(
     ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
 )
 user_sessions = Table(
-    "user_sessions", metadata,
+    "user_sessions",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("token_hash", String(64), nullable=False, unique=True, index=True),
     Column("user_id", String(36), nullable=False, index=True),
@@ -949,7 +1109,8 @@ user_sessions = Table(
     ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
 )
 organization_invitations = Table(
-    "organization_invitations", metadata,
+    "organization_invitations",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("organization_id", String(36), nullable=False),
     Column("email_normalized", String(254), nullable=False),
@@ -965,9 +1126,7 @@ organization_invitations = Table(
     ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
     ForeignKeyConstraint(["invited_by_user_id"], ["users.id"], ondelete="RESTRICT"),
     ForeignKeyConstraint(["accepted_by_user_id"], ["users.id"], ondelete="SET NULL"),
-    CheckConstraint(
-        "role IN ('admin','member','auditor','viewer')", name="ck_org_invitation_role"
-    ),
+    CheckConstraint("role IN ('admin','member','auditor','viewer')", name="ck_org_invitation_role"),
     CheckConstraint(
         "status IN ('pending','accepted','revoked','expired')", name="ck_org_invitation_status"
     ),
@@ -978,7 +1137,8 @@ Index(
     organization_invitations.c.email_normalized,
 )
 auth_lockouts = Table(
-    "auth_lockouts", metadata,
+    "auth_lockouts",
+    metadata,
     Column("key_hash", String(64), primary_key=True),
     Column("failure_count", Integer, nullable=False, server_default="0"),
     Column("locked_until", Float),
@@ -986,7 +1146,8 @@ auth_lockouts = Table(
 )
 # Phase 2D durable external-action attempts and worker leases.
 execution_action_attempts = Table(
-    "execution_action_attempts", metadata,
+    "execution_action_attempts",
+    metadata,
     Column("id", String(36), primary_key=True),
     Column("job_id", String(36), nullable=False),
     Column("organization_id", String(36), nullable=False),
@@ -1026,7 +1187,8 @@ Index(
     execution_action_attempts.c.state,
 )
 worker_leases = Table(
-    "worker_leases", metadata,
+    "worker_leases",
+    metadata,
     Column("worker_id", String(64), primary_key=True),
     Column("status", String(20), nullable=False),
     Column("started_at", String(40), nullable=False),
@@ -1102,12 +1264,8 @@ class SQLiteRepository(Repository):
         # already validated principal in that case; changing organizations always
         # starts with no principal and read-only access.
         same_scope = previous_organization == organization_id
-        principal_token = (
-            self._organization_principal_id.set(None) if not same_scope else None
-        )
-        write_token = (
-            self._organization_write_access.set(False) if not same_scope else None
-        )
+        principal_token = self._organization_principal_id.set(None) if not same_scope else None
+        write_token = self._organization_write_access.set(False) if not same_scope else None
         try:
             yield
         finally:
@@ -1187,8 +1345,12 @@ class SQLiteRepository(Repository):
     def execution_provenance_context(self, context: dict[str, Any]) -> Iterator[None]:
         """Associate only newly created result records with a validated execution job."""
         required = {
-            "job_id", "organization_id", "engagement_id", "requester_user_id",
-            "request_digest", "authorization_document_sha256",
+            "job_id",
+            "organization_id",
+            "engagement_id",
+            "requester_user_id",
+            "request_digest",
+            "authorization_document_sha256",
         }
         if not required <= context.keys():
             raise ValueError("Execution provenance context is incomplete.")
@@ -1217,16 +1379,18 @@ class SQLiteRepository(Repository):
             membership = organization_memberships.alias("record_membership")
             assignment = engagement_assignments.alias("record_assignment")
             organization_roles = (
-                ("owner", "admin")
-                if for_write
-                else ("owner", "admin", "auditor", "viewer")
+                ("owner", "admin") if for_write else ("owner", "admin", "auditor", "viewer")
             )
-            organization_admin = select(membership.c.id).where(
-                membership.c.organization_id == owner.c.organization_id,
-                membership.c.user_id == principal_id,
-                membership.c.status == "active",
-                membership.c.role.in_(organization_roles),
-            ).exists()
+            organization_admin = (
+                select(membership.c.id)
+                .where(
+                    membership.c.organization_id == owner.c.organization_id,
+                    membership.c.user_id == principal_id,
+                    membership.c.status == "active",
+                    membership.c.role.in_(organization_roles),
+                )
+                .exists()
+            )
             assignment_conditions = [
                 assignment.c.organization_id == owner.c.organization_id,
                 assignment.c.engagement_id == owner.c.engagement_id,
@@ -1237,9 +1401,7 @@ class SQLiteRepository(Repository):
                 assignment_conditions.append(
                     assignment.c.role.in_(("lead", "assessor", "reviewer"))
                 )
-            assigned_engagement = select(assignment.c.id).where(
-                *assignment_conditions
-            ).exists()
+            assigned_engagement = select(assignment.c.id).where(*assignment_conditions).exists()
             conditions.append(or_(organization_admin, assigned_engagement))
         return select(owner.c.record_id).where(*conditions).exists()
 
@@ -1263,21 +1425,30 @@ class SQLiteRepository(Repository):
             if provenance is not None and provenance["organization_id"] == organization_id
             else self._linked_engagement_id(connection, organization_id, record_type, payload)
         )
-        exists = connection.execute(select(record_ownership.c.record_type).where(
-            record_ownership.c.record_type == record_type,
-            record_ownership.c.record_id == record_id,
-        )).first()
+        exists = connection.execute(
+            select(record_ownership.c.record_type).where(
+                record_ownership.c.record_type == record_type,
+                record_ownership.c.record_id == record_id,
+            )
+        ).first()
         if exists is None:
             from chinescan.core.organizations import now_iso
 
-            connection.execute(record_ownership.insert().values(
-                record_type=record_type, record_id=record_id,
-                organization_id=organization_id, engagement_id=engagement_id,
-                created_at=now_iso(),
-            ))
-        if newly_created and provenance is not None and record_type in {
-            "scan", "finding", "evidence", "artifact", "report", "malware_analysis"
-        }:
+            connection.execute(
+                record_ownership.insert().values(
+                    record_type=record_type,
+                    record_id=record_id,
+                    organization_id=organization_id,
+                    engagement_id=engagement_id,
+                    created_at=now_iso(),
+                )
+            )
+        if (
+            newly_created
+            and provenance is not None
+            and record_type
+            in {"scan", "finding", "evidence", "artifact", "report", "malware_analysis"}
+        ):
             self._link_execution_result(connection, record_type, record_id, provenance)
 
     @staticmethod
@@ -1356,6 +1527,7 @@ class SQLiteRepository(Repository):
     @staticmethod
     def _enable_foreign_keys(engine: Engine) -> None:
         """SQLite disables FK enforcement by default; enable it on each connection."""
+
         @event.listens_for(engine, "connect")
         def _set_sqlite_foreign_keys(dbapi_connection: Any, _record: Any) -> None:
             cursor = dbapi_connection.cursor()
@@ -1420,9 +1592,7 @@ class SQLiteRepository(Repository):
             ]
             owner = self._owned_record(for_write=True)
             conditions.append(owner)
-            existing = connection.execute(
-                select(records.c.record_id).where(*conditions)
-            ).first()
+            existing = connection.execute(select(records.c.record_id).where(*conditions)).first()
             created = existing is None
             if existing:
                 connection.execute(
@@ -1500,9 +1670,7 @@ class SQLiteRepository(Repository):
             ]
             owner = self._owned_record(for_write=True)
             conditions.append(owner)
-            connection.execute(
-                records.delete().where(*conditions)
-            )
+            connection.execute(records.delete().where(*conditions))
 
     def save_many(self, items: list[tuple[str, str, dict[str, Any]]]) -> None:
         """Atomically upsert a bounded set of metadata records in one SQLite transaction."""
@@ -1523,9 +1691,7 @@ class SQLiteRepository(Repository):
                 created = existing is None
                 if existing:
                     connection.execute(
-                        records.update()
-                        .where(*conditions)
-                        .values(payload=safe_payload)
+                        records.update().where(*conditions).values(payload=safe_payload)
                     )
                 else:
                     connection.execute(
@@ -1699,9 +1865,7 @@ class SQLiteRepository(Repository):
         owner = self._owned_record()
         conditions.append(owner)
         with self.engine.connect() as connection:
-            row = connection.execute(
-                select(records.c.payload).where(*conditions)
-            ).first()
+            row = connection.execute(select(records.c.payload).where(*conditions)).first()
         return dict(row[0]) if row else None
 
     def get_many(self, record_type: str, record_ids: list[str]) -> dict[str, dict[str, Any]]:
@@ -1730,9 +1894,7 @@ class SQLiteRepository(Repository):
         owner = self._owned_record()
         conditions.append(owner)
         with self.engine.connect() as connection:
-            rows = connection.execute(
-                select(records.c.payload).where(*conditions)
-            ).all()
+            rows = connection.execute(select(records.c.payload).where(*conditions)).all()
         return [dict(row[0]) for row in rows]
 
     def page_records(
@@ -1809,9 +1971,7 @@ class SQLiteRepository(Repository):
             with self.engine.connect() as connection:
                 return int(
                     connection.execute(
-                        select(func.count())
-                        .select_from(records)
-                        .where(*conditions)
+                        select(func.count()).select_from(records).where(*conditions)
                     ).scalar_one()
                 )
         if group_by not in allowed_groups.get(record_type, set()):
@@ -1822,9 +1982,7 @@ class SQLiteRepository(Repository):
         conditions.append(owner)
         with self.engine.connect() as connection:
             rows = connection.execute(
-                select(field, func.count())
-                .where(*conditions)
-                .group_by(field)
+                select(field, func.count()).where(*conditions).group_by(field)
             ).all()
         return {str(key): int(cast(Any, count)) for key, count in rows if key is not None}
 

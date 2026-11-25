@@ -216,12 +216,28 @@ def create_chain_execution_router(
                 technique="chain_trace_import",
                 approval_id=None,
                 idempotency_key=payload.idempotency_key,
-                chain_request={"chain": payload.chain, "seed": payload.seed, "depth": payload.depth},
+                chain_request={
+                    "chain": payload.chain,
+                    "seed": payload.seed,
+                    "depth": payload.depth,
+                },
             )
-        except (ValueError, OverflowError) as exc:
-            raise HTTPException(status_code=409, detail={"code": "chain_admission_denied", "message": "Chain import could not be admitted."}) from None
+        except (ValueError, OverflowError):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "chain_admission_denied",
+                    "message": "Chain import could not be admitted.",
+                },
+            ) from None
         if result.get("decision") != "ALLOW":
-            raise HTTPException(status_code=403, detail={"code": result.get("reason_code", "policy_denied"), "message": result.get("explanation", "Execution was denied by policy.")})
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": result.get("reason_code", "policy_denied"),
+                    "message": result.get("explanation", "Execution was denied by policy."),
+                },
+            )
         return result
 
     @router.post("/provider-lookups", status_code=202, dependencies=[Depends(require_csrf)])
@@ -244,11 +260,29 @@ def create_chain_execution_router(
                 idempotency_key=payload.idempotency_key,
             )
         except (ValueError, OverflowError):
-            raise HTTPException(status_code=409, detail={"code": "chain_admission_denied", "message": "Provider lookup could not be admitted."}) from None
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "chain_admission_denied",
+                    "message": "Provider lookup could not be admitted.",
+                },
+            ) from None
         if result.get("decision") == "REQUIRE_APPROVAL":
-            raise HTTPException(status_code=409, detail={"code": "approval_required", "message": "A valid approval for this exact provider lookup is required."})
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "approval_required",
+                    "message": "A valid approval for this exact provider lookup is required.",
+                },
+            )
         if result.get("decision") != "ALLOW":
-            raise HTTPException(status_code=403, detail={"code": result.get("reason_code", "policy_denied"), "message": result.get("explanation", "Execution was denied by policy.")})
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": result.get("reason_code", "policy_denied"),
+                    "message": result.get("explanation", "Execution was denied by policy."),
+                },
+            )
         return result
 
     return router

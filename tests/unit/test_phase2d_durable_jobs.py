@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -118,7 +117,9 @@ def test_atomic_concurrent_claim_with_independent_connections(tmp_path: Path) ->
     repo, _orgs, _sec, gov, _uid, _oid, _eid, job_id = _seed_governed_job(tmp_path)
     repo2 = SQLiteRepository(repo.path)
     try:
-        gov2 = ExecutionGovernanceService(EngagementSecurityService(repo2, OrganizationService(repo2)))
+        gov2 = ExecutionGovernanceService(
+            EngagementSecurityService(repo2, OrganizationService(repo2))
+        )
         barrier = Barrier(2)
 
         def _claim(idx: int) -> dict | None:
@@ -157,12 +158,21 @@ def test_lease_heartbeat_expiry_and_stale_worker_fencing(tmp_path: Path) -> None
         assert gov.revalidate_job(job_id, worker_id="worker-a", lease_generation=gen1, now=t0 + 1)
 
         # Wrong owner cannot heartbeat
-        assert gov.heartbeat_job(job_id, "worker-b", gen1, lease_duration_seconds=10.0, now=t0 + 2) is False
+        assert (
+            gov.heartbeat_job(job_id, "worker-b", gen1, lease_duration_seconds=10.0, now=t0 + 2)
+            is False
+        )
         # Current owner can heartbeat before expiry
-        assert gov.heartbeat_job(job_id, "worker-a", gen1, lease_duration_seconds=10.0, now=t0 + 2) is True
+        assert (
+            gov.heartbeat_job(job_id, "worker-a", gen1, lease_duration_seconds=10.0, now=t0 + 2)
+            is True
+        )
 
         # After expiry, renewal is rejected (never silently resurrected)
-        assert gov.heartbeat_job(job_id, "worker-a", gen1, lease_duration_seconds=10.0, now=t0 + 15) is False
+        assert (
+            gov.heartbeat_job(job_id, "worker-a", gen1, lease_duration_seconds=10.0, now=t0 + 15)
+            is False
+        )
 
         # Safe recovery returns job to queued, preserving lease_generation=1
         recovered = gov.recover_stale_jobs(now=t0 + 15)
@@ -175,13 +185,27 @@ def test_lease_heartbeat_expiry_and_stale_worker_fencing(tmp_path: Path) -> None
         assert gov.revalidate_job(job_id, worker_id="worker-b", lease_generation=2, now=t0 + 16)
 
         # Stale worker-a (gen 1) is fenced out of all mutations
-        assert gov.revalidate_job(job_id, worker_id="worker-a", lease_generation=gen1, now=t0 + 17) is False
-        assert gov.authorize_external_action(
-            job_id, "app.example.test", "service_fingerprint", worker_id="worker-a", lease_generation=gen1, now=t0 + 17
-        ) is False
-        assert gov.finish_job(
-            job_id, scan_id="fake", worker_id="worker-a", lease_generation=gen1, now=t0 + 17
-        ) is False
+        assert (
+            gov.revalidate_job(job_id, worker_id="worker-a", lease_generation=gen1, now=t0 + 17)
+            is False
+        )
+        assert (
+            gov.authorize_external_action(
+                job_id,
+                "app.example.test",
+                "service_fingerprint",
+                worker_id="worker-a",
+                lease_generation=gen1,
+                now=t0 + 17,
+            )
+            is False
+        )
+        assert (
+            gov.finish_job(
+                job_id, scan_id="fake", worker_id="worker-a", lease_generation=gen1, now=t0 + 17
+            )
+            is False
+        )
         with repo.engine.connect() as conn:
             row = conn.execute(select(execution_jobs).where(execution_jobs.c.id == job_id)).first()
             assert row is not None
@@ -192,7 +216,9 @@ def test_lease_heartbeat_expiry_and_stale_worker_fencing(tmp_path: Path) -> None
         repo.close()
 
 
-def test_crash_recovery_separates_safe_retry_from_uncertain_external_actions(tmp_path: Path) -> None:
+def test_crash_recovery_separates_safe_retry_from_uncertain_external_actions(
+    tmp_path: Path,
+) -> None:
     # 1. Crash after authorization but before dispatch -> safe retry
     repo, _orgs, _sec, gov, _uid, _oid, _eid, job_id = _seed_governed_job(tmp_path)
     try:
@@ -201,7 +227,12 @@ def test_crash_recovery_separates_safe_retry_from_uncertain_external_actions(tmp
         assert c1 is not None
         assert gov.revalidate_job(job_id, worker_id="worker-1", lease_generation=1, now=t0 + 1)
         assert gov.authorize_external_action(
-            job_id, "app.example.test", "service_fingerprint", worker_id="worker-1", lease_generation=1, now=t0 + 1
+            job_id,
+            "app.example.test",
+            "service_fingerprint",
+            worker_id="worker-1",
+            lease_generation=1,
+            now=t0 + 1,
         )
         # Crash before mark_action_in_progress
         rec1 = gov.recover_stale_jobs(now=t0 + 20)
@@ -212,20 +243,30 @@ def test_crash_recovery_separates_safe_retry_from_uncertain_external_actions(tmp
         assert attempt1 is not None
         assert attempt1["state"] == "failed_before_dispatch"
 
-        # 2. Worker 2 claims, starts external action (in_progress), and crashes -> reconciliation_required
+        # 2. Worker 2 claims, starts external action (in_progress),
+        #    and crashes -> reconciliation_required
         c2 = gov.claim_job(job_id, "worker-2", lease_duration_seconds=10.0, now=t0 + 22)
         assert c2 is not None and c2["lease_generation"] == 2
         assert gov.revalidate_job(job_id, worker_id="worker-2", lease_generation=2, now=t0 + 22)
         assert gov.authorize_external_action(
-            job_id, "app.example.test", "service_fingerprint", worker_id="worker-2", lease_generation=2, now=t0 + 22
+            job_id,
+            "app.example.test",
+            "service_fingerprint",
+            worker_id="worker-2",
+            lease_generation=2,
+            now=t0 + 22,
         )
-        assert gov.mark_action_in_progress(job_id, worker_id="worker-2", lease_generation=2, now=t0 + 22)
+        assert gov.mark_action_in_progress(
+            job_id, worker_id="worker-2", lease_generation=2, now=t0 + 22
+        )
         rec2 = gov.recover_stale_jobs(now=t0 + 40)
         assert rec2 == [{"id": job_id, "outcome": "reconciliation_required"}]
         assert gov.recover_stale_jobs(now=t0 + 41) == []
 
         with repo.engine.connect() as conn:
-            job_row = conn.execute(select(execution_jobs).where(execution_jobs.c.id == job_id)).first()
+            job_row = conn.execute(
+                select(execution_jobs).where(execution_jobs.c.id == job_id)
+            ).first()
             assert job_row is not None
             assert job_row.status == "reconciliation_required"
             assert job_row.error_code == "EXTERNAL_OUTCOME_UNCERTAIN"
@@ -243,11 +284,15 @@ def test_crash_recovery_separates_safe_retry_from_uncertain_external_actions(tmp
         restored_repo = SQLiteRepository(restored_db)
         try:
             with restored_repo.engine.connect() as rconn:
-                rjob = rconn.execute(select(execution_jobs).where(execution_jobs.c.id == job_id)).first()
+                rjob = rconn.execute(
+                    select(execution_jobs).where(execution_jobs.c.id == job_id)
+                ).first()
                 assert rjob is not None
                 assert rjob.status == "reconciliation_required"
                 rattempts = rconn.execute(
-                    select(execution_action_attempts).where(execution_action_attempts.c.job_id == job_id)
+                    select(execution_action_attempts).where(
+                        execution_action_attempts.c.job_id == job_id
+                    )
                 ).all()
                 assert len(rattempts) == 2
         finally:
@@ -263,7 +308,12 @@ def test_action_attempt_immutability_and_duplicate_action_blocked(tmp_path: Path
         assert gov.claim_job(job_id, "worker-1", lease_duration_seconds=30.0, now=t0) is not None
         assert gov.revalidate_job(job_id, worker_id="worker-1", lease_generation=1, now=t0)
         assert gov.authorize_external_action(
-            job_id, "app.example.test", "service_fingerprint", worker_id="worker-1", lease_generation=1, now=t0
+            job_id,
+            "app.example.test",
+            "service_fingerprint",
+            worker_id="worker-1",
+            lease_generation=1,
+            now=t0,
         )
         assert gov.mark_action_in_progress(job_id, worker_id="worker-1", lease_generation=1, now=t0)
 
@@ -271,26 +321,44 @@ def test_action_attempt_immutability_and_duplicate_action_blocked(tmp_path: Path
         with pytest.raises(Exception, match="immutable"):
             with repo.engine.begin() as conn:
                 conn.execute(
-                    text("UPDATE execution_action_attempts SET request_digest = 'tampered' WHERE job_id = :jid"),
+                    text(
+                        "UPDATE execution_action_attempts "
+                        "SET request_digest = 'tampered' WHERE job_id = :jid"
+                    ),
                     {"jid": job_id},
                 )
 
         # A different lease generation cannot authorize a duplicate action
-        assert gov.authorize_external_action(
-            job_id, "app.example.test", "service_fingerprint", worker_id="worker-1", lease_generation=99, now=t0
-        ) is False
+        assert (
+            gov.authorize_external_action(
+                job_id,
+                "app.example.test",
+                "service_fingerprint",
+                worker_id="worker-1",
+                lease_generation=99,
+                now=t0,
+            )
+            is False
+        )
     finally:
         repo.close()
 
 
-def test_cancellation_during_in_progress_preserves_uncertainty_and_worker_shutdown(tmp_path: Path) -> None:
+def test_cancellation_during_in_progress_preserves_uncertainty_and_worker_shutdown(
+    tmp_path: Path,
+) -> None:
     repo, _orgs, _sec, gov, uid, oid, eid, job_id = _seed_governed_job(tmp_path)
     try:
         t0 = 1_764_000_000.0
         assert gov.claim_job(job_id, "worker-1", lease_duration_seconds=30.0, now=t0) is not None
         assert gov.revalidate_job(job_id, worker_id="worker-1", lease_generation=1, now=t0)
         assert gov.authorize_external_action(
-            job_id, "app.example.test", "service_fingerprint", worker_id="worker-1", lease_generation=1, now=t0
+            job_id,
+            "app.example.test",
+            "service_fingerprint",
+            worker_id="worker-1",
+            lease_generation=1,
+            now=t0,
         )
         assert gov.mark_action_in_progress(job_id, worker_id="worker-1", lease_generation=1, now=t0)
 
@@ -308,7 +376,9 @@ def test_cancellation_during_in_progress_preserves_uncertainty_and_worker_shutdo
     # Standalone worker option in create_app does not auto-start background thread
     cred = tmp_path / "operator.json"
     create_operator(cred, "operator@example.test", "Operator-Secure-Passphrase-99!")
-    app = create_app(tmp_path / "web.sqlite3", cred, serve_frontend=False, start_governed_worker=False)
+    app = create_app(
+        tmp_path / "web.sqlite3", cred, serve_frontend=False, start_governed_worker=False
+    )
     try:
         worker = app.state.governed_domain_worker
         assert worker._thread is None

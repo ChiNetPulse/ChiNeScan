@@ -129,9 +129,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     bind = op.get_bind()
     if bind.execute(
-        sa.text(
-            "SELECT COUNT(*) FROM users WHERE status IN ('disabled','revoked','pending')"
-        )
+        sa.text("SELECT COUNT(*) FROM users WHERE status IN ('disabled','revoked','pending')")
     ).scalar_one():
         raise RuntimeError(
             "Cannot downgrade while disabled, revoked, or pending user accounts exist."

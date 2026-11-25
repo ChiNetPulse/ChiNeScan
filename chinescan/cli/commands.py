@@ -125,7 +125,8 @@ def version() -> None:
 def _operator_credential_path(path: Path | None) -> Path:
     configured = os.environ.get("CHINESCAN_OPERATOR_CREDENTIAL_FILE")
     selected = (
-        path or (Path(configured) if configured else None)
+        path
+        or (Path(configured) if configured else None)
         or Path.home() / ".config" / "chinescan" / "operator.json"
     ).expanduser()
     resolved = selected.resolve(strict=False)
@@ -1322,8 +1323,12 @@ def governed_log_analysis(
             security, adapters=build_default_adapter_registry(repository, log_adapter=adapter)
         )
         job = governance.create_governed_job(
-            user_id, organization_id, engagement_id, asset_id,
-            technique="log_analysis", approval_id=None,
+            user_id,
+            organization_id,
+            engagement_id,
+            asset_id,
+            technique="log_analysis",
+            approval_id=None,
             idempotency_key=idempotency_key or str(uuid4()),
         )
         if job.get("decision") != "ALLOW":
@@ -1371,9 +1376,13 @@ def governed_chain_trace(
     if output_format not in {"human", "json"}:
         raise typer.BadParameter("format must be 'human' or 'json'")
     if operation == "import" and (not chain or not seed or approval_id):
-        raise typer.BadParameter("import requires --chain and --seed and does not use --approval-id")
+        raise typer.BadParameter(
+            "import requires --chain and --seed and does not use --approval-id"
+        )
     if operation == "provider" and (chain or seed or not approval_id):
-        raise typer.BadParameter("provider requires --approval-id and uses the registered chain target")
+        raise typer.BadParameter(
+            "provider requires --approval-id and uses the registered chain target"
+        )
     try:
         user_id, normalized_email = _authenticate_persistent_operator(credential_file)
     except CredentialError as exc:
@@ -1391,7 +1400,8 @@ def governed_chain_trace(
         security = EngagementSecurityService(repository, organizations)
         log_store = LogEvidenceStore(
             repository,
-            settings.database_path.expanduser().resolve(strict=False).parent / "log-evidence-snapshots",
+            settings.database_path.expanduser().resolve(strict=False).parent
+            / "log-evidence-snapshots",
             allowed_roots=list(settings.allowed_roots),
             max_snapshot_bytes=settings.log_evidence_max_bytes,
             organization_quota_bytes=settings.log_evidence_org_quota_bytes,
@@ -1413,7 +1423,9 @@ def governed_chain_trace(
             ),
         )
         technique = CHAIN_IMPORT_TECHNIQUE if operation == "import" else CHAIN_PROVIDER_TECHNIQUE
-        chain_request = {"chain": chain, "seed": seed, "depth": depth} if operation == "import" else None
+        chain_request = (
+            {"chain": chain, "seed": seed, "depth": depth} if operation == "import" else None
+        )
         try:
             job = governance.create_governed_job(
                 user_id,
@@ -1430,7 +1442,7 @@ def governed_chain_trace(
             raise typer.Exit(code=2) from exc
         if job.get("decision") != "ALLOW" or job.get("status") != "queued":
             typer.echo(
-                f"Governed chain trace blocked: {job.get('reason_code', 'POLICY_DENIED') }.",
+                f"Governed chain trace blocked: {job.get('reason_code', 'POLICY_DENIED')}.",
                 err=True,
             )
             raise typer.Exit(code=2)
@@ -1842,9 +1854,7 @@ def governed_code_scan(
         password = getpass("Operator password: ")
         authenticated = bool(email) and verify_operator(credentials, email or "", password)
         if authenticated and operator_totp_enabled(credentials):
-            authenticated = verify_operator_totp(
-                credentials, getpass("TOTP or recovery code: ")
-            )
+            authenticated = verify_operator_totp(credentials, getpass("TOTP or recovery code: "))
     except CredentialError as exc:
         typer.echo(str(redact(str(exc))), err=True)
         raise typer.Exit(code=2) from exc
@@ -1865,11 +1875,7 @@ def governed_code_scan(
     try:
         organizations = OrganizationService(repository)
         user = organizations.get_active_user(stable_user_id)
-        if (
-            user is None
-            or email is None
-            or user.get("email_normalized") != normalize_email(email)
-        ):
+        if user is None or email is None or user.get("email_normalized") != normalize_email(email):
             typer.echo(
                 "Persistent operator identity is unavailable or requires web bootstrap.",
                 err=True,
@@ -1897,9 +1903,7 @@ def governed_code_scan(
             stable_user_id, organization_id, engagement_id, asset_id
         )
         if asset is None or not asset.get("binding_id") or not asset.get("attestation_id"):
-            typer.echo(
-                "Repository asset is unavailable, unbound, or not accessible.", err=True
-            )
+            typer.echo("Repository asset is unavailable, unbound, or not accessible.", err=True)
             raise typer.Exit(code=2)
 
         bounds, bounds_context = _repository_execution_bounds(settings)
@@ -1939,7 +1943,11 @@ def governed_code_scan(
         # An admitted job is represented by its durable job row (id/status), not
         # by an ALLOW decision envelope. Reject unexpected service responses.
         if not job.get("id") or job.get("status") not in {
-            "queued", "running", "completed", "failed", "cancelled"
+            "queued",
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
         }:
             typer.echo("Governed execution admission returned an invalid job.", err=True)
             raise typer.Exit(code=2)

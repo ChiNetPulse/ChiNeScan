@@ -519,9 +519,7 @@ def test_cli_database_backup_requires_explicit_local_operator_authorization(
     source = tmp_path / "tenant-data.sqlite3"
     _source(source)
     monkeypatch.setenv("CHINESCAN_DATABASE_PATH", str(source))
-    monkeypatch.setenv(
-        "CHINESCAN_OPERATOR_CREDENTIAL_FILE", str(tmp_path / "no-operator.json")
-    )
+    monkeypatch.setenv("CHINESCAN_OPERATOR_CREDENTIAL_FILE", str(tmp_path / "no-operator.json"))
     bundle = tmp_path / "unauthorized-backup"
 
     result = runner.invoke(app, ["db", "backup", "--output", str(bundle)])
@@ -532,7 +530,8 @@ def test_cli_database_backup_requires_explicit_local_operator_authorization(
 
 
 def test_cli_cutover_and_rollback_drill_uses_explicit_paths_and_preserves_divergence(
-    tmp_path: Path, local_operator_credentials,
+    tmp_path: Path,
+    local_operator_credentials,
 ) -> None:
     from scripts.recovery_acceptance import ROLLBACK_NOTE, run_drill
 

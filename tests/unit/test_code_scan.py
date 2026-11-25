@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from conftest import authorize_test_operator
 from typer.testing import CliRunner
 
 from chinescan.cli.app import app
@@ -15,7 +16,6 @@ from chinescan.core.orchestration.code_scan import (
     make_finding,
 )
 from chinescan.core.storage.sqlite import SQLiteRepository
-from conftest import authorize_test_operator
 
 FIXTURES = Path(__file__).parents[2] / "fixtures"
 

@@ -747,13 +747,18 @@ class OrganizationService:
                 raise OrganizationError("Client must belong to the same organization.")
             changes["updated_at"] = now_iso()
             if "status" in changes:
-                current = connection.execute(select(engagements.c.status, engagements.c.closed_at).where(
-                    engagements.c.id == engagement_id,
-                    engagements.c.organization_id == organization_id,
-                )).first()
+                current = connection.execute(
+                    select(engagements.c.status, engagements.c.closed_at).where(
+                        engagements.c.id == engagement_id,
+                        engagements.c.organization_id == organization_id,
+                    )
+                ).first()
                 if current is None:
                     return None
-                if changes["status"] in {"completed", "archived"} and current.status not in {"completed", "archived"}:
+                if changes["status"] in {"completed", "archived"} and current.status not in {
+                    "completed",
+                    "archived",
+                }:
                     closure_time = now_iso()
                     changes["closed_at"] = closure_time
                 elif changes["status"] not in {"completed", "archived"}:
@@ -769,48 +774,85 @@ class OrganizationService:
             if result.rowcount != 1:
                 return None
             if "status" in changes:
-                bound = connection.execute(select(repository_asset_bindings.c.snapshot_id).where(
-                    repository_asset_bindings.c.organization_id == organization_id,
-                    repository_asset_bindings.c.engagement_id == engagement_id,
-                ).distinct()).scalars().all()
+                bound = (
+                    connection.execute(
+                        select(repository_asset_bindings.c.snapshot_id)
+                        .where(
+                            repository_asset_bindings.c.organization_id == organization_id,
+                            repository_asset_bindings.c.engagement_id == engagement_id,
+                        )
+                        .distinct()
+                    )
+                    .scalars()
+                    .all()
+                )
                 for snapshot_id in bound:
-                    links = connection.execute(select(
-                        repository_asset_bindings.c.engagement_id,
-                    ).where(repository_asset_bindings.c.snapshot_id == snapshot_id,
-                            repository_asset_bindings.c.organization_id == organization_id)).all()
+                    links = connection.execute(
+                        select(
+                            repository_asset_bindings.c.engagement_id,
+                        ).where(
+                            repository_asset_bindings.c.snapshot_id == snapshot_id,
+                            repository_asset_bindings.c.organization_id == organization_id,
+                        )
+                    ).all()
                     closures = []
                     open_link = False
                     for link in links:
-                        linked_engagement = connection.execute(select(engagements.c.status, engagements.c.closed_at).where(
-                            engagements.c.id == link.engagement_id,
-                            engagements.c.organization_id == organization_id,
-                        )).first()
-                        if not linked_engagement or linked_engagement.status not in {"completed", "archived"} or not linked_engagement.closed_at:
+                        linked_engagement = connection.execute(
+                            select(engagements.c.status, engagements.c.closed_at).where(
+                                engagements.c.id == link.engagement_id,
+                                engagements.c.organization_id == organization_id,
+                            )
+                        ).first()
+                        if (
+                            not linked_engagement
+                            or linked_engagement.status not in {"completed", "archived"}
+                            or not linked_engagement.closed_at
+                        ):
                             open_link = True
                             break
-                        closures.append(datetime.fromisoformat(linked_engagement.closed_at.replace("Z", "+00:00")))
+                        closures.append(
+                            datetime.fromisoformat(
+                                linked_engagement.closed_at.replace("Z", "+00:00")
+                            )
+                        )
                     if open_link or not closures:
-                        connection.execute(update(repository_snapshots).where(
-                            repository_snapshots.c.id == snapshot_id,
-                            repository_snapshots.c.organization_id == organization_id,
-                        ).values(closed_at=None, delete_after=None))
+                        connection.execute(
+                            update(repository_snapshots)
+                            .where(
+                                repository_snapshots.c.id == snapshot_id,
+                                repository_snapshots.c.organization_id == organization_id,
+                            )
+                            .values(closed_at=None, delete_after=None)
+                        )
                         retention_action = "repository.snapshot_retention_released"
                     else:
                         latest_closure = max(closures)
                         delete_after = (latest_closure + timedelta(days=90)).isoformat()
-                        connection.execute(update(repository_snapshots).where(
-                            repository_snapshots.c.id == snapshot_id,
-                            repository_snapshots.c.organization_id == organization_id,
-                        ).values(closed_at=latest_closure.isoformat(), delete_after=delete_after))
+                        connection.execute(
+                            update(repository_snapshots)
+                            .where(
+                                repository_snapshots.c.id == snapshot_id,
+                                repository_snapshots.c.organization_id == organization_id,
+                            )
+                            .values(closed_at=latest_closure.isoformat(), delete_after=delete_after)
+                        )
                         retention_action = "repository.snapshot_retention_scheduled"
                     self._audit(
-                        connection, organization_id, user_id, retention_action,
-                        "repository_snapshot", str(snapshot_id),
+                        connection,
+                        organization_id,
+                        user_id,
+                        retention_action,
+                        "repository_snapshot",
+                        str(snapshot_id),
                     )
             self._audit(
-                connection, organization_id, user_id,
+                connection,
+                organization_id,
+                user_id,
                 "engagement.closed" if changes.get("closed_at") else "engagement.updated",
-                "engagement", engagement_id,
+                "engagement",
+                engagement_id,
             )
             return _dict(
                 connection.execute(

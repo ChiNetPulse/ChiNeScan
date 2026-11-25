@@ -159,7 +159,11 @@ def _parse_json(
 
 
 def _json_item(
-    item: Any, source_ref: str, line_number: int, batch: ParseBatch, depth: int = 0,
+    item: Any,
+    source_ref: str,
+    line_number: int,
+    batch: ParseBatch,
+    depth: int = 0,
     control: object | None = None,
 ) -> list[Event]:
     _check_cancelled(control)

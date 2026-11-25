@@ -123,9 +123,7 @@ class IdentityService:
         with self.engine.connect() as connection:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             try:
-                user_row = connection.execute(
-                    select(users).where(users.c.id == user_id)
-                ).first()
+                user_row = connection.execute(select(users).where(users.c.id == user_id)).first()
                 if user_row is None:
                     connection.rollback()
                     return False
@@ -333,9 +331,7 @@ class IdentityService:
     def totp_status(self, user_id: str) -> dict[str, Any]:
         with self.engine.connect() as connection:
             cred = connection.execute(
-                select(user_credentials.c.totp_enabled).where(
-                    user_credentials.c.user_id == user_id
-                )
+                select(user_credentials.c.totp_enabled).where(user_credentials.c.user_id == user_id)
             ).first()
             remaining = len(
                 connection.execute(
@@ -528,9 +524,7 @@ class IdentityService:
                 connection.rollback()
                 raise
 
-    def change_password(
-        self, user_id: str, current_password: str, new_password: str
-    ) -> str | None:
+    def change_password(self, user_id: str, current_password: str, new_password: str) -> str | None:
         stamp = now_iso()
         with self.engine.connect() as connection:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
@@ -805,9 +799,8 @@ class IdentityService:
                     if existing_user.status != "active":
                         connection.rollback()
                         raise IdentityError("Account is unavailable.")
-                    verified_existing = (
-                        authenticated_user_id is not None
-                        and hmac.compare_digest(existing_user.id, authenticated_user_id)
+                    verified_existing = authenticated_user_id is not None and hmac.compare_digest(
+                        existing_user.id, authenticated_user_id
                     )
                     if not verified_existing:
                         if not password:
@@ -848,8 +841,7 @@ class IdentityService:
                     auth_epoch = secrets.token_hex(16)
                     local_part = inv.email_normalized.split("@", 1)[0]
                     clean_name = (
-                        " ".join((display_name or local_part).split())[:120]
-                        or local_part[:120]
+                        " ".join((display_name or local_part).split())[:120] or local_part[:120]
                     )
                     user_payload = {
                         "id": user_id,

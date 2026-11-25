@@ -72,9 +72,7 @@ class ExecutionContext(BaseModel):
     action_class: ActionClass
     scope_revision_id: str = Field(min_length=36, max_length=36)
     authorization_id: str = Field(min_length=36, max_length=36)
-    authorization_document_sha256: str | None = Field(
-        default=None, pattern=r"^[a-f0-9]{64}$"
-    )
+    authorization_document_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     approval_id: str | None = Field(default=None, min_length=36, max_length=36)
     policy_decision_id: str = Field(min_length=36, max_length=36)
     request_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -157,8 +155,12 @@ class ExecutionContext(BaseModel):
         if context.job_id != job.get("id"):
             raise ValueError("Execution context job identifier does not match its durable row.")
         if context.repository_attestation_version != job.get("repository_attestation_version"):
-            raise ValueError("Execution context attestation version does not match its durable row.")
-        if context.adapter_id != job.get("adapter_id") or context.adapter_version != job.get("adapter_version"):
+            raise ValueError(
+                "Execution context attestation version does not match its durable row."
+            )
+        if context.adapter_id != job.get("adapter_id") or context.adapter_version != job.get(
+            "adapter_version"
+        ):
             raise ValueError("Execution context adapter identity does not match its durable row.")
         if context.scanner_version != job.get("repository_scanner_version"):
             raise ValueError("Execution context scanner identity does not match its durable row.")
@@ -166,14 +168,18 @@ class ExecutionContext(BaseModel):
             raise ValueError("Execution context scan bounds do not match its durable row.")
         if context.exclusion_policy_version != job.get("exclusion_policy_version"):
             raise ValueError("Execution context exclusion policy does not match its durable row.")
-        if context.asset_type == "log_evidence" and context.technique == "log_analysis" and (
-            not context.log_evidence_snapshot_id
-            or not context.log_evidence_sha256
-            or context.log_evidence_manifest_version != 1
-            or context.log_analysis_version != LOG_ANALYSIS_VERSION
-            or context.log_ruleset_version != LOG_RULESET_VERSION
-            or context.technique != "log_analysis"
-            or context.action_class != "passive"
+        if (
+            context.asset_type == "log_evidence"
+            and context.technique == "log_analysis"
+            and (
+                not context.log_evidence_snapshot_id
+                or not context.log_evidence_sha256
+                or context.log_evidence_manifest_version != 1
+                or context.log_analysis_version != LOG_ANALYSIS_VERSION
+                or context.log_ruleset_version != LOG_RULESET_VERSION
+                or context.technique != "log_analysis"
+                or context.action_class != "passive"
+            )
         ):
             raise ValueError("Execution context does not contain a valid log evidence binding.")
         if context.asset_type == "malware_evidence" and (
@@ -442,7 +448,9 @@ class DomainPostureAdapter:
 class RepositoryCodeAssessmentAdapter:
     """Read-only local assessment of one verified managed repository snapshot."""
 
-    def __init__(self, repository: SQLiteRepository, snapshots: RepositorySnapshotStore, bounds: ScanBounds) -> None:
+    def __init__(
+        self, repository: SQLiteRepository, snapshots: RepositorySnapshotStore, bounds: ScanBounds
+    ) -> None:
         self.repository = repository
         self.snapshots = snapshots
         self.bounds = bounds
@@ -473,7 +481,9 @@ class RepositoryCodeAssessmentAdapter:
             raise ValueError("Repository code assessment accepts no caller parameters.")
         return {}
 
-    def execute(self, context: ExecutionContext, parameters: dict[str, Any], control: AdapterControl) -> AdapterResult:
+    def execute(
+        self, context: ExecutionContext, parameters: dict[str, Any], control: AdapterControl
+    ) -> AdapterResult:
         self.validate_parameters(parameters)
         if (
             context.asset_type != "repository"
@@ -491,9 +501,12 @@ class RepositoryCodeAssessmentAdapter:
             or context.scan_bounds != self.bounds_document
         ):
             raise AdapterFailure("REPOSITORY_EXECUTION_CONTEXT_INVALID")
-        snapshot, path = self.snapshots.verify(context.organization_id, context.repository_snapshot_id)
+        snapshot, path = self.snapshots.verify(
+            context.organization_id, context.repository_snapshot_id
+        )
         if (
-            snapshot is None or path is None
+            snapshot is None
+            or path is None
             or snapshot["sha256"] != context.repository_snapshot_sha256
             or snapshot["manifest_version"] != context.repository_manifest_version
             or snapshot["scanner_version"] != context.scanner_version
@@ -504,23 +517,33 @@ class RepositoryCodeAssessmentAdapter:
                 repository_asset_bindings,
                 repository_attestations,
             )
-            binding = connection.execute(select(repository_asset_bindings).where(
-                repository_asset_bindings.c.id == context.repository_binding_id,
-                repository_asset_bindings.c.organization_id == context.organization_id,
-                repository_asset_bindings.c.engagement_id == context.engagement_id,
-                repository_asset_bindings.c.asset_id == context.asset_id,
-                repository_asset_bindings.c.snapshot_id == context.repository_snapshot_id,
-                repository_asset_bindings.c.snapshot_sha256 == context.repository_snapshot_sha256,
-            )).first()
-            attestation = connection.execute(select(repository_attestations).where(
-                repository_attestations.c.id == context.repository_attestation_id,
-                repository_attestations.c.organization_id == context.organization_id,
-                repository_attestations.c.engagement_id == context.engagement_id,
-                repository_attestations.c.asset_id == context.asset_id,
-                repository_attestations.c.authorization_id == context.authorization_id,
-                repository_attestations.c.scope_revision_id == context.scope_revision_id,
-            )).first()
-        if not binding or not attestation or attestation.attestation_version != context.repository_attestation_version:
+
+            binding = connection.execute(
+                select(repository_asset_bindings).where(
+                    repository_asset_bindings.c.id == context.repository_binding_id,
+                    repository_asset_bindings.c.organization_id == context.organization_id,
+                    repository_asset_bindings.c.engagement_id == context.engagement_id,
+                    repository_asset_bindings.c.asset_id == context.asset_id,
+                    repository_asset_bindings.c.snapshot_id == context.repository_snapshot_id,
+                    repository_asset_bindings.c.snapshot_sha256
+                    == context.repository_snapshot_sha256,
+                )
+            ).first()
+            attestation = connection.execute(
+                select(repository_attestations).where(
+                    repository_attestations.c.id == context.repository_attestation_id,
+                    repository_attestations.c.organization_id == context.organization_id,
+                    repository_attestations.c.engagement_id == context.engagement_id,
+                    repository_attestations.c.asset_id == context.asset_id,
+                    repository_attestations.c.authorization_id == context.authorization_id,
+                    repository_attestations.c.scope_revision_id == context.scope_revision_id,
+                )
+            ).first()
+        if (
+            not binding
+            or not attestation
+            or attestation.attestation_version != context.repository_attestation_version
+        ):
             raise AdapterFailure("REPOSITORY_BINDING_OR_ATTESTATION_INVALID")
 
         control.report_progress(5, "snapshot_verified")
@@ -531,9 +554,7 @@ class RepositoryCodeAssessmentAdapter:
         saved_findings: set[str] = set()
         raw_max_findings = getattr(control, "max_findings_per_job", None)
         max_findings = (
-            raw_max_findings
-            if isinstance(raw_max_findings, int) and raw_max_findings > 0
-            else None
+            raw_max_findings if isinstance(raw_max_findings, int) and raw_max_findings > 0 else None
         )
         findings_truncated = False
 
@@ -547,38 +568,58 @@ class RepositoryCodeAssessmentAdapter:
                             if max_findings is not None and len(saved_findings) >= max_findings:
                                 findings_truncated = True
                                 break
-                            self.repository.save("finding", finding.finding_id, finding.model_dump(mode="json"))
+                            self.repository.save(
+                                "finding", finding.finding_id, finding.model_dump(mode="json")
+                            )
                             saved_findings.add(finding.finding_id)
                     partial = Scan(
-                        scan_id=scan_id, target_id=target_id, scanner=SCANNER_VERSION,
-                        started_at=started, status="partial",
-                        finding_ids=sorted(saved_findings), verdict=ScanVerdict.NO_MATCHES_WITH_GAPS,
+                        scan_id=scan_id,
+                        target_id=target_id,
+                        scanner=SCANNER_VERSION,
+                        started_at=started,
+                        status="partial",
+                        finding_ids=sorted(saved_findings),
+                        verdict=ScanVerdict.NO_MATCHES_WITH_GAPS,
                     )
                     self.repository.save("scan", scan_id, partial.model_dump(mode="json"))
-            summary = {"status": "partial", "finding_count": len(saved_findings), "snapshot_sha256": context.repository_snapshot_sha256}
+            summary = {
+                "status": "partial",
+                "finding_count": len(saved_findings),
+                "snapshot_sha256": context.repository_snapshot_sha256,
+            }
             with self.repository.engine.begin() as connection:
-                changed = connection.execute(update(execution_jobs).where(
-                    execution_jobs.c.id == context.job_id,
-                    execution_jobs.c.organization_id == context.organization_id,
-                    execution_jobs.c.engagement_id == context.engagement_id,
-                    execution_jobs.c.status == "running",
-                ).values(scan_id=scan_id, result_summary=summary))
+                changed = connection.execute(
+                    update(execution_jobs)
+                    .where(
+                        execution_jobs.c.id == context.job_id,
+                        execution_jobs.c.organization_id == context.organization_id,
+                        execution_jobs.c.engagement_id == context.engagement_id,
+                        execution_jobs.c.status == "running",
+                    )
+                    .values(scan_id=scan_id, result_summary=summary)
+                )
                 if changed.rowcount:
-                    connection.execute(assessment_audit_events.insert().values(
-                        id=str(uuid4()),
-                        organization_id=context.organization_id,
-                        engagement_id=context.engagement_id,
-                        actor_user_id=context.requester_user_id,
-                        action="execution.partial_result_persisted",
-                        resource_type="execution_job", resource_id=context.job_id,
-                        decision="ALLOW", reason_code="PARTIAL_RESULT_PERSISTED",
-                        occurred_at=datetime.now(UTC).isoformat(),
-                        details={"scan_id": scan_id, "finding_count": len(saved_findings)},
-                    ))
+                    connection.execute(
+                        assessment_audit_events.insert().values(
+                            id=str(uuid4()),
+                            organization_id=context.organization_id,
+                            engagement_id=context.engagement_id,
+                            actor_user_id=context.requester_user_id,
+                            action="execution.partial_result_persisted",
+                            resource_type="execution_job",
+                            resource_id=context.job_id,
+                            decision="ALLOW",
+                            reason_code="PARTIAL_RESULT_PERSISTED",
+                            occurred_at=datetime.now(UTC).isoformat(),
+                            details={"scan_id": scan_id, "finding_count": len(saved_findings)},
+                        )
+                    )
 
         control.report_progress(10, "code_assessment_started")
         result = CodeScanService(
-            [BuiltinRuleScanner(self.bounds)], repository=None, bounds=self.bounds,
+            [BuiltinRuleScanner(self.bounds)],
+            repository=None,
+            bounds=self.bounds,
         ).scan(path, control=control, scan_id=scan_id, on_partial=persist_partial)
         control.check_cancelled()
         verified_snapshot, verified_path = self.snapshots.verify(
@@ -598,20 +639,38 @@ class RepositoryCodeAssessmentAdapter:
                         if max_findings is not None and len(saved_findings) >= max_findings:
                             findings_truncated = True
                             break
-                        self.repository.save("finding", finding.finding_id, finding.model_dump(mode="json"))
+                        self.repository.save(
+                            "finding", finding.finding_id, finding.model_dump(mode="json")
+                        )
                         saved_findings.add(finding.finding_id)
                 final_scan = Scan(
-                    scan_id=scan_id, target_id=target_id, scanner=SCANNER_VERSION,
-                    started_at=result.started_at, finished_at=result.finished_at,
-                    status="partial" if (result.failures or findings_truncated or (result.coverage and result.coverage.gaps)) else "complete",
-                    finding_ids=sorted(saved_findings), failures=result.failures,
-                    coverage=result.coverage, code_assessment=result.code_assessment,
+                    scan_id=scan_id,
+                    target_id=target_id,
+                    scanner=SCANNER_VERSION,
+                    started_at=result.started_at,
+                    finished_at=result.finished_at,
+                    status="partial"
+                    if (
+                        result.failures
+                        or findings_truncated
+                        or (result.coverage and result.coverage.gaps)
+                    )
+                    else "complete",
+                    finding_ids=sorted(saved_findings),
+                    failures=result.failures,
+                    coverage=result.coverage,
+                    code_assessment=result.code_assessment,
                     verdict=result.verdict,
-                    scan_options={"repository_snapshot_sha256": context.repository_snapshot_sha256 or "", "offline_advisory_snapshot": "bundled"},
+                    scan_options={
+                        "repository_snapshot_sha256": context.repository_snapshot_sha256 or "",
+                        "offline_advisory_snapshot": "bundled",
+                    },
                 )
                 self.repository.save("scan", scan_id, final_scan.model_dump(mode="json"))
         control.report_progress(95, "results_persisted")
-        partial = result.failures or findings_truncated or bool(result.coverage and result.coverage.gaps)
+        partial = (
+            result.failures or findings_truncated or bool(result.coverage and result.coverage.gaps)
+        )
         return AdapterResult(
             adapter_id=self.capabilities.adapter_id,
             status="partial" if partial else "complete",
@@ -673,11 +732,14 @@ class GovernedLogAnalysisAdapter:
         ):
             raise AdapterFailure("LOG_EXECUTION_CONTEXT_INVALID")
         snapshot, root = self.evidence.verify(
-            context.organization_id, context.engagement_id, context.asset_id,
+            context.organization_id,
+            context.engagement_id,
+            context.asset_id,
             context.log_evidence_snapshot_id,
         )
         if (
-            snapshot is None or root is None
+            snapshot is None
+            or root is None
             or snapshot["sha256"] != context.log_evidence_sha256
             or snapshot["manifest_version"] != context.log_evidence_manifest_version
             or snapshot["source_format"] != context.log_evidence_source_format
@@ -698,11 +760,14 @@ class GovernedLogAnalysisAdapter:
             raise AdapterFailure("LOG_ANALYSIS_FAILED") from exc
         control.check_cancelled()
         verified, verified_root = self.evidence.verify(
-            context.organization_id, context.engagement_id, context.asset_id,
+            context.organization_id,
+            context.engagement_id,
+            context.asset_id,
             context.log_evidence_snapshot_id,
         )
         if (
-            verified is None or verified_root != root
+            verified is None
+            or verified_root != root
             or verified["sha256"] != context.log_evidence_sha256
         ):
             raise AdapterFailure("LOG_EVIDENCE_CHANGED_DURING_ANALYSIS")
@@ -847,7 +912,9 @@ class GovernedMalwareStaticTriageAdapter:
                 "verdict_caveat": result.verdict_caveat,
                 "indicator_count": result.indicator_count,
                 "warning_count": len(result.warnings),
-                "interpretation": "Static heuristic observations are not proof of maliciousness or safety.",
+                "interpretation": (
+                    "Static heuristic observations are not proof of maliciousness or safety."
+                ),
             },
         )
 

@@ -13,9 +13,7 @@ from chinescan.core.config.settings import Settings
 from chinescan.web.app import create_app
 
 
-def test_projects_cli_add_and_api_list_share_core_state(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_projects_cli_add_and_api_list_share_core_state(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "approved"
     (root / "logs").mkdir(parents=True)
     private = tmp_path / "private"

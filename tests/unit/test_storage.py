@@ -53,14 +53,16 @@ def test_legacy_initial_schema_is_stamped_without_losing_records(tmp_path: Path)
         with pytest.raises(StorageError, match="authorized organization context"):
             repository.get("finding", "one")
         with repository.engine.connect() as connection:
-            assert json.loads(connection.exec_driver_sql(
-                "SELECT payload FROM records WHERE record_type='finding' AND record_id='one'"
-            ).scalar_one()) == {"title": "preserve me"}
+            assert json.loads(
+                connection.exec_driver_sql(
+                    "SELECT payload FROM records WHERE record_type='finding' AND record_id='one'"
+                ).scalar_one()
+            ) == {"title": "preserve me"}
             from alembic.runtime.migration import MigrationContext
 
             assert (
                 MigrationContext.configure(connection).get_current_revision()
-                    == "0015_durable_job_leases_actions"
+                == "0015_durable_job_leases_actions"
             )
     finally:
         repository.close()

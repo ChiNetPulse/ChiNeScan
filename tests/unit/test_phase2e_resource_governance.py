@@ -143,6 +143,7 @@ def test_per_org_global_quotas_concurrent_race_and_approval_preservation(tmp_pat
             per_org_queued_limit=2,
             global_queued_limit=3,
         )
+
         class SensitiveAdapter:
             capabilities = AdapterCapabilities(
                 adapter_id="test.sensitive-2e",
@@ -254,6 +255,7 @@ def test_fair_scheduling_and_workload_concurrency_limits(tmp_path: Path) -> None
             global_queued_limit=6,
             workload_concurrency_limits={"domain": 2},
         )
+
         class SensitiveAdapter:
             capabilities = AdapterCapabilities(
                 adapter_id="test.sensitive-2e",
@@ -296,9 +298,15 @@ def test_fair_scheduling_and_workload_concurrency_limits(tmp_path: Path) -> None
             "f2.example.test",
         )
 
-        j1 = gov.create_domain_job(u1, o1, e1, a1, approval_id=None, idempotency_key="fair-org1-000001")
-        j2 = gov.create_domain_job(u1, o1, e1, a1, approval_id=None, idempotency_key="fair-org1-000002")
-        j3 = gov.create_domain_job(u2, o2, e2, a2, approval_id=None, idempotency_key="fair-org2-000001")
+        j1 = gov.create_domain_job(
+            u1, o1, e1, a1, approval_id=None, idempotency_key="fair-org1-000001"
+        )
+        j2 = gov.create_domain_job(
+            u1, o1, e1, a1, approval_id=None, idempotency_key="fair-org1-000002"
+        )
+        j3 = gov.create_domain_job(
+            u2, o2, e2, a2, approval_id=None, idempotency_key="fair-org2-000001"
+        )
 
         # First claim takes j1 (org 1)
         c1 = gov.claim_next_job("worker-1")
@@ -363,7 +371,9 @@ def test_deadlines_before_claim_and_during_execution(tmp_path: Path) -> None:
                 for _ in range(40):
                     control.check_cancelled()
                     time.sleep(0.05)
-                return AdapterResult(adapter_id="test.slow-inprogress", status="complete", summary={})
+                return AdapterResult(
+                    adapter_id="test.slow-inprogress", status="complete", summary={}
+                )
 
         # 1. Queue wait expired before claim -> EXECUTION_QUEUE_WAIT_EXPIRED
         gov = ExecutionGovernanceService(
@@ -379,7 +389,9 @@ def test_deadlines_before_claim_and_during_execution(tmp_path: Path) -> None:
             "Dead One",
             "d1.example.test",
         )
-        stale_job = gov.create_domain_job(u1, o1, e1, a1, approval_id=None, idempotency_key="dead-queue-000001")
+        stale_job = gov.create_domain_job(
+            u1, o1, e1, a1, approval_id=None, idempotency_key="dead-queue-000001"
+        )
         old_created = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
         with repo.engine.begin() as conn:
             conn.execute(
@@ -398,7 +410,9 @@ def test_deadlines_before_claim_and_during_execution(tmp_path: Path) -> None:
         assert row.error_code == "EXECUTION_QUEUE_WAIT_EXPIRED"
 
         # 2. Deadline exceeded before external dispatch -> failed (EXECUTION_DEADLINE_EXCEEDED)
-        j_pre = gov.create_domain_job(u1, o1, e1, a1, approval_id=None, idempotency_key="dead-exec-0000001")
+        j_pre = gov.create_domain_job(
+            u1, o1, e1, a1, approval_id=None, idempotency_key="dead-exec-0000001"
+        )
         worker1 = GovernedDomainWorker(
             repo, gov, AdapterRegistry((SlowPassiveAdapter(),)), heartbeat_interval_seconds=0.1
         )
@@ -507,7 +521,9 @@ def test_supervised_subprocess_limits_timeout_cancellation_and_tree_cleanup(tmp_
 def test_quota_and_diagnostics_tenant_isolation_and_auth(tmp_path: Path) -> None:
     cred = tmp_path / "operator.json"
     create_operator(cred, "operator@example.test", "Operator-Secure-Passphrase-99!")
-    app = create_app(tmp_path / "web.sqlite3", cred, serve_frontend=False, start_governed_worker=False)
+    app = create_app(
+        tmp_path / "web.sqlite3", cred, serve_frontend=False, start_governed_worker=False
+    )
     try:
         orgs: OrganizationService = app.state.organization_service
         sec: EngagementSecurityService = app.state.engagement_security_service

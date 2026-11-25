@@ -15,7 +15,6 @@ from chinescan.core.execution_adapters import (
     AdapterCapabilities,
     AdapterRegistry,
     AdapterResult,
-    RepositoryCodeAssessmentAdapter,
 )
 from chinescan.core.execution_governance import (
     ExecutionGovernanceService,
@@ -25,7 +24,6 @@ from chinescan.core.organizations import OrganizationService
 from chinescan.core.repository_assessment import (
     ATTESTATION_TEXT,
     REPOSITORY_TECHNIQUE,
-    RepositorySnapshotStore,
 )
 from chinescan.core.resource_governance import ResourceLimitError, ResourceLimits
 from chinescan.core.storage.sqlite import (
@@ -35,7 +33,9 @@ from chinescan.core.storage.sqlite import (
 )
 
 
-def _seed(tmp_path: Path, *, limits: ResourceLimits | None = None, registry: AdapterRegistry | None = None):
+def _seed(
+    tmp_path: Path, *, limits: ResourceLimits | None = None, registry: AdapterRegistry | None = None
+):
     repo = SQLiteRepository(tmp_path / "closure.sqlite3")
     orgs = OrganizationService(repo)
     sec = EngagementSecurityService(repo, orgs)
@@ -174,7 +174,11 @@ def test_worker_shutdown_preserves_lease_when_thread_stuck_and_fences_stale_work
         )
         assert (
             gov.authorize_external_action(
-                job["id"], "app.example.test", "service_fingerprint", worker_id="stuck-w", lease_generation=1
+                job["id"],
+                "app.example.test",
+                "service_fingerprint",
+                worker_id="stuck-w",
+                lease_generation=1,
             )
             is False
         )
@@ -198,13 +202,24 @@ def test_durable_resource_accounting_release_and_concurrent_recovery(tmp_path: P
 
         # Complete j1 -> releases 1 slot
         c1 = gov.claim_job(j1["id"], "w-acc")
-        assert c1 is not None and gov.revalidate_job(j1["id"], worker_id="w-acc", lease_generation=1)
+        assert c1 is not None and gov.revalidate_job(
+            j1["id"], worker_id="w-acc", lease_generation=1
+        )
         assert gov.finish_job(j1["id"], scan_id=None, worker_id="w-acc", lease_generation=1)
 
         # Fail j2 -> releases 2nd slot
         c2 = gov.claim_job(j2["id"], "w-acc")
-        assert c2 is not None and gov.revalidate_job(j2["id"], worker_id="w-acc", lease_generation=1)
-        assert gov.finish_job(j2["id"], scan_id=None, failed=True, error_code="E", worker_id="w-acc", lease_generation=1)
+        assert c2 is not None and gov.revalidate_job(
+            j2["id"], worker_id="w-acc", lease_generation=1
+        )
+        assert gov.finish_job(
+            j2["id"],
+            scan_id=None,
+            failed=True,
+            error_code="E",
+            worker_id="w-acc",
+            lease_generation=1,
+        )
 
         # Cancel j3 safely before execution -> releases slot
         j3 = gov.create_domain_job(uid, oid, eid, aid, approval_id=None, idempotency_key="acc-0003")

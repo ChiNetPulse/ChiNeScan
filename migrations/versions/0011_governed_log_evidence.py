@@ -52,13 +52,14 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         ),
         sa.UniqueConstraint(
-            "id", "organization_id", "engagement_id", "asset_id",
+            "id",
+            "organization_id",
+            "engagement_id",
+            "asset_id",
             name="uq_log_snapshot_scope",
         ),
         sa.UniqueConstraint("asset_id", name="uq_log_snapshot_asset"),
-        sa.CheckConstraint(
-            "size_bytes BETWEEN 0 AND 250000000", name="ck_log_snapshot_size"
-        ),
+        sa.CheckConstraint("size_bytes BETWEEN 0 AND 250000000", name="ck_log_snapshot_size"),
         sa.CheckConstraint("file_count BETWEEN 1 AND 10000", name="ck_log_snapshot_file_count"),
         sa.CheckConstraint("manifest_version = 1", name="ck_log_manifest_version"),
         sa.CheckConstraint(
@@ -141,9 +142,9 @@ def downgrade() -> None:
     bind = op.get_bind()
     if bind.execute(sa.text("SELECT COUNT(*) FROM log_evidence_snapshots")).scalar_one():
         raise RuntimeError("Log evidence history exists; use a forward migration to preserve it.")
-    jobs = bind.execute(sa.text(
-        "SELECT COUNT(*) FROM execution_jobs WHERE log_evidence_snapshot_id IS NOT NULL"
-    )).scalar_one()
+    jobs = bind.execute(
+        sa.text("SELECT COUNT(*) FROM execution_jobs WHERE log_evidence_snapshot_id IS NOT NULL")
+    ).scalar_one()
     if jobs:
         raise RuntimeError("Governed log jobs exist; use a forward migration to preserve them.")
     op.execute('DROP TRIGGER IF EXISTS "log_evidence_snapshot_metadata_immutable"')

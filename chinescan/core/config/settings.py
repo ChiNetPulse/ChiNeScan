@@ -31,7 +31,9 @@ class Settings(BaseSettings):
     database_path: Path = Field(default_factory=default_data_path)
     reports_dir: Path = Field(default_factory=default_reports_path)
     malware_managed_directory: Path | None = None
-    malware_evidence_org_quota_bytes: int = Field(default=1_073_741_824, ge=67_108_864, le=20_000_000_000)
+    malware_evidence_org_quota_bytes: int = Field(
+        default=1_073_741_824, ge=67_108_864, le=20_000_000_000
+    )
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     api_token: str | None = Field(default=None, repr=False)
     session_absolute_ttl_seconds: int = Field(
@@ -94,9 +96,7 @@ class Settings(BaseSettings):
         default=10_737_418_240, ge=1, le=107_374_182_400
     )
     log_evidence_max_bytes: int = Field(default=250_000_000, ge=1, le=250_000_000)
-    log_evidence_org_quota_bytes: int = Field(
-        default=2_000_000_000, ge=1, le=20_000_000_000
-    )
+    log_evidence_org_quota_bytes: int = Field(default=2_000_000_000, ge=1, le=20_000_000_000)
     malware_known_bad_hashes: Path | None = None
     malware_rules_directory: Path | None = None
     data_source: Literal["real", "simulation"] = "real"

@@ -1207,7 +1207,8 @@ class EngagementSecurityService:
                 select(repository_asset_bindings).where(
                     repository_asset_bindings.c.organization_id == organization_id,
                     repository_asset_bindings.c.engagement_id == engagement_id,
-                    repository_asset_bindings.c.asset_id == self._asset_id_for_target(
+                    repository_asset_bindings.c.asset_id
+                    == self._asset_id_for_target(
                         connection, organization_id, engagement_id, normalized
                     ),
                     repository_asset_bindings.c.snapshot_sha256.is_not(None),
@@ -1253,14 +1254,18 @@ class EngagementSecurityService:
                     engagement_assets.c.target == normalized,
                 )
             ).scalar_one_or_none()
-            snapshot = connection.execute(
-                select(log_evidence_snapshots.c.id).where(
-                    log_evidence_snapshots.c.asset_id == evidence_asset_id,
-                    log_evidence_snapshots.c.organization_id == organization_id,
-                    log_evidence_snapshots.c.engagement_id == engagement_id,
-                    log_evidence_snapshots.c.status == "available",
-                )
-            ).first() if evidence_asset_id else None
+            snapshot = (
+                connection.execute(
+                    select(log_evidence_snapshots.c.id).where(
+                        log_evidence_snapshots.c.asset_id == evidence_asset_id,
+                        log_evidence_snapshots.c.organization_id == organization_id,
+                        log_evidence_snapshots.c.engagement_id == engagement_id,
+                        log_evidence_snapshots.c.status == "available",
+                    )
+                ).first()
+                if evidence_asset_id
+                else None
+            )
             if not snapshot:
                 return {
                     **base,
@@ -1274,14 +1279,18 @@ class EngagementSecurityService:
             evidence_asset_id = self._asset_id_for_target(
                 connection, organization_id, engagement_id, normalized
             )
-            snapshot = connection.execute(
-                select(malware_evidence_snapshots.c.id).where(
-                    malware_evidence_snapshots.c.asset_id == evidence_asset_id,
-                    malware_evidence_snapshots.c.organization_id == organization_id,
-                    malware_evidence_snapshots.c.engagement_id == engagement_id,
-                    malware_evidence_snapshots.c.status == "available",
-                )
-            ).first() if evidence_asset_id else None
+            snapshot = (
+                connection.execute(
+                    select(malware_evidence_snapshots.c.id).where(
+                        malware_evidence_snapshots.c.asset_id == evidence_asset_id,
+                        malware_evidence_snapshots.c.organization_id == organization_id,
+                        malware_evidence_snapshots.c.engagement_id == engagement_id,
+                        malware_evidence_snapshots.c.status == "available",
+                    )
+                ).first()
+                if evidence_asset_id
+                else None
+            )
             if not snapshot:
                 return {
                     **base,
@@ -1392,8 +1401,7 @@ class EngagementSecurityService:
             connection, request["approver_user_id"], organization_id, engagement_id
         )
         if approver_role not in {"owner", "admin"} and not (
-            approver_role == "member"
-            and approver_assignments.intersection({"lead", "reviewer"})
+            approver_role == "member" and approver_assignments.intersection({"lead", "reviewer"})
         ):
             return {
                 **base,
@@ -1498,8 +1506,7 @@ class EngagementSecurityService:
                 # Keep an organization-scoped audit event, but never bind it to the
                 # untrusted engagement ID or persist that ID in clear text.
                 audit_scope_exists = connection.execute(
-                    select(organization_memberships.c.id)
-                    .where(
+                    select(organization_memberships.c.id).where(
                         organization_memberships.c.organization_id == organization_id,
                         organization_memberships.c.user_id == user_id,
                     )
@@ -1677,8 +1684,7 @@ class EngagementSecurityService:
                     connection, approver_id, organization_id, engagement_id
                 )
                 if role not in {"owner", "admin"} and not (
-                    role == "member"
-                    and assignment_roles.intersection({"lead", "reviewer"})
+                    role == "member" and assignment_roles.intersection({"lead", "reviewer"})
                 ):
                     connection.rollback()
                     return None

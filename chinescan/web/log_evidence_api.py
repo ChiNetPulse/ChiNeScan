@@ -120,9 +120,7 @@ def create_log_evidence_router(
             raise HTTPException(status_code=404, detail="Engagement evidence is unavailable.")
         return result
 
-    @router.post(
-        "/{asset_id}/executions", status_code=202, dependencies=[Depends(require_csrf)]
-    )
+    @router.post("/{asset_id}/executions", status_code=202, dependencies=[Depends(require_csrf)])
     def create_execution(
         organization_id: str,
         engagement_id: str,
@@ -134,8 +132,12 @@ def create_log_evidence_router(
             raise HTTPException(status_code=404, detail="Engagement evidence is unavailable.")
         try:
             result = governance.create_governed_job(
-                principal(session), organization_id, engagement_id, asset_id,
-                technique="log_analysis", approval_id=None,
+                principal(session),
+                organization_id,
+                engagement_id,
+                asset_id,
+                technique="log_analysis",
+                approval_id=None,
                 idempotency_key=payload.idempotency_key,
             )
         except OverflowError:
@@ -173,8 +175,12 @@ def create_log_evidence_router(
     ) -> Response:
         try:
             placed = store.place_hold_for_asset(
-                principal(session), organization_id, engagement_id, asset_id,
-                payload.reason, security,
+                principal(session),
+                organization_id,
+                engagement_id,
+                asset_id,
+                payload.reason,
+                security,
             )
         except LogEvidenceError:
             raise HTTPException(

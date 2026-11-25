@@ -71,8 +71,6 @@ SCAN_DETAIL_WITHHELD_FIELD_REASONS = {
 }
 
 
-
-
 def _bind_operator_repository(repository: SQLiteRepository, credential: Path) -> None:
     from chinescan.core.organizations import OrganizationService
     from chinescan.web.auth import operator_auth_epoch, operator_email, operator_identity_id

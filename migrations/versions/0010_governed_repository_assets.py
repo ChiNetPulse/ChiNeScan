@@ -36,12 +36,19 @@ def upgrade() -> None:
         sa.Column("deleted_at", sa.String(40)),
         sa.ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="RESTRICT"),
         sa.UniqueConstraint("id", "organization_id", name="uq_repository_snapshot_id_org"),
-        sa.CheckConstraint("size_bytes BETWEEN 0 AND 10737418240", name="ck_repository_snapshot_size"),
+        sa.CheckConstraint(
+            "size_bytes BETWEEN 0 AND 10737418240", name="ck_repository_snapshot_size"
+        ),
         sa.CheckConstraint("manifest_version > 0", name="ck_repository_manifest_version"),
-        sa.CheckConstraint("status IN ('available','missing','corrupt','deleting','deleted')", name="ck_repository_snapshot_status"),
+        sa.CheckConstraint(
+            "status IN ('available','missing','corrupt','deleting','deleted')",
+            name="ck_repository_snapshot_status",
+        ),
         sa.CheckConstraint("legal_hold IN (0,1)", name="ck_repository_snapshot_hold"),
     )
-    op.create_index("ix_repository_snapshot_org_status", "repository_snapshots", ["organization_id", "status"])
+    op.create_index(
+        "ix_repository_snapshot_org_status", "repository_snapshots", ["organization_id", "status"]
+    )
     op.create_table(
         "repository_asset_bindings",
         sa.Column("id", sa.String(36), primary_key=True),
@@ -55,16 +62,38 @@ def upgrade() -> None:
         sa.Column("created_by", sa.String(36), nullable=False),
         sa.Column("created_at", sa.String(40), nullable=False),
         sa.Column("display_label", sa.String(120), nullable=False),
-        sa.ForeignKeyConstraint(["asset_id", "organization_id", "engagement_id"], [
-            "engagement_assets.id", "engagement_assets.organization_id", "engagement_assets.engagement_id"
-        ], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["snapshot_id", "organization_id"], ["repository_snapshots.id", "repository_snapshots.organization_id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["organization_id", "created_by"], ["organization_memberships.organization_id", "organization_memberships.user_id"], ondelete="RESTRICT"),
+        sa.ForeignKeyConstraint(
+            ["asset_id", "organization_id", "engagement_id"],
+            [
+                "engagement_assets.id",
+                "engagement_assets.organization_id",
+                "engagement_assets.engagement_id",
+            ],
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["snapshot_id", "organization_id"],
+            ["repository_snapshots.id", "repository_snapshots.organization_id"],
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["organization_id", "created_by"],
+            ["organization_memberships.organization_id", "organization_memberships.user_id"],
+            ondelete="RESTRICT",
+        ),
         sa.UniqueConstraint("asset_id", name="uq_repository_binding_asset"),
-        sa.UniqueConstraint("id", "organization_id", "engagement_id", "asset_id", name="uq_repository_binding_scope"),
-        sa.CheckConstraint("source_kind = 'local_project_registry'", name="ck_repository_source_kind"),
+        sa.UniqueConstraint(
+            "id", "organization_id", "engagement_id", "asset_id", name="uq_repository_binding_scope"
+        ),
+        sa.CheckConstraint(
+            "source_kind = 'local_project_registry'", name="ck_repository_source_kind"
+        ),
     )
-    op.create_index("ix_repository_binding_tenant", "repository_asset_bindings", ["organization_id", "engagement_id"])
+    op.create_index(
+        "ix_repository_binding_tenant",
+        "repository_asset_bindings",
+        ["organization_id", "engagement_id"],
+    )
     op.create_table(
         "repository_attestations",
         sa.Column("id", sa.String(36), primary_key=True),
@@ -77,16 +106,46 @@ def upgrade() -> None:
         sa.Column("attestation_version", sa.String(40), nullable=False),
         sa.Column("attestation_text", sa.String(1000), nullable=False),
         sa.Column("created_at", sa.String(40), nullable=False),
-        sa.ForeignKeyConstraint(["asset_id", "organization_id", "engagement_id"], [
-            "engagement_assets.id", "engagement_assets.organization_id", "engagement_assets.engagement_id"
-        ], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["authorization_id", "organization_id"], ["authorization_records.id", "authorization_records.organization_id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["scope_revision_id", "organization_id"], ["scope_revisions.id", "scope_revisions.organization_id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["organization_id", "actor_user_id"], ["organization_memberships.organization_id", "organization_memberships.user_id"], ondelete="RESTRICT"),
+        sa.ForeignKeyConstraint(
+            ["asset_id", "organization_id", "engagement_id"],
+            [
+                "engagement_assets.id",
+                "engagement_assets.organization_id",
+                "engagement_assets.engagement_id",
+            ],
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["authorization_id", "organization_id"],
+            ["authorization_records.id", "authorization_records.organization_id"],
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["scope_revision_id", "organization_id"],
+            ["scope_revisions.id", "scope_revisions.organization_id"],
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["organization_id", "actor_user_id"],
+            ["organization_memberships.organization_id", "organization_memberships.user_id"],
+            ondelete="RESTRICT",
+        ),
         sa.UniqueConstraint("id", "organization_id", name="uq_repository_attestation_id_org"),
-        sa.UniqueConstraint("id", "organization_id", "engagement_id", "asset_id", "authorization_id", "scope_revision_id", name="uq_repository_attestation_binding"),
+        sa.UniqueConstraint(
+            "id",
+            "organization_id",
+            "engagement_id",
+            "asset_id",
+            "authorization_id",
+            "scope_revision_id",
+            name="uq_repository_attestation_binding",
+        ),
     )
-    op.create_index("ix_repository_attestation_asset", "repository_attestations", ["organization_id", "engagement_id", "asset_id"])
+    op.create_index(
+        "ix_repository_attestation_asset",
+        "repository_attestations",
+        ["organization_id", "engagement_id", "asset_id"],
+    )
     op.create_table(
         "repository_quota_reservations",
         sa.Column("id", sa.String(36), primary_key=True),
@@ -98,15 +157,24 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
         sa.CheckConstraint("reserved_bytes >= 0", name="ck_repository_reservation_bytes"),
     )
-    op.create_index("ix_repository_reservation_org", "repository_quota_reservations", ["organization_id"])
+    op.create_index(
+        "ix_repository_reservation_org", "repository_quota_reservations", ["organization_id"]
+    )
     for table in ("repository_asset_bindings", "repository_attestations"):
         op.execute(f"""CREATE TRIGGER {table}_no_update BEFORE UPDATE ON {table}
-        BEGIN SELECT RAISE(ABORT, 'repository binding and attestation records are immutable'); END""")
+        BEGIN SELECT RAISE(
+            ABORT, 'repository binding and attestation records are immutable'
+        ); END""")
         op.execute(f"""CREATE TRIGGER {table}_no_delete BEFORE DELETE ON {table}
-        BEGIN SELECT RAISE(ABORT, 'repository binding and attestation records are append-only'); END""")
-    op.execute("""CREATE TRIGGER repository_snapshot_metadata_immutable BEFORE UPDATE ON repository_snapshots
-        WHEN NEW.sha256 != OLD.sha256 OR NEW.size_bytes != OLD.size_bytes OR NEW.manifest != OLD.manifest
-          OR NEW.manifest_version != OLD.manifest_version OR NEW.scanner_version != OLD.scanner_version
+        BEGIN SELECT RAISE(
+            ABORT, 'repository binding and attestation records are append-only'
+        ); END""")
+    op.execute("""CREATE TRIGGER repository_snapshot_metadata_immutable
+        BEFORE UPDATE ON repository_snapshots
+        WHEN NEW.sha256 != OLD.sha256 OR NEW.size_bytes != OLD.size_bytes
+          OR NEW.manifest != OLD.manifest
+          OR NEW.manifest_version != OLD.manifest_version
+          OR NEW.scanner_version != OLD.scanner_version
           OR NEW.created_at != OLD.created_at
         BEGIN SELECT RAISE(ABORT, 'repository snapshot metadata is immutable'); END""")
     op.add_column("execution_jobs", sa.Column("policy_request_digest", sa.String(64)))
@@ -126,17 +194,25 @@ def upgrade() -> None:
     op.execute("PRAGMA defer_foreign_keys=ON")
     with op.batch_alter_table("execution_jobs", recreate="always") as batch:
         batch.create_foreign_key(
-            "fk_job_repository_binding_scope", "repository_asset_bindings",
+            "fk_job_repository_binding_scope",
+            "repository_asset_bindings",
             ["repository_binding_id", "organization_id", "engagement_id", "asset_id"],
-            ["id", "organization_id", "engagement_id", "asset_id"], ondelete="RESTRICT",
+            ["id", "organization_id", "engagement_id", "asset_id"],
+            ondelete="RESTRICT",
         )
         batch.create_foreign_key(
-            "fk_job_repository_snapshot_scope", "repository_snapshots",
-            ["repository_snapshot_id", "organization_id"], ["id", "organization_id"], ondelete="RESTRICT",
+            "fk_job_repository_snapshot_scope",
+            "repository_snapshots",
+            ["repository_snapshot_id", "organization_id"],
+            ["id", "organization_id"],
+            ondelete="RESTRICT",
         )
         batch.create_foreign_key(
-            "fk_job_repository_attestation_scope", "repository_attestations",
-            ["repository_attestation_id", "organization_id"], ["id", "organization_id"], ondelete="RESTRICT",
+            "fk_job_repository_attestation_scope",
+            "repository_attestations",
+            ["repository_attestation_id", "organization_id"],
+            ["id", "organization_id"],
+            ondelete="RESTRICT",
         )
     op.execute("""
         CREATE TRIGGER execution_job_auth_document_immutable
@@ -160,10 +236,19 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
-    for table in ("repository_asset_bindings", "repository_attestations", "repository_snapshots", "repository_quota_reservations"):
+    for table in (
+        "repository_asset_bindings",
+        "repository_attestations",
+        "repository_snapshots",
+        "repository_quota_reservations",
+    ):
         if bind.execute(sa.text(f'SELECT COUNT(*) FROM "{table}"')).scalar_one():
-            raise RuntimeError("Repository snapshot history exists; use a forward migration to preserve it.")
-    if bind.execute(sa.text("SELECT COUNT(*) FROM engagement_assets WHERE asset_type='repository'")).scalar_one():
+            raise RuntimeError(
+                "Repository snapshot history exists; use a forward migration to preserve it."
+            )
+    if bind.execute(
+        sa.text("SELECT COUNT(*) FROM engagement_assets WHERE asset_type='repository'")
+    ).scalar_one():
         raise RuntimeError("Repository assets exist; use a forward migration to preserve them.")
     op.execute("PRAGMA defer_foreign_keys=ON")
     op.execute('DROP TRIGGER IF EXISTS "execution_result_provenance_scope_guard"')
@@ -173,10 +258,18 @@ def downgrade() -> None:
         batch.drop_constraint("fk_job_repository_snapshot_scope", type_="foreignkey")
         batch.drop_constraint("fk_job_repository_binding_scope", type_="foreignkey")
         for column in (
-        "exclusion_policy_version", "adapter_version", "adapter_id",
-        "repository_attestation_version", "repository_scan_bounds", "repository_scanner_version", "repository_attestation_id",
-        "repository_manifest_version", "repository_snapshot_sha256", "repository_snapshot_id",
-        "repository_binding_id", "policy_request_digest",
+            "exclusion_policy_version",
+            "adapter_version",
+            "adapter_id",
+            "repository_attestation_version",
+            "repository_scan_bounds",
+            "repository_scanner_version",
+            "repository_attestation_id",
+            "repository_manifest_version",
+            "repository_snapshot_sha256",
+            "repository_snapshot_id",
+            "repository_binding_id",
+            "policy_request_digest",
         ):
             batch.drop_column(column)
     op.execute("""
@@ -198,8 +291,10 @@ def downgrade() -> None:
         BEGIN SELECT RAISE(ABORT, 'execution provenance scope mismatch'); END
     """)
     for trigger in (
-        "repository_asset_bindings_no_update", "repository_asset_bindings_no_delete",
-        "repository_attestations_no_update", "repository_attestations_no_delete",
+        "repository_asset_bindings_no_update",
+        "repository_asset_bindings_no_delete",
+        "repository_attestations_no_update",
+        "repository_attestations_no_delete",
         "repository_snapshot_metadata_immutable",
     ):
         op.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')

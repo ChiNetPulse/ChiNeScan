@@ -104,6 +104,8 @@ def test_diagnostics_requires_local_operator_identity(tmp_path: Path) -> None:
             assert client.get("/api/diagnostics").status_code == 404
     finally:
         application.state.repository.close()
+
+
 def _check_fixture(state: Literal["PASS", "WARN", "FAIL"]) -> dict[str, str]:
     return {
         "id": "fixture-check",

@@ -405,6 +405,7 @@ def create_organization_router(
         return service.migration_report() or {"status": "not_available"}
 
     if identity is not None:
+
         @router.get("/organizations/{organization_id}/invitations")
         def list_invitations(
             organization_id: str, session: Session = Depends(current_session)
@@ -447,9 +448,7 @@ def create_organization_router(
             invitation_id: str,
             session: Session = Depends(current_session),
         ) -> dict[str, str]:
-            if not identity.revoke_invitation(
-                _principal(session), organization_id, invitation_id
-            ):
+            if not identity.revoke_invitation(_principal(session), organization_id, invitation_id):
                 raise _not_found()
             return {"status": "revoked"}
 

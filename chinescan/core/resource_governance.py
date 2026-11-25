@@ -92,32 +92,24 @@ class ResourceLimits(BaseModel):
     global_active_limit: int = Field(default=8, ge=1, le=CEILING_GLOBAL_ACTIVE_LIMIT)
     per_org_queued_limit: int = Field(default=4, ge=1, le=CEILING_PER_ORG_QUEUED_LIMIT)
     global_queued_limit: int = Field(default=16, ge=1, le=CEILING_GLOBAL_QUEUED_LIMIT)
-    workload_concurrency_limits: dict[str, int] = Field(
-        default_factory=default_workload_limits
-    )
+    workload_concurrency_limits: dict[str, int] = Field(default_factory=default_workload_limits)
 
     # Deadline and timeout bounds (seconds)
     default_job_deadline_seconds: float = Field(
         default=300.0, ge=1.0, le=CEILING_JOB_DEADLINE_SECONDS
     )
-    max_queue_wait_seconds: float = Field(
-        default=900.0, ge=1.0, le=CEILING_QUEUE_WAIT_SECONDS
-    )
+    max_queue_wait_seconds: float = Field(default=900.0, ge=1.0, le=CEILING_QUEUE_WAIT_SECONDS)
     default_operation_timeout_seconds: float = Field(
         default=60.0, ge=0.5, le=CEILING_OPERATION_TIMEOUT_SECONDS
     )
-    shutdown_grace_seconds: float = Field(
-        default=5.0, ge=0.1, le=CEILING_SHUTDOWN_GRACE_SECONDS
-    )
+    shutdown_grace_seconds: float = Field(default=5.0, ge=0.1, le=CEILING_SHUTDOWN_GRACE_SECONDS)
 
     # Input, archive, parser, and result bounds
     max_files: int = Field(default=50_000, ge=1, le=CEILING_MAX_FILES)
     max_total_bytes: int = Field(default=1_073_741_824, ge=1024, le=CEILING_MAX_TOTAL_BYTES)
     max_file_bytes: int = Field(default=16_777_216, ge=1024, le=CEILING_MAX_FILE_BYTES)
     max_depth: int = Field(default=32, ge=1, le=CEILING_MAX_DEPTH)
-    archive_max_entries: int = Field(
-        default=10_000, ge=1, le=CEILING_ARCHIVE_MAX_ENTRIES
-    )
+    archive_max_entries: int = Field(default=10_000, ge=1, le=CEILING_ARCHIVE_MAX_ENTRIES)
     archive_max_nesting: int = Field(default=4, ge=1, le=CEILING_ARCHIVE_MAX_NESTING)
     archive_max_decompressed_bytes: int = Field(
         default=268_435_456, ge=1024, le=CEILING_ARCHIVE_MAX_DECOMPRESSED_BYTES
@@ -125,9 +117,7 @@ class ResourceLimits(BaseModel):
     parser_max_output_bytes: int = Field(
         default=4_194_304, ge=1024, le=CEILING_PARSER_MAX_OUTPUT_BYTES
     )
-    max_findings_per_job: int = Field(
-        default=5_000, ge=1, le=CEILING_MAX_FINDINGS_PER_JOB
-    )
+    max_findings_per_job: int = Field(default=5_000, ge=1, le=CEILING_MAX_FINDINGS_PER_JOB)
 
     # Subprocess bounds
     subprocess_timeout_seconds: float = Field(
@@ -147,9 +137,7 @@ class ResourceLimits(BaseModel):
     network_max_response_bytes: int = Field(
         default=1_048_576, ge=256, le=CEILING_NETWORK_MAX_RESPONSE_BYTES
     )
-    safe_retry_max_attempts: int = Field(
-        default=2, ge=0, le=CEILING_SAFE_RETRY_MAX_ATTEMPTS
-    )
+    safe_retry_max_attempts: int = Field(default=2, ge=0, le=CEILING_SAFE_RETRY_MAX_ATTEMPTS)
     safe_retry_delay_seconds: float = Field(
         default=0.5, ge=0.0, le=CEILING_SAFE_RETRY_DELAY_SECONDS
     )
@@ -200,9 +188,7 @@ class ResourceLimits(BaseModel):
             global_queued_limit=settings.execution_global_queued_limit,
             default_job_deadline_seconds=float(settings.job_deadline_seconds),
             max_queue_wait_seconds=float(settings.execution_max_queue_wait_seconds),
-            default_operation_timeout_seconds=float(
-                settings.execution_operation_timeout_seconds
-            ),
+            default_operation_timeout_seconds=float(settings.execution_operation_timeout_seconds),
             shutdown_grace_seconds=float(settings.execution_shutdown_grace_seconds),
             max_files=settings.max_files,
             max_total_bytes=settings.max_total_bytes,

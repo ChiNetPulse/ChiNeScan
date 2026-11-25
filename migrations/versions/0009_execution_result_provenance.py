@@ -32,9 +32,7 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(["job_id"], ["execution_jobs.id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(
-            ["organization_id"], ["organizations.id"], ondelete="RESTRICT"
-        ),
+        sa.ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(
             ["engagement_id", "organization_id"],
             ["engagements.id", "engagements.organization_id"],
@@ -86,8 +84,7 @@ def downgrade() -> None:
     ).scalar_one()
     digests = connection.execute(
         sa.text(
-            "SELECT COUNT(*) FROM execution_jobs "
-            "WHERE authorization_document_sha256 IS NOT NULL"
+            "SELECT COUNT(*) FROM execution_jobs WHERE authorization_document_sha256 IS NOT NULL"
         )
     ).scalar_one()
     if links or digests:
@@ -101,8 +98,6 @@ def downgrade() -> None:
         "execution_job_auth_document_immutable",
     ):
         op.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
-    op.drop_index(
-        "ix_execution_result_provenance_job", table_name="execution_result_provenance"
-    )
+    op.drop_index("ix_execution_result_provenance_job", table_name="execution_result_provenance")
     op.drop_table("execution_result_provenance")
     op.drop_column("execution_jobs", "authorization_document_sha256")

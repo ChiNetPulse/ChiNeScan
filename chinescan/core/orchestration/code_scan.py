@@ -156,7 +156,9 @@ class ScannerError(Exception):
     """Expected scanner execution, availability, or output failure."""
 
 
-def detect_project(target: Path, bounds: ScanBounds | None = None, control: object | None = None) -> ProjectProfile:
+def detect_project(
+    target: Path, bounds: ScanBounds | None = None, control: object | None = None
+) -> ProjectProfile:
     """Resolve a local project directory and identify source files and manifests."""
     candidate = target.expanduser()
     if _contains_reparse_point(candidate):
@@ -435,7 +437,12 @@ class BuiltinRuleScanner:
     def scan(self, target: Path) -> list[Finding]:
         return self.scan_profile(detect_project(target, self.bounds))
 
-    def scan_profile(self, profile: ProjectProfile, control: object | None = None, on_partial: object | None = None) -> list[Finding]:
+    def scan_profile(
+        self,
+        profile: ProjectProfile,
+        control: object | None = None,
+        on_partial: object | None = None,
+    ) -> list[Finding]:
         from chinescan.core.orchestration.code_rules import (
             analyze_source,
             dependency_findings,
@@ -839,7 +846,14 @@ class CodeScanService:
         self.bounds = bounds
         self.project_id = project_id
 
-    def scan(self, target: Path, *, control: object | None = None, scan_id: str | None = None, on_partial: object | None = None) -> CodeScanResult:
+    def scan(
+        self,
+        target: Path,
+        *,
+        control: object | None = None,
+        scan_id: str | None = None,
+        on_partial: object | None = None,
+    ) -> CodeScanResult:
         started = datetime.now(UTC)
         scan_id = scan_id or str(uuid.uuid4())
         scanner_names = [scanner.name for scanner in self.scanners]

@@ -16,7 +16,6 @@ from chinescan.core.cases import (
 )
 from chinescan.core.models.common import Severity
 from chinescan.core.models.finding import Finding
-from chinescan.core.organizations import OrganizationService
 from chinescan.core.models.investigation import (
     Case,
     CaseActivity,
@@ -25,11 +24,12 @@ from chinescan.core.models.investigation import (
     Event,
     Scan,
 )
+from chinescan.core.organizations import OrganizationService
 from chinescan.core.reporting import render_case_report
 from chinescan.core.storage.sqlite import SQLiteRepository
+from chinescan.log_analysis.service import LogAnalysisService
 from chinescan.web.app import create_app
 from chinescan.web.auth import create_operator, operator_auth_epoch, operator_identity_id
-from chinescan.log_analysis.service import LogAnalysisService
 
 runner = CliRunner()
 FIXTURE_ROOT = Path(__file__).parents[2] / "fixtures" / "sample-logs"

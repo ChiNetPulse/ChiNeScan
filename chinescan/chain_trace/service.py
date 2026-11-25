@@ -70,9 +70,8 @@ class ChainTraceService:
         target = Target(value=params.seed, kind="wallet")
         audit = AuthorizationRecord(
             target=params.seed,
-            method=authorization_method or (
-                "local_explorer_import" if is_offline else "explicit_chain_network_opt_in"
-            ),
+            method=authorization_method
+            or ("local_explorer_import" if is_offline else "explicit_chain_network_opt_in"),
             operator=operator,
             authorized_at=started,
             scan_profile="chain_trace",
@@ -93,9 +92,7 @@ class ChainTraceService:
         )
         self.repository.save("scan", scan_id, scan.model_dump(mode="json"))
         try:
-            nodes, edges, gap_codes = trace(
-                self.provider, params, self.labels, control=control
-            )
+            nodes, edges, gap_codes = trace(self.provider, params, self.labels, control=control)
         except ExecutionCancelled:
             raise
         except Exception:

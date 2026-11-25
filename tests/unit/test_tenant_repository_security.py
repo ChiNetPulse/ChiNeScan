@@ -49,15 +49,16 @@ def test_missing_context_never_turns_owned_query_into_global_access(tmp_path) ->
         with pytest.raises(StorageError, match="authorized organization context"):
             repository.count_records("scan")
         with pytest.raises(StorageError, match="authorized organization context"):
-            repository.page_records(
-                "scan", limit=10, offset=0, sort_by="status", descending=False
-            )
+            repository.page_records("scan", limit=10, offset=0, sort_by="status", descending=False)
         with pytest.raises(StorageError, match="authorized organization context"):
             repository.save("scan", "unowned", {"status": "complete", "scanner": "unit"})
         with repository.engine.connect() as connection:
-            assert connection.exec_driver_sql(
-                "SELECT count(*) FROM records WHERE record_id='unowned'"
-            ).scalar_one() == 0
+            assert (
+                connection.exec_driver_sql(
+                    "SELECT count(*) FROM records WHERE record_id='unowned'"
+                ).scalar_one()
+                == 0
+            )
 
         with repository.organization_context(org_a):
             assert repository.get("scan", "scan-a") is not None
@@ -89,10 +90,12 @@ def test_cross_organization_updates_deletes_and_bulk_writes_are_denied(tmp_path)
                     "finding", "finding-a", {"title": "overwrite attempt", "severity": "critical"}
                 )
             with pytest.raises(IntegrityError):
-                repository.save_many([
-                    ("finding", "new-b", {"title": "new"}),
-                    ("finding", "finding-a", {"title": "overwrite attempt"}),
-                ])
+                repository.save_many(
+                    [
+                        ("finding", "new-b", {"title": "new"}),
+                        ("finding", "finding-a", {"title": "overwrite attempt"}),
+                    ]
+                )
         with repository.organization_context(org_a):
             record = repository.get("finding", "finding-a")
             assert record == {"title": "private A", "severity": "high"}
@@ -258,17 +261,13 @@ def test_authenticated_members_access_assigned_scans_without_operator_identity(
         "viewer@example.test", member_epoch, viewer_id
     )
     admin_id = str(uuid4())
-    admin, _admin_org = organizations.ensure_operator(
-        "admin@example.test", member_epoch, admin_id
-    )
+    admin, _admin_org = organizations.ensure_operator("admin@example.test", member_epoch, admin_id)
     auditor_id = str(uuid4())
     auditor, _auditor_org = organizations.ensure_operator(
         "auditor@example.test", member_epoch, auditor_id
     )
     lead_id = str(uuid4())
-    lead, _lead_org = organizations.ensure_operator(
-        "lead@example.test", member_epoch, lead_id
-    )
+    lead, _lead_org = organizations.ensure_operator("lead@example.test", member_epoch, lead_id)
     reviewer_id = str(uuid4())
     reviewer, _reviewer_org = organizations.ensure_operator(
         "reviewer@example.test", member_epoch, reviewer_id
@@ -362,34 +361,35 @@ def test_authenticated_members_access_assigned_scans_without_operator_identity(
     authenticate(assessor_id, "assessor@example.test", member_epoch)
     org_headers = {"X-Chinescan-Organization-Id": organization_id}
     assert client.get("/api/scans/assigned-route-scan", headers=org_headers).status_code == 200
-    assert client.get(
-        "/api/findings/assigned-route-finding", headers=org_headers
-    ).status_code == 200
-    assert client.get(
-        "/api/reports/assigned-route-scan/json", headers=org_headers
-    ).status_code == 200
-    assert client.get(
-        "/api/scans/assigned-route-scan/findings.jsonl", headers=org_headers
-    ).status_code == 200
+    assert (
+        client.get("/api/findings/assigned-route-finding", headers=org_headers).status_code == 200
+    )
+    assert (
+        client.get("/api/reports/assigned-route-scan/json", headers=org_headers).status_code == 200
+    )
+    assert (
+        client.get("/api/scans/assigned-route-scan/findings.jsonl", headers=org_headers).status_code
+        == 200
+    )
     assert client.get("/api/scans/foreign-scan", headers=org_headers).status_code == 404
-    assert client.get(
-        "/api/scans/foreign-organization-scan", headers=org_headers
-    ).status_code == 404
-    assert client.get(
-        "/api/findings/foreign-organization-finding", headers=org_headers
-    ).status_code == 404
-    assert client.get(
-        "/api/reports/foreign-organization-scan/json", headers=org_headers
-    ).status_code == 404
+    assert (
+        client.get("/api/scans/foreign-organization-scan", headers=org_headers).status_code == 404
+    )
+    assert (
+        client.get("/api/findings/foreign-organization-finding", headers=org_headers).status_code
+        == 404
+    )
+    assert (
+        client.get("/api/reports/foreign-organization-scan/json", headers=org_headers).status_code
+        == 404
+    )
     created = client.post(
         "/api/cases",
         json={"scan_id": "assigned-route-scan", "title": "Authorized case"},
         headers={
             **org_headers,
             "Origin": "http://127.0.0.1",
-            "X-CSRF-Token": app.state.session_store.get(
-                client.cookies.get(COOKIE_NAME)
-            ).csrf_token,
+            "X-CSRF-Token": app.state.session_store.get(client.cookies.get(COOKIE_NAME)).csrf_token,
         },
     )
     assert created.status_code == 201, created.text
@@ -402,15 +402,13 @@ def test_authenticated_members_access_assigned_scans_without_operator_identity(
         headers={
             **org_headers,
             "Origin": "http://127.0.0.1",
-            "X-CSRF-Token": app.state.session_store.get(
-                client.cookies.get(COOKIE_NAME)
-            ).csrf_token,
+            "X-CSRF-Token": app.state.session_store.get(client.cookies.get(COOKIE_NAME)).csrf_token,
         },
     )
     assert owner_case.status_code == 201
-    assert client.get(
-        f"/api/cases/{case_id}/report/markdown", headers=org_headers
-    ).status_code == 200
+    assert (
+        client.get(f"/api/cases/{case_id}/report/markdown", headers=org_headers).status_code == 200
+    )
 
     authenticate(admin_id, "admin@example.test", member_epoch)
     admin_case = client.post(
@@ -419,9 +417,7 @@ def test_authenticated_members_access_assigned_scans_without_operator_identity(
         headers={
             **org_headers,
             "Origin": "http://127.0.0.1",
-            "X-CSRF-Token": app.state.session_store.get(
-                client.cookies.get(COOKIE_NAME)
-            ).csrf_token,
+            "X-CSRF-Token": app.state.session_store.get(client.cookies.get(COOKIE_NAME)).csrf_token,
         },
     )
     assert admin_case.status_code == 201
@@ -446,22 +442,16 @@ def test_authenticated_members_access_assigned_scans_without_operator_identity(
     listed_scans = client.get("/api/scans", headers=org_headers)
     assert listed_scans.status_code == 200
     assert all(
-        item["scan_id"] != "foreign-organization-scan"
-        for item in listed_scans.json()["items"]
+        item["scan_id"] != "foreign-organization-scan" for item in listed_scans.json()["items"]
     )
-    assert any(
-        item["scan_id"] == "assigned-route-scan"
-        for item in listed_scans.json()["items"]
-    )
+    assert any(item["scan_id"] == "assigned-route-scan" for item in listed_scans.json()["items"])
     auditor_write = client.post(
         "/api/cases",
         json={"scan_id": "assigned-route-scan", "title": "Forbidden auditor case"},
         headers={
             **org_headers,
             "Origin": "http://127.0.0.1",
-            "X-CSRF-Token": app.state.session_store.get(
-                client.cookies.get(COOKIE_NAME)
-            ).csrf_token,
+            "X-CSRF-Token": app.state.session_store.get(client.cookies.get(COOKIE_NAME)).csrf_token,
         },
     )
     assert auditor_write.status_code == 403
@@ -478,9 +468,7 @@ def test_authenticated_members_access_assigned_scans_without_operator_identity(
         headers={
             **org_headers,
             "Origin": "http://127.0.0.1",
-            "X-CSRF-Token": app.state.session_store.get(
-                client.cookies.get(COOKIE_NAME)
-            ).csrf_token,
+            "X-CSRF-Token": app.state.session_store.get(client.cookies.get(COOKIE_NAME)).csrf_token,
         },
     )
     assert observer_update.status_code == 404
@@ -508,9 +496,7 @@ def test_authenticated_members_access_assigned_scans_without_operator_identity(
         headers={
             **org_headers,
             "Origin": "http://127.0.0.1",
-            "X-CSRF-Token": app.state.session_store.get(
-                client.cookies.get(COOKIE_NAME)
-            ).csrf_token,
+            "X-CSRF-Token": app.state.session_store.get(client.cookies.get(COOKIE_NAME)).csrf_token,
         },
     )
     assert viewer_write.status_code == 403

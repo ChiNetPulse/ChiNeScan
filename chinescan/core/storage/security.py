@@ -46,9 +46,7 @@ def get_windows_operator_identity() -> tuple[str, str]:
         raise StorageSecurityError(f"Unable to execute whoami.exe: {exc}") from exc
     if who.returncode != 0:
         detail = (who.stderr or "").strip()
-        raise StorageSecurityError(
-            f"whoami.exe failed with exit code {who.returncode}: {detail}"
-        )
+        raise StorageSecurityError(f"whoami.exe failed with exit code {who.returncode}: {detail}")
     line = who.stdout.strip()
     if not line:
         raise StorageSecurityError("whoami.exe returned empty output.")
@@ -73,7 +71,7 @@ def parse_icacls_entries(stdout: str, canonical_path: Path) -> list[tuple[str, s
 
         raw_trimmed = raw_line.lstrip()
         if raw_trimmed.casefold().startswith(canonical_str):
-            raw_trimmed = raw_trimmed[len(canonical_str):].lstrip()
+            raw_trimmed = raw_trimmed[len(canonical_str) :].lstrip()
         elif name_str in raw_trimmed.casefold():
             parts = raw_trimmed.split(None, 1)
             if len(parts) > 1 and ":(" in parts[1]:
@@ -135,22 +133,18 @@ def verify_windows_directory_acl(
         if "(i)" in f"({rights})".casefold():
             return False, f"Inherited ACE detected for principal '{princ}'."
 
-        matched = any(
-            princ == ap or princ.endswith("\\" + ap) for ap in allowed_principals
-        )
+        matched = any(princ == ap or princ.endswith("\\" + ap) for ap in allowed_principals)
         if not matched:
             return False, f"Unauthorized principal in ACL: '{princ}'."
 
-        if (
-            princ in {operator_name.casefold(), operator_sid.casefold()}
-            or princ.endswith("\\" + operator_user)
+        if princ in {operator_name.casefold(), operator_sid.casefold()} or princ.endswith(
+            "\\" + operator_user
         ):
             has_operator = True
         if princ in {"nt authority\\system", "system", "s-1-5-18"}:
             has_system = True
-        if (
-            princ in {"builtin\\administrators", "administrators", "s-1-5-32-544"}
-            or princ.endswith("\\administrators")
+        if princ in {"builtin\\administrators", "administrators", "s-1-5-32-544"} or princ.endswith(
+            "\\administrators"
         ):
             has_admin = True
 
@@ -284,9 +278,7 @@ def secure_snapshot_directory(path: Path) -> Path:
                 )
 
             # Fail closed: verify effective permissions
-            verified, reason = verify_windows_directory_acl(
-                canonical, operator_name, operator_sid
-            )
+            verified, reason = verify_windows_directory_acl(canonical, operator_name, operator_sid)
             if not verified:
                 raise StorageSecurityError(
                     f"Snapshot storage ACL verification failed after configuration: {reason}"

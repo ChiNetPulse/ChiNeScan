@@ -67,9 +67,7 @@ def test_operator_migration_preserves_password_totp_recovery_and_is_idempotent(
         with app.state.repository.engine.connect() as conn:
             rc_count = len(
                 conn.execute(
-                    select(user_recovery_codes.c.id).where(
-                        user_recovery_codes.c.user_id == op_id
-                    )
+                    select(user_recovery_codes.c.id).where(user_recovery_codes.c.user_id == op_id)
                 ).all()
             )
             assert rc_count == 10
@@ -89,17 +87,26 @@ def test_operator_migration_preserves_password_totp_recovery_and_is_idempotent(
         app2 = create_app(db, cred, serve_frontend=False)
         try:
             # Replaying the exact same TOTP code after restart must fail
-            assert app2.state.identity_service.authenticate(
-                "operator@example.test", "Operator-Secure-Passphrase-99!", live_code, now=now
-            ) is None
+            assert (
+                app2.state.identity_service.authenticate(
+                    "operator@example.test", "Operator-Secure-Passphrase-99!", live_code, now=now
+                )
+                is None
+            )
             # Single-use recovery code works once and fails on replay across restarts
             rc = recovery_codes[0]
-            assert app2.state.identity_service.authenticate(
-                "operator@example.test", "Operator-Secure-Passphrase-99!", rc, now=now + 60
-            ) is not None
-            assert app2.state.identity_service.authenticate(
-                "operator@example.test", "Operator-Secure-Passphrase-99!", rc, now=now + 90
-            ) is None
+            assert (
+                app2.state.identity_service.authenticate(
+                    "operator@example.test", "Operator-Secure-Passphrase-99!", rc, now=now + 60
+                )
+                is not None
+            )
+            assert (
+                app2.state.identity_service.authenticate(
+                    "operator@example.test", "Operator-Secure-Passphrase-99!", rc, now=now + 90
+                )
+                is None
+            )
         finally:
             app2.state.repository.close()
     finally:
@@ -124,14 +131,17 @@ def test_persistent_sessions_rotation_expiration_and_disabled_rejection(tmp_path
         assert app.state.session_store.get(token1) is None
 
         # Password change requires CSRF, rotates session, and invalidates old token
-        assert client.post(
-            "/api/auth/password/change",
-            json={
-                "current_password": "Operator-Secure-Passphrase-99!",
-                "new_password": "New-Operator-Passphrase-2026!",
-            },
-            headers={"Origin": str(client.base_url).rstrip("/")},
-        ).status_code == 403
+        assert (
+            client.post(
+                "/api/auth/password/change",
+                json={
+                    "current_password": "Operator-Secure-Passphrase-99!",
+                    "new_password": "New-Operator-Passphrase-2026!",
+                },
+                headers={"Origin": str(client.base_url).rstrip("/")},
+            ).status_code
+            == 403
+        )
         r_pw = client.post(
             "/api/auth/password/change",
             json={
@@ -170,6 +180,7 @@ def test_session_expiration_and_concurrent_validation_revocation(tmp_path: Path)
 
         # Concurrent get + revoke must not fail or raise
         barrier = Barrier(4)
+
         def worker(i: int) -> None:
             barrier.wait()
             if i == 0:
@@ -246,6 +257,7 @@ def test_invitation_lifecycle_permissions_concurrency_and_account_disablement(
 
         # Concurrent acceptance: exactly 1 succeeds, 1 fails
         barrier = Barrier(2)
+
         def accept_once(_i: int) -> bool:
             barrier.wait()
             try:

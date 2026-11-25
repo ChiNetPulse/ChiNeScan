@@ -282,7 +282,10 @@ def _read_stream(stream: BinaryReader, limit: int, control: object | None = None
 
 
 def _parse_member(
-    data: bytes, name: str, source_ref: str, result: IngestResult,
+    data: bytes,
+    name: str,
+    source_ref: str,
+    result: IngestResult,
     control: object | None = None,
 ) -> None:
     result.bytes_processed += len(data)

@@ -33,14 +33,17 @@ def _workspace(tmp_path: Path):
     state.mkdir()
     source = allowed / "events.jsonl"
     source.write_text(
-        json.dumps({
-            "timestamp": "2026-11-24T10:00:00Z",
-            "message": (
-                "login failed password=LogSecret-998! "
-                "Bearer abcdefghijklmnopqrstuvwxyz0123456789"
-            ),
-            "principalEmail": "alice@example.test",
-        }) + "\n",
+        json.dumps(
+            {
+                "timestamp": "2026-11-24T10:00:00Z",
+                "message": (
+                    "login failed password=LogSecret-998! "
+                    "Bearer abcdefghijklmnopqrstuvwxyz0123456789"
+                ),
+                "principalEmail": "alice@example.test",
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     credential = state / "operator.json"
@@ -51,12 +54,19 @@ def _workspace(tmp_path: Path):
         encoding="utf-8",
     )
     settings = Settings(
-        _env_file=None, allowed_roots=[allowed], reports_dir=state / "reports",
-        log_evidence_max_bytes=1_000_000, log_evidence_org_quota_bytes=2_000_000,
+        _env_file=None,
+        allowed_roots=[allowed],
+        reports_dir=state / "reports",
+        log_evidence_max_bytes=1_000_000,
+        log_evidence_org_quota_bytes=2_000_000,
     )
     app = create_app(
-        state / "test.sqlite3", credential, serve_frontend=False,
-        settings=settings, projects_path=state / "projects.toml", log_sources_path=log_sources,
+        state / "test.sqlite3",
+        credential,
+        serve_frontend=False,
+        settings=settings,
+        projects_path=state / "projects.toml",
+        log_sources_path=log_sources,
     )
     repository = app.state.repository
     organizations = app.state.organization_service
@@ -71,10 +81,17 @@ def _workspace(tmp_path: Path):
     reviewer = str(uuid4())
     now = datetime.now(UTC).isoformat()
     with repository.engine.begin() as connection:
-        connection.execute(insert(users).values(
-            id=reviewer, email_normalized="reviewer@example.test", display_name="Reviewer",
-            status="active", auth_epoch="test", created_at=now, updated_at=now,
-        ))
+        connection.execute(
+            insert(users).values(
+                id=reviewer,
+                email_normalized="reviewer@example.test",
+                display_name="Reviewer",
+                status="active",
+                auth_epoch="test",
+                created_at=now,
+                updated_at=now,
+            )
+        )
     organizations.add_member(owner, org, reviewer, "member")
     organizations.change_assignment(owner, org, engagement["id"], reviewer, role="reviewer")
     store = app.state.log_evidence_store
@@ -82,14 +99,30 @@ def _workspace(tmp_path: Path):
         owner, org, engagement["id"], source, "Synthetic access log", security
     )
     assert registered is not None
-    scope = security.create_scope_revision(owner, org, engagement["id"], [{
-        "asset_id": registered["asset_id"], "effect": "include", "match_mode": "exact",
-        "techniques": ["log_analysis"],
-    }], "Include exact registered log evidence")
+    scope = security.create_scope_revision(
+        owner,
+        org,
+        engagement["id"],
+        [
+            {
+                "asset_id": registered["asset_id"],
+                "effect": "include",
+                "match_mode": "exact",
+                "techniques": ["log_analysis"],
+            }
+        ],
+        "Include exact registered log evidence",
+    )
     published = security.publish_scope_revision(reviewer, org, engagement["id"], scope["id"])
     authorization = security.create_authorization(
-        owner, org, engagement["id"], published["id"], "LOG-TEST-1", "Synthetic client",
-        ["log_analysis"], datetime.now(UTC).isoformat(),
+        owner,
+        org,
+        engagement["id"],
+        published["id"],
+        "LOG-TEST-1",
+        "Synthetic client",
+        ["log_analysis"],
+        datetime.now(UTC).isoformat(),
         (datetime.now(UTC) + timedelta(days=1)).isoformat(),
     )
     return app, owner, org, engagement["id"], source, registered, authorization
@@ -109,8 +142,13 @@ def test_governed_log_analysis_uses_snapshot_redacts_results_and_records_provena
         assert (snapshot_root / "events.jsonl").read_text(encoding="utf-8") == original
 
         job = app.state.execution_governance.create_governed_job(
-            owner, org, engagement, evidence["asset_id"], technique="log_analysis",
-            approval_id=None, idempotency_key="governed-log-analysis-test-1",
+            owner,
+            org,
+            engagement,
+            evidence["asset_id"],
+            technique="log_analysis",
+            approval_id=None,
+            idempotency_key="governed-log-analysis-test-1",
         )
         assert job["status"] == "queued"
         assert job["log_evidence_snapshot_id"] == evidence["snapshot_id"]
@@ -119,7 +157,6 @@ def test_governed_log_analysis_uses_snapshot_redacts_results_and_records_provena
         assert outcome and outcome["status"] == "completed", (
             outcome,
             app.state.execution_governance.get_job(owner, org, job["id"]),
-            len(calls),
         )
         assert outcome["scan_id"]
         provenance = app.state.execution_governance.get_job_provenance(
@@ -127,16 +164,23 @@ def test_governed_log_analysis_uses_snapshot_redacts_results_and_records_provena
         )
         assert provenance and any(row["record_type"] == "scan" for row in provenance["results"])
         with app.state.repository.engine.connect() as connection:
-            scan_json = connection.execute(select(records.c.payload).where(
-                records.c.record_type == "scan", records.c.record_id == outcome["scan_id"]
-            )).scalar_one()
+            scan_json = connection.execute(
+                select(records.c.payload).where(
+                    records.c.record_type == "scan", records.c.record_id == outcome["scan_id"]
+                )
+            ).scalar_one()
             persisted = json.dumps(scan_json)
             all_payloads = " ".join(
                 str(row[0]) for row in connection.execute(select(records.c.payload)).all()
             )
-            assert connection.execute(select(execution_result_provenance).where(
-                execution_result_provenance.c.job_id == job["id"]
-            )).first() is not None
+            assert (
+                connection.execute(
+                    select(execution_result_provenance).where(
+                        execution_result_provenance.c.job_id == job["id"]
+                    )
+                ).first()
+                is not None
+            )
         assert "LogSecret-998" not in persisted + all_payloads
         assert "alice@example.test" not in all_payloads
         assert "abcdefghijklmnopqrstuvwxyz0123456789" not in all_payloads
@@ -145,46 +189,75 @@ def test_governed_log_analysis_uses_snapshot_redacts_results_and_records_provena
         app.state.repository.close()
 
 
-def test_governed_chain_import_runs_from_registered_snapshot_with_provenance(tmp_path: Path) -> None:
+def test_governed_chain_import_runs_from_registered_snapshot_with_provenance(
+    tmp_path: Path,
+) -> None:
     app, owner, org, engagement, source, _evidence, _authorization = _workspace(tmp_path)
     try:
         chain_source = source.parent / "chain-export.json"
-        chain_source.write_text(json.dumps([{
-            "chain": "ethereum",
-            "tx_hash": "0x" + "1" * 64,
-            "sender": "0x" + "a" * 40,
-            "receiver": "0x" + "b" * 40,
-            "amount": "1",
-            "block_time": 10,
-        }]), encoding="utf-8")
+        chain_source.write_text(
+            json.dumps(
+                [
+                    {
+                        "chain": "ethereum",
+                        "tx_hash": "0x" + "1" * 64,
+                        "sender": "0x" + "a" * 40,
+                        "receiver": "0x" + "b" * 40,
+                        "amount": "1",
+                        "block_time": 10,
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
         registered = app.state.log_evidence_store.register(
-            owner, org, engagement, chain_source, "Synthetic chain export",
+            owner,
+            org,
+            engagement,
+            chain_source,
+            "Synthetic chain export",
             app.state.engagement_security_service,
         )
         assert registered
         scope = app.state.engagement_security_service.create_scope_revision(
-            owner, org, engagement, [{
-                "asset_id": registered["asset_id"],
-                "effect": "include",
-                "match_mode": "exact",
-                "techniques": ["chain_trace_import"],
-            }], "Include registered chain-trace input",
+            owner,
+            org,
+            engagement,
+            [
+                {
+                    "asset_id": registered["asset_id"],
+                    "effect": "include",
+                    "match_mode": "exact",
+                    "techniques": ["chain_trace_import"],
+                }
+            ],
+            "Include registered chain-trace input",
         )
         with app.state.repository.engine.connect() as connection:
-            reviewer = connection.execute(select(users.c.id).where(
-                users.c.email_normalized == "reviewer@example.test"
-            )).scalar_one()
+            reviewer = connection.execute(
+                select(users.c.id).where(users.c.email_normalized == "reviewer@example.test")
+            ).scalar_one()
         published = app.state.engagement_security_service.publish_scope_revision(
             reviewer, org, engagement, scope["id"]
         )
         app.state.engagement_security_service.create_authorization(
-            owner, org, engagement, published["id"], "CHAIN-TEST-1", "Synthetic client",
-            ["chain_trace_import"], datetime.now(UTC).isoformat(),
+            owner,
+            org,
+            engagement,
+            published["id"],
+            "CHAIN-TEST-1",
+            "Synthetic client",
+            ["chain_trace_import"],
+            datetime.now(UTC).isoformat(),
             (datetime.now(UTC) + timedelta(days=1)).isoformat(),
         )
         job = app.state.execution_governance.create_governed_job(
-            owner, org, engagement, registered["asset_id"],
-            technique="chain_trace_import", approval_id=None,
+            owner,
+            org,
+            engagement,
+            registered["asset_id"],
+            technique="chain_trace_import",
+            approval_id=None,
             idempotency_key="governed-chain-import-test-01",
             chain_request={"chain": "ethereum", "seed": "0x" + "a" * 40, "depth": 2},
         )
@@ -193,7 +266,6 @@ def test_governed_chain_import_runs_from_registered_snapshot_with_provenance(tmp
         assert outcome and outcome["status"] == "completed", (
             outcome,
             app.state.execution_governance.get_job(owner, org, job["id"]),
-            len(calls),
         )
         provenance = app.state.execution_governance.get_job_provenance(
             owner, org, engagement, job["id"]
@@ -211,24 +283,44 @@ def test_governed_chain_provider_consumes_approval_before_fixed_root_lookup(tmp_
     try:
         security = app.state.engagement_security_service
         with app.state.repository.engine.connect() as connection:
-            reviewer = connection.execute(select(users.c.id).where(
-                users.c.email_normalized == "reviewer@example.test"
-            )).scalar_one()
+            reviewer = connection.execute(
+                select(users.c.id).where(users.c.email_normalized == "reviewer@example.test")
+            ).scalar_one()
         target = "chain:ethereum:etherscan-v2:0x" + "a" * 40
         asset = security.create_asset(owner, org, engagement, "chain_address", target)
         assert asset
-        scope = security.create_scope_revision(owner, org, engagement, [{
-            "asset_id": asset["id"], "effect": "include", "match_mode": "exact",
-            "techniques": ["chain_provider_lookup"],
-        }], "Include exact chain address")
+        scope = security.create_scope_revision(
+            owner,
+            org,
+            engagement,
+            [
+                {
+                    "asset_id": asset["id"],
+                    "effect": "include",
+                    "match_mode": "exact",
+                    "techniques": ["chain_provider_lookup"],
+                }
+            ],
+            "Include exact chain address",
+        )
         published = security.publish_scope_revision(reviewer, org, engagement, scope["id"])
         security.create_authorization(
-            owner, org, engagement, published["id"], "CHAIN-PROVIDER-TEST-1",
-            "Synthetic client", ["chain_provider_lookup"], datetime.now(UTC).isoformat(),
+            owner,
+            org,
+            engagement,
+            published["id"],
+            "CHAIN-PROVIDER-TEST-1",
+            "Synthetic client",
+            ["chain_provider_lookup"],
+            datetime.now(UTC).isoformat(),
             (datetime.now(UTC) + timedelta(days=1)).isoformat(),
         )
         approval = security.create_approval_request(
-            owner, org, engagement, "chain_address", asset["target"],
+            owner,
+            org,
+            engagement,
+            "chain_address",
+            asset["target"],
             "chain_provider_lookup",
         )
         assert approval
@@ -258,8 +350,12 @@ def test_governed_chain_provider_consumes_approval_before_fixed_root_lookup(tmp_
         app.state.execution_governance.adapters = registry
         app.state.governed_domain_worker.adapters = registry
         job = app.state.execution_governance.create_governed_job(
-            owner, org, engagement, asset["id"],
-            technique="chain_provider_lookup", approval_id=approval["id"],
+            owner,
+            org,
+            engagement,
+            asset["id"],
+            technique="chain_provider_lookup",
+            approval_id=approval["id"],
             idempotency_key="governed-chain-provider-test-01",
         )
         assert job["status"] == "queued"
@@ -267,23 +363,28 @@ def test_governed_chain_provider_consumes_approval_before_fixed_root_lookup(tmp_
         final_job = app.state.execution_governance.get_job(owner, org, job["id"])
         assert outcome and outcome["status"] == "completed", (
             outcome,
-            final_job and {key: final_job.get(key) for key in ("status", "error_code", "approval_consumed_at")},
+            final_job
+            and {
+                key: final_job.get(key) for key in ("status", "error_code", "approval_consumed_at")
+            },
             len(calls),
         )
         assert len(calls) == 3
-        assert all(
-            call[1]["params"]["address"] == "0x" + "a" * 40
-            for call in calls
-        )
+        assert all(call[1]["params"]["address"] == "0x" + "a" * 40 for call in calls)
         with app.state.repository.engine.connect() as connection:
-            consumed = connection.execute(select(approval_requests.c.consumed_at).where(
-                approval_requests.c.id == approval["id"]
-            )).scalar_one()
+            consumed = connection.execute(
+                select(approval_requests.c.consumed_at).where(
+                    approval_requests.c.id == approval["id"]
+                )
+            ).scalar_one()
         assert consumed
         provenance = app.state.execution_governance.get_job_provenance(
             owner, org, engagement, job["id"]
         )
-        assert provenance and provenance["execution_context"]["chain_context"]["provider"] == "etherscan-v2"
+        assert (
+            provenance
+            and provenance["execution_context"]["chain_context"]["provider"] == "etherscan-v2"
+        )
     finally:
         app.state.repository.close()
 
@@ -297,18 +398,27 @@ def test_corrupt_evidence_blocks_worker_and_records_integrity_failure(tmp_path: 
         assert root
         (root / "events.jsonl").write_text("tampered", encoding="utf-8")
         job = app.state.execution_governance.create_governed_job(
-            owner, org, engagement, evidence["asset_id"], technique="log_analysis",
-            approval_id=None, idempotency_key="governed-log-analysis-corrupt",
+            owner,
+            org,
+            engagement,
+            evidence["asset_id"],
+            technique="log_analysis",
+            approval_id=None,
+            idempotency_key="governed-log-analysis-corrupt",
         )
         outcome = app.state.governed_domain_worker.run_one(job["id"])
         assert outcome and outcome["status"] == "failed"
         with app.state.repository.engine.connect() as connection:
-            status = connection.execute(select(log_evidence_snapshots.c.status).where(
-                log_evidence_snapshots.c.id == evidence["snapshot_id"]
-            )).scalar_one()
-            audit = connection.execute(select(assessment_audit_events).where(
-                assessment_audit_events.c.action == "log_evidence.integrity_failed"
-            )).first()
+            status = connection.execute(
+                select(log_evidence_snapshots.c.status).where(
+                    log_evidence_snapshots.c.id == evidence["snapshot_id"]
+                )
+            ).scalar_one()
+            audit = connection.execute(
+                select(assessment_audit_events).where(
+                    assessment_audit_events.c.action == "log_evidence.integrity_failed"
+                )
+            ).first()
         assert status == "corrupt"
         assert audit is not None
     finally:
@@ -332,7 +442,11 @@ def test_evidence_registration_rejects_outside_roots_and_releases_failed_reserva
         allowed_source.write_text("more than two bytes", encoding="utf-8")
         with pytest.raises(LogEvidenceError, match="size_limit"):
             store.register(
-                owner, org, engagement, allowed_source, "oversized",
+                owner,
+                org,
+                engagement,
+                allowed_source,
+                "oversized",
                 app.state.engagement_security_service,
             )
         with app.state.repository.engine.connect() as connection:
@@ -353,7 +467,11 @@ def test_log_evidence_registration_rejects_linked_source_paths(tmp_path: Path) -
             )
         with pytest.raises(LogEvidenceError, match="source_unsafe"):
             app.state.log_evidence_store.register(
-                owner, org, engagement, linked, "Linked input",
+                owner,
+                org,
+                engagement,
+                linked,
+                "Linked input",
                 app.state.engagement_security_service,
             )
     finally:
@@ -366,16 +484,24 @@ def test_log_evidence_hold_blocks_deletion_and_explicit_deletion_preserves_metad
     app, owner, org, engagement, _source, evidence, _authorization = _workspace(tmp_path)
     try:
         with app.state.repository.engine.begin() as connection:
-            connection.execute(update(engagements).where(
-                engagements.c.id == engagement,
-                engagements.c.organization_id == org,
-            ).values(status="completed", closed_at=datetime.now(UTC).isoformat()))
+            connection.execute(
+                update(engagements)
+                .where(
+                    engagements.c.id == engagement,
+                    engagements.c.organization_id == org,
+                )
+                .values(status="completed", closed_at=datetime.now(UTC).isoformat())
+            )
         store = app.state.log_evidence_store
         assert store.list_for(owner, org, engagement, app.state.engagement_security_service)[0][
             "deletion_eligible"
         ]
         assert store.place_hold_for_asset(
-            owner, org, engagement, evidence["asset_id"], "Preserve for investigation",
+            owner,
+            org,
+            engagement,
+            evidence["asset_id"],
+            "Preserve for investigation",
             app.state.engagement_security_service,
         )
         held = store.list_for(owner, org, engagement, app.state.engagement_security_service)[0]
@@ -385,19 +511,25 @@ def test_log_evidence_hold_blocks_deletion_and_explicit_deletion_preserves_metad
             owner, org, engagement, evidence["asset_id"], app.state.engagement_security_service
         )
         with app.state.repository.engine.begin() as connection:
-            connection.execute(update(log_evidence_snapshots).where(
-                log_evidence_snapshots.c.id == evidence["snapshot_id"]
-            ).values(legal_hold=0, hold_reason=None))
+            connection.execute(
+                update(log_evidence_snapshots)
+                .where(log_evidence_snapshots.c.id == evidence["snapshot_id"])
+                .values(legal_hold=0, hold_reason=None)
+            )
         assert store.delete_asset(
             owner, org, engagement, evidence["asset_id"], app.state.engagement_security_service
         )
         with app.state.repository.engine.connect() as connection:
-            row = connection.execute(select(log_evidence_snapshots).where(
-                log_evidence_snapshots.c.id == evidence["snapshot_id"]
-            )).first()
-            audit = connection.execute(select(assessment_audit_events).where(
-                assessment_audit_events.c.action == "log_evidence.deletion_recorded"
-            )).first()
+            row = connection.execute(
+                select(log_evidence_snapshots).where(
+                    log_evidence_snapshots.c.id == evidence["snapshot_id"]
+                )
+            ).first()
+            audit = connection.execute(
+                select(assessment_audit_events).where(
+                    assessment_audit_events.c.action == "log_evidence.deletion_recorded"
+                )
+            ).first()
         assert row is not None and row.status == "deleted" and row.sha256 == evidence["sha256"]
         assert audit is not None
         assert not (store.root / org / evidence["sha256"]).exists()

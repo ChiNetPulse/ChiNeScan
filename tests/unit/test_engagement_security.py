@@ -219,9 +219,7 @@ def test_ambiguous_numeric_targets_cannot_receive_policy_allow(tmp_path: Path) -
             with pytest.raises(EngagementSecurityError):
                 service.create_asset(owner, org, engagement, asset_type, target)
             with pytest.raises(EngagementSecurityError):
-                service.evaluate_policy(
-                    owner, org, engagement, asset_type, target, "http_metadata"
-                )
+                service.evaluate_policy(owner, org, engagement, asset_type, target, "http_metadata")
     assert service.list_assets(owner, org, engagement) == initial_assets
 
 
@@ -321,11 +319,12 @@ def test_scope_authorization_policy_exclusion_and_approval_is_one_use(tmp_path: 
     assert verified["decision"] == "ALLOW"
     assert verified["reason_code"] == "APPROVAL_VALID"
     with _app.state.repository.engine.connect() as connection:
-        assert connection.execute(
-            select(approval_requests.c.decision).where(
-                approval_requests.c.id == request["id"]
-            )
-        ).scalar_one() == "approved"
+        assert (
+            connection.execute(
+                select(approval_requests.c.decision).where(approval_requests.c.id == request["id"])
+            ).scalar_one()
+            == "approved"
+        )
 
 
 def test_policy_api_cannot_consume_approval_without_execution(tmp_path: Path) -> None:
@@ -337,9 +336,7 @@ def test_policy_api_cannot_consume_approval_without_execution(tmp_path: Path) ->
         owner, org, engagement, "domain", "app.example.test", "exploit_verification"
     )
     assert request
-    assert service.decide_approval(
-        reviewer, org, engagement, request["id"], "approved", "Reviewed"
-    )
+    assert service.decide_approval(reviewer, org, engagement, request["id"], "approved", "Reviewed")
     client = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))
     login = client.post(
         "/api/auth/login",
@@ -375,9 +372,7 @@ def test_atomic_approval_consumption_allows_only_one_concurrent_consumer(tmp_pat
         owner, org, engagement, "domain", "app.example.test", "exploit_verification"
     )
     assert request
-    assert service.decide_approval(
-        reviewer, org, engagement, request["id"], "approved", "Reviewed"
-    )
+    assert service.decide_approval(reviewer, org, engagement, request["id"], "approved", "Reviewed")
     start = Barrier(2)
 
     def attempt_consume() -> str:
@@ -408,17 +403,25 @@ def test_atomic_approval_consumption_allows_only_one_concurrent_consumer(tmp_pat
     assert outcomes.count("ALLOW") == 1
     assert outcomes.count("DENY") == 1
     with app.state.repository.engine.connect() as connection:
-        assert connection.execute(
-            select(approval_requests.c.decision, approval_requests.c.consumed_at).where(
-                approval_requests.c.id == request["id"]
+        assert (
+            connection.execute(
+                select(approval_requests.c.decision, approval_requests.c.consumed_at).where(
+                    approval_requests.c.id == request["id"]
+                )
+            ).one()[0]
+            == "consumed"
+        )
+        assert (
+            len(
+                connection.execute(
+                    select(assessment_audit_events.c.id).where(
+                        assessment_audit_events.c.action == "approval.consumed",
+                        assessment_audit_events.c.resource_id == request["id"],
+                    )
+                ).all()
             )
-        ).one()[0] == "consumed"
-        assert len(connection.execute(
-            select(assessment_audit_events.c.id).where(
-                assessment_audit_events.c.action == "approval.consumed",
-                assessment_audit_events.c.resource_id == request["id"],
-            )
-        ).all()) == 1
+            == 1
+        )
 
 
 def test_published_scope_is_immutable_and_snapshots_asset_type(tmp_path: Path) -> None:
@@ -649,9 +652,7 @@ def test_approval_digest_and_requester_mismatch_are_denied(tmp_path: Path) -> No
         owner, org, engagement, "domain", "app.example.test", "exploit_verification"
     )
     assert request
-    assert service.decide_approval(
-        reviewer, org, engagement, request["id"], "approved", "Reviewed"
-    )
+    assert service.decide_approval(reviewer, org, engagement, request["id"], "approved", "Reviewed")
 
     # An active assessor attempting the request as a different principal must not
     # inherit the requester's approval, even for the same operation.
@@ -714,9 +715,7 @@ def test_approval_is_invalidated_when_a_new_scope_is_published(tmp_path: Path) -
         owner, org, engagement, "domain", "app.example.test", "exploit_verification"
     )
     assert request
-    assert service.decide_approval(
-        reviewer, org, engagement, request["id"], "approved", "Reviewed"
-    )
+    assert service.decide_approval(reviewer, org, engagement, request["id"], "approved", "Reviewed")
     revision = service.create_scope_revision(
         owner,
         org,
@@ -796,9 +795,7 @@ def test_approval_cannot_be_reused_for_a_different_permitted_technique(tmp_path:
         owner, org, engagement, "domain", "app.example.test", "exploit_verification"
     )
     assert request
-    assert service.decide_approval(
-        reviewer, org, engagement, request["id"], "approved", "Reviewed"
-    )
+    assert service.decide_approval(reviewer, org, engagement, request["id"], "approved", "Reviewed")
     result = service.evaluate_policy(
         owner,
         org,
@@ -891,12 +888,15 @@ def test_invalid_engagement_ids_deny_without_invalid_audit_foreign_keys(tmp_path
                 assessment_audit_events.c.reason_code == "TARGET_EXCLUDED",
             )
         ).first()
-        assert connection.execute(
-            select(assessment_audit_events.c.id).where(
-                assessment_audit_events.c.organization_id == org,
-                assessment_audit_events.c.engagement_id == other_engagement["id"],
-            )
-        ).first() is None
+        assert (
+            connection.execute(
+                select(assessment_audit_events.c.id).where(
+                    assessment_audit_events.c.organization_id == org,
+                    assessment_audit_events.c.engagement_id == other_engagement["id"],
+                )
+            ).first()
+            is None
+        )
 
 
 def test_cross_organization_api_ids_cannot_read_assets_authorizations_approvals_or_documents(
@@ -987,10 +987,7 @@ def test_cross_organization_api_ids_cannot_read_assets_authorizations_approvals_
     prefix = f"/api/organizations/{org}/engagements/{engagement}"
     assert client.get(f"{prefix}/assets/{foreign_asset['id']}").status_code == 404
     assert client.get(f"{prefix}/approvals/{foreign_approval['id']}").status_code == 404
-    assert (
-        client.get(f"{prefix}/authorizations/{foreign_auth['id']}/document").status_code
-        == 404
-    )
+    assert client.get(f"{prefix}/authorizations/{foreign_auth['id']}/document").status_code == 404
     listed_auth = client.get(f"{prefix}/authorizations")
     assert listed_auth.status_code == 200
     assert foreign_auth["id"] not in {item["id"] for item in listed_auth.json()["items"]}
@@ -1062,9 +1059,11 @@ def test_governed_domain_job_revalidates_revoked_membership_before_claim(tmp_pat
     app.state.organization_service.update_membership(owner, org, reviewer, status="suspended")
     assert governance.claim_job(job["id"]) is None
     with app.state.repository.engine.connect() as connection:
-        blocked = connection.execute(
-            select(execution_jobs).where(execution_jobs.c.id == job["id"])
-        ).mappings().one()
+        blocked = (
+            connection.execute(select(execution_jobs).where(execution_jobs.c.id == job["id"]))
+            .mappings()
+            .one()
+        )
     assert blocked["status"] == "blocked"
     assert blocked["error_code"] == "ENGAGEMENT_NOT_FOUND"
 
@@ -1303,14 +1302,16 @@ def test_sensitive_approval_is_consumed_once_at_adapter_action_boundary(tmp_path
     )
     assert duplicate_binding["reason_code"] == "APPROVAL_ALREADY_BOUND"
 
-    outcome = GovernedDomainWorker(
-        app.state.repository, governance, registry
-    ).run_one(job["id"])
+    outcome = GovernedDomainWorker(app.state.repository, governance, registry).run_one(job["id"])
     assert outcome and outcome["status"] == "completed"
     with app.state.repository.engine.connect() as connection:
-        approval = connection.execute(
-            select(approval_requests).where(approval_requests.c.id == request["id"])
-        ).mappings().one()
+        approval = (
+            connection.execute(
+                select(approval_requests).where(approval_requests.c.id == request["id"])
+            )
+            .mappings()
+            .one()
+        )
         consumed_events = connection.execute(
             select(assessment_audit_events.c.id).where(
                 assessment_audit_events.c.action == "approval.consumed",
@@ -1323,9 +1324,11 @@ def test_sensitive_approval_is_consumed_once_at_adapter_action_boundary(tmp_path
                 assessment_audit_events.c.resource_id == job["id"],
             )
         ).all()
-        job_row = connection.execute(
-            select(execution_jobs).where(execution_jobs.c.id == job["id"])
-        ).mappings().one()
+        job_row = (
+            connection.execute(select(execution_jobs).where(execution_jobs.c.id == job["id"]))
+            .mappings()
+            .one()
+        )
     assert approval["decision"] == "consumed"
     assert approval["consumed_by"] == owner
     assert job_row["approval_consumed_at"] == approval["consumed_at"]
@@ -1855,23 +1858,30 @@ def test_execution_cancellation_api_is_authenticated_scoped_and_idempotent(tmp_p
     repeated = client.post(f"{prefix}/cancel", json={}, headers=headers)
     assert repeated.status_code == 409
     assert repeated.json()["detail"]["code"] == "execution_job_terminal"
-    assert client.post(
-        f"/api/organizations/{org}/engagements/{uuid4()}/executions/{job['id']}/cancel",
-        json={},
-        headers=headers,
-    ).status_code == 404
+    assert (
+        client.post(
+            f"/api/organizations/{org}/engagements/{uuid4()}/executions/{job['id']}/cancel",
+            json={},
+            headers=headers,
+        ).status_code
+        == 404
+    )
     unauthenticated = TestClient(app, base_url="http://127.0.0.1")
     assert unauthenticated.post(f"{prefix}/cancel", json={}).status_code in {400, 401}
 
     denied = governance.request_cancellation(reviewer, org, engagement, job["id"])
     assert denied == {"outcome": "forbidden"}
     with app.state.repository.engine.connect() as connection:
-        events = connection.execute(
-            select(assessment_audit_events.c.action).where(
-                assessment_audit_events.c.resource_id == job["id"],
-                assessment_audit_events.c.action.like("execution.cancellation_%"),
+        events = (
+            connection.execute(
+                select(assessment_audit_events.c.action).where(
+                    assessment_audit_events.c.resource_id == job["id"],
+                    assessment_audit_events.c.action.like("execution.cancellation_%"),
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert events.count("execution.cancellation_requested") == 1
     assert events.count("execution.cancellation_completed") == 1
 
@@ -1895,9 +1905,7 @@ def test_approval_decision_api_requires_reviewer_or_lead_assignment(tmp_path: Pa
         user_id = str(uuid4())
         user, _personal_org = organizations.ensure_operator(email, epoch, user_id)
         organizations.add_member(owner, org, user_id, role)
-        organizations.change_assignment(
-            owner, org, engagement, user_id, role=assignment
-        )
+        organizations.change_assignment(owner, org, engagement, user_id, role=assignment)
         principals[principal_name] = (user_id, user["auth_epoch"])
 
     request = app.state.engagement_security_service.create_approval_request(
@@ -1905,10 +1913,7 @@ def test_approval_decision_api_requires_reviewer_or_lead_assignment(tmp_path: Pa
     )
     assert request is not None
     client = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50111))
-    url = (
-        f"/api/organizations/{org}/engagements/{engagement}/approvals/"
-        f"{request['id']}/decision"
-    )
+    url = f"/api/organizations/{org}/engagements/{engagement}/approvals/{request['id']}/decision"
     try:
         for principal_name in ("assessor", "observer", "viewer-reviewer"):
             user_id, auth_epoch = principals[principal_name]
@@ -2088,9 +2093,11 @@ def test_durable_cancellation_stops_sensitive_adapter_and_preserves_approval_sta
         assert outcome == {"id": job["id"], "status": "cancelled"}
     assert external_actions == (["first"] if consume_before_cancel else [])
     with app.state.repository.engine.connect() as connection:
-        persisted_job = connection.execute(
-            select(execution_jobs).where(execution_jobs.c.id == job["id"])
-        ).mappings().one()
+        persisted_job = (
+            connection.execute(select(execution_jobs).where(execution_jobs.c.id == job["id"]))
+            .mappings()
+            .one()
+        )
         persisted_approval = connection.execute(
             select(approval_requests.c.decision, approval_requests.c.consumed_at).where(
                 approval_requests.c.id == approval["id"]
@@ -2251,8 +2258,7 @@ def test_cancellation_request_interrupted_by_adapter_failure_is_audited(tmp_path
     with app.state.repository.engine.connect() as connection:
         event = connection.execute(
             select(assessment_audit_events.c.reason_code).where(
-                assessment_audit_events.c.action
-                == "execution.cancellation_interrupted_by_failure",
+                assessment_audit_events.c.action == "execution.cancellation_interrupted_by_failure",
                 assessment_audit_events.c.resource_id == job["id"],
             )
         ).scalar_one()
@@ -2463,10 +2469,13 @@ def test_preexisting_finding_is_not_attributed_and_provenance_is_tenant_bound(
     response = client.get(provenance_path)
     assert response.status_code == 200
     assert response.json()["execution"]["job_id"] == job["id"]
-    assert client.get(
-        f"/api/organizations/{foreign_org['id']}/engagements/{engagement}/executions/"
-        f"{job['id']}/provenance"
-    ).status_code == 404
+    assert (
+        client.get(
+            f"/api/organizations/{foreign_org['id']}/engagements/{engagement}/executions/"
+            f"{job['id']}/provenance"
+        ).status_code
+        == 404
+    )
     with repository.engine.begin() as connection:
         connection.execute(
             records.insert().values(
@@ -2615,15 +2624,11 @@ def test_sensitive_job_rejects_invalidated_approval_before_action(
     )
     assert job["status"] == "queued"
     if invalid_state == "reviewer_role_downgrade":
-        app.state.organization_service.update_membership(
-            owner, org, reviewer, role="viewer"
-        )
+        app.state.organization_service.update_membership(owner, org, reviewer, role="viewer")
     else:
         with app.state.repository.engine.begin() as connection:
             changes = {
-                "expired": {
-                    "expires_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
-                },
+                "expired": {"expires_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat()},
                 "revoked": {"decision": "denied"},
                 "digest_mismatch": {"request_digest": "0" * 64},
             }[invalid_state]

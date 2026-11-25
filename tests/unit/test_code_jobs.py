@@ -4,10 +4,10 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import authorize_test_operator
 from fastapi.testclient import TestClient
 
 from chinescan.core.storage.sqlite import SQLiteRepository
-from conftest import authorize_test_operator
 from chinescan.web.app import create_app
 from chinescan.web.auth import create_operator
 from chinescan.web.code_jobs import (

@@ -107,9 +107,7 @@ def test_governed_chain_api_binds_import_request_and_rejects_path_fields() -> No
     session = Session("operator@example.test", "csrf", 0, "epoch", user_id=str(uuid4()))
     app = FastAPI()
     app.include_router(
-        create_chain_execution_router(
-            Governance(), object(), lambda: session, lambda: None
-        )
+        create_chain_execution_router(Governance(), object(), lambda: session, lambda: None)
     )
     client = TestClient(app)
     response = client.post(
@@ -182,9 +180,7 @@ def test_governed_provider_policy_denial_prevents_transport(repository) -> None:
         calls += 1
         raise AssertionError("provider transport must not run after denial")
 
-    adapter = GovernedChainProviderAdapter(
-        repository, api_key="test-secret", http_get=transport
-    )
+    adapter = GovernedChainProviderAdapter(repository, api_key="test-secret", http_get=transport)
     with pytest.raises(AdapterFailure, match="CHAIN_PROVIDER_LOOKUP_FAILED"):
         adapter.execute(_provider_context(), {}, _Control(denied=True))
     assert calls == 0
@@ -193,14 +189,16 @@ def test_governed_provider_policy_denial_prevents_transport(repository) -> None:
 def test_governed_chain_import_reads_only_verified_snapshot(repository, tmp_path) -> None:
     asset_id = str(uuid4())
     snapshot_id = str(uuid4())
-    payload = [{
-        "chain": "ethereum",
-        "tx_hash": "0x" + "d" * 64,
-        "sender": SEED,
-        "receiver": "0x" + "e" * 40,
-        "amount": "2",
-        "block_time": 10,
-    }]
+    payload = [
+        {
+            "chain": "ethereum",
+            "tx_hash": "0x" + "d" * 64,
+            "sender": SEED,
+            "receiver": "0x" + "e" * 40,
+            "amount": "2",
+            "block_time": 10,
+        }
+    ]
     path = tmp_path / "trace.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
