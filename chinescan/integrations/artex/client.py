@@ -1,12 +1,16 @@
 """Single-route HTTP client for ARTEX health. No credentials, redirects, or retries."""
 
-import http.client
 import json
 import ssl
-from urllib.parse import urlsplit
 
 from chinescan.core.config.settings import ArtexIntegrationSettings
 from chinescan.integrations.artex.models import ArtexHealth
+from chinescan.integrations.artex.network import (
+    DestinationPolicyError,
+    PinnedHTTPConnection,
+    PinnedHTTPSConnection,
+    resolve_destination,
+)
 from chinescan.integrations.artex.routes import validate_outbound_route
 
 
@@ -31,25 +35,16 @@ class ArtexHealthClient:
         if not self.settings.base_url:
             raise ArtexIntegrationError("configuration_invalid")
         route = validate_outbound_route("GET", "/api/health", "health")
-        parsed = urlsplit(self.settings.base_url)
-        if not parsed.hostname:
-            raise ArtexIntegrationError("configuration_invalid")
         timeout = self.settings.timeout_seconds
-        connection: http.client.HTTPConnection | http.client.HTTPSConnection
+        connection: PinnedHTTPConnection | PinnedHTTPSConnection
         try:
-            if parsed.scheme == "https":
-                connection = http.client.HTTPSConnection(
-                    parsed.hostname,
-                    parsed.port,
-                    timeout=timeout,
-                    context=ssl.create_default_context(),
+            destination = resolve_destination(self.settings.base_url)
+            if destination.scheme == "https":
+                connection = PinnedHTTPSConnection(
+                    destination, timeout=timeout, context=ssl.create_default_context()
                 )
             else:
-                if parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
-                    raise ArtexIntegrationError("insecure_non_loopback_transport")
-                connection = http.client.HTTPConnection(
-                    parsed.hostname, parsed.port, timeout=timeout
-                )
+                connection = PinnedHTTPConnection(destination, timeout=timeout)
             connection.request("GET", route, headers={"Accept": "application/json"})
             response = connection.getresponse()
             if 300 <= response.status < 400:
@@ -73,7 +68,9 @@ class ArtexHealthClient:
                 raise ArtexIntegrationError("invalid_response_schema") from None
         except ArtexIntegrationError:
             raise
-        except (OSError, TimeoutError, http.client.HTTPException, ssl.SSLError):
+        except DestinationPolicyError as exc:
+            raise ArtexIntegrationError(exc.code) from None
+        except (OSError, TimeoutError, ssl.SSLError):
             raise ArtexIntegrationError("upstream_unavailable") from None
         finally:
             if "connection" in locals():

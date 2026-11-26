@@ -21,6 +21,22 @@ function checkFixture(overrides: Partial<CheckFixture> = {}): CheckFixture {
   };
 }
 
+function artexFixture() {
+  return {
+    integration: 'ARTEX',
+    mode: 'disabled',
+    enabled: false,
+    configuration_ready: false,
+    authentication: 'unsupported_health_only',
+    capabilities: [],
+    active_operations: false,
+    state: 'disabled',
+    checked_at: null,
+    version: null,
+    error_code: null,
+  };
+}
+
 function jsonResponse<T>(value: T, status = 200): Response {
   return new Response(JSON.stringify(value), {
     status,
@@ -52,6 +68,7 @@ function successfulFetch(checkState: CheckFixture['state'] = 'PASS'): typeof fet
         recent_errors: [],
       });
     }
+    if (path === '/api/integrations/artex/status') return jsonResponse(artexFixture());
     throw new Error(`Unexpected API request: ${path}`);
   });
 }
@@ -63,6 +80,8 @@ it('renders healthy status and accessible live updates', async () => {
   expect(await screen.findByText('[PASS]')).toBeInTheDocument();
   expect(screen.getByText('Connected to local service')).toBeInTheDocument();
   expect(screen.getByText('Version 0.1.0')).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'ARTEX integration' })).toBeInTheDocument();
+  expect(screen.getByText('Authentication: unsupported_health_only. Capabilities: none.')).toBeInTheDocument();
   expect(container.querySelector('[aria-live="polite"]')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Check system status now' })).toBeEnabled();
 });
@@ -77,6 +96,7 @@ it('shows completed endpoint results when readiness stalls and records the timeo
       });
     }
     if (path === '/api/health') return jsonResponse({ status: 'ok', version: '0.1.0', uptime_seconds: 42 });
+    if (path === '/api/integrations/artex/status') return jsonResponse(artexFixture());
     return jsonResponse({ status: 'ok', version: '0.1.0', operator_state: 'active', allowed_roots: { valid: 1, ignored: 0 }, scan_bounds: {}, recent_errors: [] });
   });
   render(<SystemStatus onUnauthorized={vi.fn()} />);
@@ -112,6 +132,7 @@ it('renders failing readiness checks from a 503 response and diagnostics summari
         recent_errors: [],
       });
     }
+    if (path === '/api/integrations/artex/status') return jsonResponse(artexFixture());
     throw new Error(`Unexpected API request: ${path}`);
   });
 
@@ -137,11 +158,11 @@ it('uses non-decreasing exponential retry intervals capped at 60 seconds', async
   let interval = 1000;
   for (let attempt = 0; attempt < 8; attempt += 1) {
     await act(async () => { await vi.advanceTimersByTimeAsync(interval - 1); });
-    expect(request).toHaveBeenCalledTimes((attempt + 1) * 3);
+    expect(request).toHaveBeenCalledTimes((attempt + 1) * 4);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     await act(async () => { await Promise.resolve(); });
     elapsed += interval;
-    expect(request).toHaveBeenCalledTimes((attempt + 2) * 3);
+    expect(request).toHaveBeenCalledTimes((attempt + 2) * 4);
     interval = Math.min(interval * 2, MAX_RETRY_INTERVAL_MS);
   }
   expect(interval).toBe(MAX_RETRY_INTERVAL_MS);
@@ -154,7 +175,7 @@ it('Check now starts one refresh, disables while in flight, then re-enables', as
   let manualRequests = 0;
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     totalRequests += 1;
-    if (totalRequests > 3) {
+    if (totalRequests > 4) {
       manualRequests += 1;
       await new Promise<void>((resolve) => { releases.push(resolve); });
     }
@@ -166,11 +187,11 @@ it('Check now starts one refresh, disables while in flight, then re-enables', as
   const checkButton = screen.getByRole('button', { name: 'Check system status now' });
   await act(async () => { checkButton.click(); });
   expect(checkButton).toBeDisabled();
-  expect(manualRequests).toBe(3);
+  expect(manualRequests).toBe(4);
   await act(async () => { releases.forEach((release) => release()); });
   expect(await screen.findByRole('status')).toHaveTextContent('System check complete: connected');
   expect(checkButton).toBeEnabled();
-  expect(manualRequests).toBe(3);
+  expect(manualRequests).toBe(4);
 });
 
 it('resets retry delay after recovery', async () => {
@@ -188,7 +209,7 @@ it('resets retry delay after recovery', async () => {
   await act(async () => { await Promise.resolve(); });
   await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
   await act(async () => { await Promise.resolve(); });
-  expect(requestCount).toBe(6);
+  expect(requestCount).toBe(8);
 
   shouldFail = false;
   await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
@@ -200,7 +221,7 @@ it('resets retry delay after recovery', async () => {
   await act(async () => { await vi.advanceTimersByTimeAsync(999); });
   expect(requestCount).toBe(countAfterFailure);
   await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-  expect(requestCount).toBe(countAfterFailure + 3);
+  expect(requestCount).toBe(countAfterFailure + 4);
 });
 
 it('stops polling and clears timers on unmount', async () => {

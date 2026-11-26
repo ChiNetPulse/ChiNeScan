@@ -301,6 +301,73 @@ def test_crash_recovery_separates_safe_retry_from_uncertain_external_actions(
         repo.close()
 
 
+def test_reconciliation_is_authorized_audited_and_requires_evidence(tmp_path: Path) -> None:
+    repo, _orgs, _sec, gov, operator_id, org_id, eng_id, job_id = _seed_governed_job(tmp_path)
+    try:
+        claimed = gov.claim_job(job_id, "worker-reconcile", lease_duration_seconds=5.0, now=100.0)
+        assert claimed is not None
+        generation = int(claimed["lease_generation"])
+        assert gov.revalidate_job(
+            job_id, worker_id="worker-reconcile", lease_generation=generation, now=100.0
+        )
+        assert gov.authorize_external_action(
+            job_id,
+            "app.example.test",
+            "service_fingerprint",
+            worker_id="worker-reconcile",
+            lease_generation=generation,
+            now=100.0,
+        )
+        assert gov.mark_action_in_progress(
+            job_id, worker_id="worker-reconcile", lease_generation=generation, now=100.0
+        )
+        assert gov.recover_stale_jobs(now=200.0) == [
+            {"id": job_id, "outcome": "reconciliation_required"}
+        ]
+
+        unresolved = gov.list_reconciliation_jobs(operator_id, org_id, eng_id)
+        assert unresolved is not None and len(unresolved) == 1
+        assert unresolved[0]["error_code"] == "EXTERNAL_OUTCOME_UNCERTAIN"
+        assert unresolved[0]["attempt"]["state"] == "outcome_uncertain"
+
+        # The seeded reviewer assignment is read-only and cannot resolve an action.
+        forbidden = gov.resolve_reconciliation(
+            "22222222-2222-4222-8222-222222222222",
+            org_id,
+            eng_id,
+            job_id,
+            resolution="confirmed_success",
+            evidence_reference="ticket:unauthorized",
+        )
+        assert forbidden == {"outcome": "forbidden"}
+
+        resolved = gov.resolve_reconciliation(
+            operator_id,
+            org_id,
+            eng_id,
+            job_id,
+            resolution="confirmed_success",
+            evidence_reference="ticket:reconcile-001",
+        )
+        assert resolved is not None and resolved["outcome"] == "resolved"
+        assert resolved["resolution"] == "confirmed_success"
+        with repo.engine.connect() as connection:
+            job = connection.execute(
+                select(execution_jobs).where(execution_jobs.c.id == job_id)
+            ).one()
+            attempt = connection.execute(
+                select(execution_action_attempts).where(
+                    execution_action_attempts.c.job_id == job_id
+                )
+            ).one()
+        assert job.status == "completed"
+        assert attempt.state == "completed"
+        assert attempt.result_reference == "ticket:reconcile-001"
+        assert attempt.outcome_classification == "manually_confirmed_success"
+    finally:
+        repo.close()
+
+
 def test_action_attempt_immutability_and_duplicate_action_blocked(tmp_path: Path) -> None:
     repo, _orgs, _sec, gov, _uid, _oid, _eid, job_id = _seed_governed_job(tmp_path)
     try:

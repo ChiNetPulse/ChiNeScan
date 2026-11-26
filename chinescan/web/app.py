@@ -1490,6 +1490,14 @@ def create_app(
             "integration": "ARTEX",
             "mode": profile.mode,
             "enabled": profile.enabled and profile.health_enabled,
+            "configuration_ready": bool(
+                profile.enabled
+                and profile.health_enabled
+                and profile.release_id
+                and profile.base_url
+            ),
+            "authentication": "unsupported_health_only",
+            "capabilities": ["health"] if profile.enabled and profile.health_enabled else [],
             "active_operations": False,
             "state": state.state,
             "checked_at": state.checked_at,

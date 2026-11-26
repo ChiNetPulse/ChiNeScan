@@ -2104,6 +2104,192 @@ class ExecutionGovernanceService:
             ).first()
             return dict(row._mapping) if row else None
 
+    def list_reconciliation_jobs(
+        self, user_id: str, organization_id: str, engagement_id: str, limit: int = 50
+    ) -> list[dict[str, Any]] | None:
+        """List unresolved jobs for an operator allowed to manage the engagement.
+
+        Only safe operational metadata is returned; immutable execution payloads and
+        upstream response data remain behind the existing provenance boundary.
+        """
+        with self.engine.connect() as connection:
+            if not self.security._can_manage(connection, user_id, organization_id, engagement_id):
+                return None
+            rows = connection.execute(
+                select(execution_jobs)
+                .where(
+                    execution_jobs.c.organization_id == organization_id,
+                    execution_jobs.c.engagement_id == engagement_id,
+                    execution_jobs.c.status == "reconciliation_required",
+                )
+                .order_by(execution_jobs.c.created_at.asc())
+                .limit(max(1, min(limit, 100)))
+            ).all()
+            items: list[dict[str, Any]] = []
+            for row in rows:
+                job = dict(row._mapping)
+                attempt = connection.execute(
+                    select(execution_action_attempts)
+                    .where(execution_action_attempts.c.job_id == job["id"])
+                    .order_by(execution_action_attempts.c.action_sequence.desc())
+                    .limit(1)
+                ).first()
+                attempt_data = dict(attempt._mapping) if attempt else None
+                items.append(
+                    {
+                        "id": job["id"],
+                        "status": job["status"],
+                        "error_code": job["error_code"],
+                        "organization_id": job["organization_id"],
+                        "engagement_id": job["engagement_id"],
+                        "requester_user_id": job["requester_user_id"],
+                        "target": job["target"],
+                        "technique": job["technique"],
+                        "action_class": job["action_class"],
+                        "request_digest": job["request_digest"],
+                        "approval_id": job["approval_id"],
+                        "created_at": job["created_at"],
+                        "started_at": job["started_at"],
+                        "finished_at": job["finished_at"],
+                        "attempt": (
+                            {
+                                "id": attempt_data["id"],
+                                "state": attempt_data["state"],
+                                "action_sequence": attempt_data["action_sequence"],
+                                "outcome_classification": attempt_data["outcome_classification"],
+                                "started_at": attempt_data["started_at"],
+                                "updated_at": attempt_data["updated_at"],
+                            }
+                            if attempt_data
+                            else None
+                        ),
+                    }
+                )
+            return items
+
+    def resolve_reconciliation(
+        self,
+        user_id: str,
+        organization_id: str,
+        engagement_id: str,
+        job_id: str,
+        *,
+        resolution: str,
+        evidence_reference: str,
+    ) -> dict[str, Any] | None:
+        """Resolve one uncertain action with an authorized, auditable decision."""
+        if resolution not in {"confirmed_success", "confirmed_failure"}:
+            raise ValueError("Unsupported reconciliation resolution.")
+        evidence = evidence_reference.strip()
+        if not evidence or len(evidence) > 120:
+            raise ValueError("Reconciliation evidence reference is required and bounded.")
+        stamp = now_iso()
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    select(execution_jobs).where(
+                        execution_jobs.c.id == job_id,
+                        execution_jobs.c.organization_id == organization_id,
+                        execution_jobs.c.engagement_id == engagement_id,
+                        execution_jobs.c.status == "reconciliation_required",
+                    )
+                ).first()
+                if not row:
+                    connection.rollback()
+                    return None
+                job = dict(row._mapping)
+                if not self.security._can_manage(
+                    connection, user_id, organization_id, engagement_id
+                ):
+                    self.security._audit(
+                        connection,
+                        organization_id,
+                        engagement_id,
+                        user_id,
+                        "execution.reconciliation_rejected",
+                        "execution_job",
+                        job_id,
+                        decision="DENY",
+                        reason_code="RECONCILIATION_FORBIDDEN",
+                        details={"resolution": resolution},
+                    )
+                    connection.commit()
+                    return {"outcome": "forbidden"}
+                attempt = connection.execute(
+                    select(execution_action_attempts)
+                    .where(
+                        execution_action_attempts.c.job_id == job_id,
+                        execution_action_attempts.c.state.in_(
+                            ["outcome_uncertain", "reconciliation_required"]
+                        ),
+                    )
+                    .order_by(execution_action_attempts.c.action_sequence.desc())
+                    .limit(1)
+                ).first()
+                if not attempt:
+                    connection.rollback()
+                    return {"outcome": "invalid_state"}
+                attempt_values: dict[str, Any] = {
+                    "outcome_classification": f"manually_{resolution}",
+                    "result_reference": evidence,
+                    "updated_at": stamp,
+                }
+                if resolution == "confirmed_success":
+                    attempt_values.update(state="completed", completed_at=stamp)
+                connection.execute(
+                    update(execution_action_attempts)
+                    .where(
+                        execution_action_attempts.c.id == attempt.id,
+                        execution_action_attempts.c.state.in_(
+                            ["outcome_uncertain", "reconciliation_required"]
+                        ),
+                    )
+                    .values(**attempt_values)
+                )
+                job_values = {
+                    "status": "completed" if resolution == "confirmed_success" else "failed",
+                    "finished_at": stamp,
+                    "error_code": (
+                        None
+                        if resolution == "confirmed_success"
+                        else "EXTERNAL_ACTION_CONFIRMED_FAILED"
+                    ),
+                }
+                connection.execute(
+                    update(execution_jobs)
+                    .where(
+                        execution_jobs.c.id == job_id,
+                        execution_jobs.c.status == "reconciliation_required",
+                    )
+                    .values(**job_values)
+                )
+                self.security._audit(
+                    connection,
+                    organization_id,
+                    engagement_id,
+                    user_id,
+                    "execution.reconciliation_resolved",
+                    "execution_job",
+                    job_id,
+                    decision="ALLOW",
+                    reason_code="RECONCILIATION_RESOLVED",
+                    details={
+                        "resolution": resolution,
+                        "evidence_reference": evidence,
+                        "action_id": attempt.id,
+                    },
+                )
+                connection.commit()
+                return {
+                    "outcome": "resolved",
+                    "resolution": resolution,
+                    "job": {**job, **job_values},
+                }
+            except Exception:
+                connection.rollback()
+                raise
+
     def mark_action_in_progress(
         self,
         job_id: str,

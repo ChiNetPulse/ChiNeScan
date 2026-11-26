@@ -1,6 +1,7 @@
 """Milestone 1 ARTEX policy, client, and HTTP route smoke tests."""
 
 import json
+import socket
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -16,6 +17,11 @@ from pydantic import ValidationError
 from chinescan.core.config.settings import ArtexIntegrationSettings, Settings
 from chinescan.integrations.artex.client import ArtexHealthClient, ArtexIntegrationError
 from chinescan.integrations.artex.models import ArtexAuditEvent, ArtexHealth
+from chinescan.integrations.artex.network import (
+    DestinationPolicyError,
+    PinnedHTTPConnection,
+    resolve_destination,
+)
 from chinescan.integrations.artex.routes import RouteDenied, validate_outbound_route
 from chinescan.web.app import create_app
 from chinescan.web.auth import create_operator
@@ -161,6 +167,135 @@ def test_non_loopback_cleartext_and_url_components_are_rejected() -> None:
             ArtexIntegrationSettings(**common, base_url=base_url)
 
 
+@pytest.mark.parametrize(
+    "address",
+    [
+        "127.0.0.1",
+        "::1",
+        "169.254.169.254",
+        "10.10.10.10",
+        "192.168.1.10",
+        "224.0.0.1",
+        "0.0.0.0",
+        "::ffff:10.10.10.10",
+    ],
+)
+def test_destination_policy_rejects_non_public_addresses(
+    monkeypatch: pytest.MonkeyPatch, address: str
+) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (
+                socket.AF_INET6 if ":" in address else socket.AF_INET,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                (address, 443, 0, 0) if ":" in address else (address, 443),
+            )
+        ],
+    )
+    with pytest.raises(DestinationPolicyError, match="destination_not_allowed"):
+        resolve_destination("https://artex.example.test")
+
+
+def test_destination_policy_accepts_public_ipv4_and_ipv6(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:4860:4860::8888", 443, 0, 0)),
+        ],
+    )
+    destination = resolve_destination("https://artex.example.test")
+    assert destination.hostname == "artex.example.test"
+    assert destination.sockaddr[0] == "93.184.216.34"
+
+
+def test_destination_policy_rejects_mixed_dns_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 443)),
+        ],
+    )
+    with pytest.raises(DestinationPolicyError, match="destination_not_allowed"):
+        resolve_destination("https://artex.example.test")
+
+
+def test_pinned_transport_does_not_resolve_again_after_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    def initial_resolution(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", initial_resolution)
+    destination = resolve_destination("https://artex.example.test")
+
+    def rebinding_resolution(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        raise AssertionError("pinned transport must not perform a second DNS lookup")
+
+    monkeypatch.setattr(socket, "getaddrinfo", rebinding_resolution)
+
+    class FakeSocket:
+        def settimeout(self, _timeout: float | None) -> None:
+            return None
+
+        def connect(self, sockaddr: tuple[object, ...]) -> None:
+            calls.append(tuple(sockaddr))
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "chinescan.integrations.artex.network.socket.socket", lambda *_args: FakeSocket()
+    )
+    connection = PinnedHTTPConnection(destination, timeout=1.0)
+    connection.connect()
+    connection.close()
+    assert calls == [("93.184.216.34", 443)]
+
+
+def test_destination_policy_allows_explicit_loopback_only_for_local_host() -> None:
+    destination = resolve_destination("http://127.0.0.1:43123")
+    assert destination.hostname == "127.0.0.1"
+    assert destination.port == 43123
+
+
+def test_destination_policy_rejects_non_default_public_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 8443))
+        ],
+    )
+    with pytest.raises(DestinationPolicyError, match="unexpected_port"):
+        resolve_destination("https://artex.example.test:8443")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:secret@artex.example.test",
+        "https://artex.example.test/api/health",
+        "https://[not-an-ipv6-host",
+        "ftp://artex.example.test",
+    ],
+)
+def test_destination_policy_rejects_malformed_or_unexpected_urls(url: str) -> None:
+    with pytest.raises(DestinationPolicyError, match="configuration_invalid"):
+        resolve_destination(url)
+
+
 def test_health_schema_is_strict_and_bounded() -> None:
     with pytest.raises(ValidationError):
         ArtexHealth.model_validate(
@@ -213,6 +348,9 @@ def test_http_routes_require_auth_and_preserve_disabled_default(tmp_path: Path) 
             assert status_body["enabled"] is False
             assert status_body["state"] == "disabled"
             assert status_body["active_operations"] is False
+            assert status_body["configuration_ready"] is False
+            assert status_body["authentication"] == "unsupported_health_only"
+            assert status_body["capabilities"] == []
 
             health_resp = client.get("/api/integrations/artex/health")
             assert health_resp.status_code == 403
@@ -244,6 +382,7 @@ def test_http_health_route_handles_success_and_redirect(tmp_path: Path) -> None:
                 assert status_resp.status_code == 200
                 assert status_resp.json()["state"] == "available"
                 assert status_resp.json()["version"] == "build-placeholder"
+                assert status_resp.json()["capabilities"] == ["health"]
         finally:
             application.state.repository.close()
         assert seen_paths == ["/api/health"]
