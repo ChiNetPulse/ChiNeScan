@@ -77,6 +77,24 @@ def test_nmap_status_is_authenticated_and_disabled_by_default(tmp_path: Path) ->
     assert missing.status_code == 404
 
 
+def test_nuclei_status_is_authenticated_and_disabled_by_default(tmp_path: Path) -> None:
+    credential = tmp_path / "private" / "operator.json"
+    create_operator(credential, "nuclei-api@example.test", "safe local password")
+    app = create_app(tmp_path / "status.sqlite3", credential, serve_frontend=False)
+    client = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50001))
+    assert client.get("/api/integrations/nuclei/status").status_code == 401
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "nuclei-api@example.test", "password": "safe local password"},
+        headers={"Origin": "http://127.0.0.1"},
+    )
+    assert login.status_code == 200
+    status = client.get("/api/integrations/nuclei/status")
+    assert status.status_code == 200
+    assert status.json()["enabled"] is False
+    assert status.json()["configuration_ready"] is False
+
+
 def test_nmap_executor_rejects_bad_versions_and_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         subprocess,

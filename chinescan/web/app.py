@@ -53,10 +53,12 @@ from chinescan.core.execution_adapters import (
     GovernedLogAnalysisAdapter,
     GovernedMalwareStaticTriageAdapter,
     GovernedNmapAdapter,
+    GovernedNucleiAdapter,
     RepositoryCodeAssessmentAdapter,
     build_default_adapter_registry,
 )
 from chinescan.core.execution_governance import ExecutionGovernanceService, GovernedDomainWorker
+from chinescan.core.execution_isolation import IsolationProfile, isolation_status
 from chinescan.core.external_reports import (
     MAX_EXTERNAL_REPORT_BYTES,
     ExternalReportError,
@@ -114,6 +116,8 @@ from chinescan.core.storage.sqlite import SQLiteRepository
 from chinescan.integrations.artex.client import ArtexHealthClient, ArtexIntegrationError
 from chinescan.integrations.artex.models import ArtexAuditEvent, ArtexSyncState
 from chinescan.integrations.nmap.executor import NmapExecutor
+from chinescan.integrations.nuclei.executor import NucleiExecutor
+from chinescan.integrations.nuclei.profiles import profile_listing as nuclei_profile_listing
 from chinescan.malware_analysis.managed import (
     ManagedSampleError,
     SampleRegistry,
@@ -146,6 +150,7 @@ from chinescan.web.log_jobs import LogJobManager, LogSourceError, LogSourceRegis
 from chinescan.web.malware_evidence_api import create_malware_evidence_router
 from chinescan.web.malware_jobs import MalwareDashboardManager
 from chinescan.web.nmap_api import create_nmap_router
+from chinescan.web.nuclei_api import create_nuclei_router
 from chinescan.web.organization_api import create_organization_router
 from chinescan.web.rate_limit import InProcessRateLimiter
 from chinescan.web.repository_execution_api import create_repository_router
@@ -799,9 +804,42 @@ def create_app(
                 timeout_seconds=active_settings.integrations.nmap.timeout_seconds,
                 max_output_bytes=active_settings.integrations.nmap.max_output_bytes,
                 expected_major=active_settings.integrations.nmap.expected_major,
+                isolation_profile=IsolationProfile(
+                    cpu_seconds=resource_limits.scanner_cpu_seconds,
+                    memory_bytes=resource_limits.scanner_memory_bytes,
+                    max_processes=resource_limits.scanner_process_count,
+                    max_open_files=resource_limits.scanner_open_files,
+                    max_file_bytes=resource_limits.scanner_temp_bytes,
+                    network_isolation_required=True,
+                ),
+                require_hardened_isolation=active_settings.integrations.nmap.require_hardened_isolation,
             ),
         )
         if active_settings.integrations.nmap.enabled
+        else None
+    )
+    nuclei_adapter = (
+        GovernedNucleiAdapter(
+            repository,
+            NucleiExecutor(
+                binary=active_settings.integrations.nuclei.binary,
+                template_directory=active_settings.integrations.nuclei.template_directory,
+                approved_templates=active_settings.integrations.nuclei.approved_templates,
+                timeout_seconds=active_settings.integrations.nuclei.timeout_seconds,
+                max_output_bytes=active_settings.integrations.nuclei.max_output_bytes,
+                expected_major=active_settings.integrations.nuclei.expected_major,
+                isolation_profile=IsolationProfile(
+                    cpu_seconds=resource_limits.scanner_cpu_seconds,
+                    memory_bytes=resource_limits.scanner_memory_bytes,
+                    max_processes=resource_limits.scanner_process_count,
+                    max_open_files=resource_limits.scanner_open_files,
+                    max_file_bytes=resource_limits.scanner_temp_bytes,
+                    network_isolation_required=True,
+                ),
+                require_hardened_isolation=active_settings.integrations.nuclei.require_hardened_isolation,
+            ),
+        )
+        if active_settings.integrations.nuclei.enabled
         else None
     )
     execution_governance.adapters = build_default_adapter_registry(
@@ -811,6 +849,7 @@ def create_app(
         chain_import_adapter=chain_import_adapter,
         chain_provider_adapter=chain_provider_adapter,
         nmap_adapter=nmap_adapter,
+        nuclei_adapter=nuclei_adapter,
     )
     execution_governance.repository_scan_bounds = {
         "max_files": active_settings.max_files,
@@ -1467,6 +1506,15 @@ def create_app(
     )
     application.router.routes.extend(nmap_router.routes)
 
+    nuclei_router = create_nuclei_router(
+        execution_governance,
+        repository,
+        active_settings.integrations.nuclei,
+        current_session,
+        require_csrf,
+    )
+    application.router.routes.extend(nuclei_router.routes)
+
     chain_execution_router = create_chain_execution_router(
         execution_governance, governed_domain_worker, current_session, require_csrf
     )
@@ -1537,10 +1585,24 @@ def create_app(
     def nmap_status(_session: Session = Depends(current_session)) -> dict[str, Any]:  # noqa: B008
         """Return non-sensitive Nmap readiness without probing the local binary."""
         profile = active_settings.integrations.nmap
+        isolation = isolation_status()
+        isolation_ready = bool(
+            not profile.require_hardened_isolation
+            or (isolation["hardened_supported"] and isolation["network_isolation"])
+        )
         return {
             "integration": "Nmap",
             "enabled": profile.enabled,
-            "configuration_ready": bool(profile.enabled and profile.binary),
+            "configuration_ready": bool(profile.enabled and profile.binary and isolation_ready),
+            "readiness_code": (
+                None
+                if isolation_ready
+                else (
+                    "hardened_isolation_unavailable"
+                    if not isolation["hardened_supported"]
+                    else "network_isolation_unavailable"
+                )
+            ),
             "profiles": [
                 "host_discovery",
                 "basic_port_assessment",
@@ -1548,6 +1610,40 @@ def create_app(
             ],
             "target_types": ["ip", "cidr"],
             "hostname_targets_supported": False,
+            "isolation": isolation,
+        }
+
+    @application.get("/api/integrations/nuclei/status")
+    def nuclei_status(_session: Session = Depends(current_session)) -> dict[str, Any]:  # noqa: B008
+        """Return non-sensitive Nuclei readiness and approved-template metadata."""
+        profile = active_settings.integrations.nuclei
+        isolation = isolation_status()
+        isolation_ready = bool(
+            not profile.require_hardened_isolation
+            or (isolation["hardened_supported"] and isolation["network_isolation"])
+        )
+        return {
+            "integration": "Nuclei",
+            "enabled": profile.enabled,
+            "configuration_ready": bool(
+                profile.enabled
+                and profile.binary
+                and profile.template_directory
+                and isolation_ready
+            ),
+            "readiness_code": (
+                None
+                if isolation_ready
+                else (
+                    "hardened_isolation_unavailable"
+                    if not isolation["hardened_supported"]
+                    else "network_isolation_unavailable"
+                )
+            ),
+            "profiles": nuclei_profile_listing(),
+            "approved_templates": sorted(profile.approved_templates),
+            "target_types": ["ip", "cidr"],
+            "isolation": isolation,
         }
 
     @application.get("/api/integrations/artex/health")

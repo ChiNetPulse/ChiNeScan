@@ -62,6 +62,7 @@ from chinescan.integrations.nmap.targets import NmapTargetError, validate_nmap_t
 
 JOB_CONTEXT_TTL = timedelta(minutes=10)
 NMAP_TECHNIQUE = "port_scan"
+NUCLEI_TECHNIQUE = "vulnerability_scan"
 ACTIVE_JOB_LIMIT = 4
 GLOBAL_ACTIVE_JOB_LIMIT = 16
 DEFAULT_LEASE_DURATION_SECONDS = 30.0
@@ -158,7 +159,7 @@ class ExecutionGovernanceService:
                             raise ValueError("Assessment parameters are invalid.") from None
                         stored_context_key = (
                             "operation_parameters"
-                            if item["technique"] == NMAP_TECHNIQUE
+                            if item["technique"] in {NMAP_TECHNIQUE, NUCLEI_TECHNIQUE}
                             else "chain_context"
                         )
                         if (
@@ -202,7 +203,11 @@ class ExecutionGovernanceService:
                         "reason_code": "TECHNIQUE_UNSUPPORTED",
                         "explanation": "No enabled adapter supports this operation.",
                     }
-                if parameters and technique not in {CHAIN_IMPORT_TECHNIQUE, NMAP_TECHNIQUE}:
+                if parameters and technique not in {
+                    CHAIN_IMPORT_TECHNIQUE,
+                    NMAP_TECHNIQUE,
+                    NUCLEI_TECHNIQUE,
+                }:
                     connection.rollback()
                     return {
                         "decision": "DENY",
@@ -269,6 +274,7 @@ class ExecutionGovernanceService:
                 chain_context: dict[str, Any] = {}
                 chain_adapter_context: dict[str, Any] = {}
                 nmap_context: dict[str, Any] = {}
+                nuclei_context: dict[str, Any] = {}
                 operation_parameters: dict[str, Any] = {}
                 policy_request_digest = decision["request_digest"]
                 request_digest = policy_request_digest
@@ -514,6 +520,37 @@ class ExecutionGovernanceService:
                         json.dumps(digest_context, sort_keys=True, separators=(",", ":")).encode()
                     ).hexdigest()
 
+                if technique == NUCLEI_TECHNIQUE:
+                    operation_parameters = parameters
+                    nuclei_context = {
+                        "adapter_id": adapter.capabilities.adapter_id,
+                        "adapter_version": "1",
+                    }
+                    digest_context = {
+                        "policy_request_digest": policy_request_digest,
+                        "organization_id": organization_id,
+                        "engagement_id": engagement_id,
+                        "requester_user_id": user_id,
+                        "asset_id": asset_id,
+                        "target": decision["target"],
+                        "technique": technique,
+                        "action_class": decision["action_class"],
+                        "scope_revision_id": decision["scope_revision_id"],
+                        "authorization_id": decision["authorization_id"],
+                        "authorization_document_sha256": connection.execute(
+                            select(authorization_documents.c.sha256).where(
+                                authorization_documents.c.organization_id == organization_id,
+                                authorization_documents.c.authorization_id
+                                == decision["authorization_id"],
+                            )
+                        ).scalar_one_or_none(),
+                        "operation_parameters": operation_parameters,
+                        **nuclei_context,
+                    }
+                    request_digest = hashlib.sha256(
+                        json.dumps(digest_context, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
+
                 if asset.asset_type == "malware_evidence":
                     malware_snapshot = connection.execute(
                         select(malware_evidence_snapshots).where(
@@ -631,6 +668,7 @@ class ExecutionGovernanceService:
                         or malware_context
                         or chain_context
                         or nmap_context
+                        or nuclei_context
                     )
                     else None,
                     **repository_context,
@@ -638,6 +676,7 @@ class ExecutionGovernanceService:
                     **malware_context,
                     **chain_adapter_context,
                     **nmap_context,
+                    **nuclei_context,
                     "operation_parameters": operation_parameters or None,
                     **({"chain_context": chain_context} if chain_context else {}),
                     "created_at": _stamp(now),
@@ -666,6 +705,7 @@ class ExecutionGovernanceService:
                         or malware_context
                         or chain_context
                         or nmap_context
+                        or nuclei_context
                     )
                     else None,
                     "repository_binding_id": repository_context.get("repository_binding_id"),
@@ -690,6 +730,7 @@ class ExecutionGovernanceService:
                         or malware_context
                         or chain_adapter_context
                         or nmap_context
+                        or nuclei_context
                     ).get("adapter_id"),
                     "adapter_version": (
                         repository_context
@@ -697,6 +738,7 @@ class ExecutionGovernanceService:
                         or malware_context
                         or chain_adapter_context
                         or nmap_context
+                        or nuclei_context
                     ).get("adapter_version"),
                     "exclusion_policy_version": repository_context.get("exclusion_policy_version"),
                     "log_evidence_snapshot_id": log_context.get("log_evidence_snapshot_id"),

@@ -112,12 +112,28 @@ class NmapIntegrationSettings(BaseModel):
     expected_major: int | None = Field(default=None, ge=1, le=99)
     timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     max_output_bytes: int = Field(default=4_194_304, ge=1024, le=33_554_432)
+    require_hardened_isolation: bool = True
+
+
+class NucleiIntegrationSettings(BaseModel):
+    """Disabled-by-default, administrator-controlled Nuclei settings."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    binary: str = Field(default="nuclei", min_length=1, max_length=255)
+    expected_major: int | None = Field(default=None, ge=1, le=99)
+    timeout_seconds: float = Field(default=120.0, gt=0, le=600)
+    max_output_bytes: int = Field(default=8_388_608, ge=1024, le=33_554_432)
+    require_hardened_isolation: bool = True
+    template_directory: Path | None = None
+    approved_templates: dict[str, str] = Field(default_factory=dict)
 
 
 class IntegrationsSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     artex: ArtexIntegrationSettings = Field(default_factory=ArtexIntegrationSettings)
     nmap: NmapIntegrationSettings = Field(default_factory=NmapIntegrationSettings)
+    nuclei: NucleiIntegrationSettings = Field(default_factory=NucleiIntegrationSettings)
 
 
 class Settings(BaseSettings):
@@ -166,6 +182,13 @@ class Settings(BaseSettings):
     execution_max_queue_wait_seconds: int = Field(default=900, ge=1, le=86_400)
     execution_operation_timeout_seconds: float = Field(default=60.0, ge=0.5, le=600.0)
     execution_shutdown_grace_seconds: float = Field(default=5.0, ge=0.1, le=120.0)
+    # Scanner worker limits are administrative ceilings passed to the isolated
+    # subprocess boundary; callers cannot override them per request.
+    scanner_cpu_seconds: int = Field(default=60, ge=1, le=600)
+    scanner_memory_bytes: int = Field(default=536_870_912, ge=16_777_216, le=4_294_967_296)
+    scanner_process_count: int = Field(default=64, ge=1, le=256)
+    scanner_open_files: int = Field(default=256, ge=16, le=4096)
+    scanner_temp_bytes: int = Field(default=33_554_432, ge=1024, le=536_870_912)
     archive_max_entries: int = Field(default=10_000, ge=1, le=100_000)
     archive_max_nesting: int = Field(default=4, ge=1, le=16)
     archive_max_decompressed_bytes: int = Field(default=268_435_456, ge=1024, le=2_147_483_648)

@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 
 from chinescan.core.engagement_security import _utc
+from chinescan.core.evidence_ingestion import EvidenceIngestionError, EvidenceIngestionService
 from chinescan.core.log_evidence import LogEvidenceStore
 from chinescan.core.malware_evidence import (
     ANALYSIS_VERSION as MALWARE_ANALYSIS_VERSION,
@@ -46,6 +47,8 @@ from chinescan.domain_assessment.service import DomainAssessmentService
 from chinescan.integrations.nmap.executor import NmapExecutionError, NmapExecutor
 from chinescan.integrations.nmap.profiles import NMAP_PROFILES
 from chinescan.integrations.nmap.targets import NmapTargetError, validate_nmap_target
+from chinescan.integrations.nuclei.executor import NucleiExecutionError, NucleiExecutor
+from chinescan.integrations.nuclei.profiles import validate_parameters as validate_nuclei_parameters
 from chinescan.log_analysis.service import (
     LOG_ANALYSIS_VERSION,
     LOG_RULESET_VERSION,
@@ -459,6 +462,7 @@ class GovernedNmapAdapter:
     def __init__(self, repository: SQLiteRepository, executor: NmapExecutor) -> None:
         self.repository = repository
         self.executor = executor
+        self.evidence = EvidenceIngestionService(repository)
         self._capabilities = AdapterCapabilities(
             adapter_id="builtin.governed-nmap",
             techniques=("port_scan",),
@@ -514,6 +518,12 @@ class GovernedNmapAdapter:
             raise AdapterFailure("NMAP_TARGET_NOT_CANONICAL")
         profile = normalized["profile"]
         ports = normalized["ports"]
+        availability_check = getattr(self.executor, "check_available", None)
+        if callable(availability_check):
+            try:
+                availability_check()
+            except NmapExecutionError as exc:
+                raise AdapterFailure(f"NMAP_{exc.code.upper()}") from None
         control.report_progress(5, "revalidating")
         control.authorize_external_action(context.target, context.technique)
         control.report_progress(10, "nmap_started")
@@ -522,27 +532,29 @@ class GovernedNmapAdapter:
         except NmapExecutionError as exc:
             raise AdapterFailure(f"NMAP_{exc.code.upper()}") from None
         control.check_cancelled()
-        result_id = str(uuid5(NAMESPACE_URL, f"chinescan-nmap:{context.job_id}"))
         payload = {
-            "result_id": result_id,
-            "organization_id": context.organization_id,
-            "engagement_id": context.engagement_id,
-            "job_id": context.job_id,
-            "scope_revision_id": context.scope_revision_id,
-            "authorization_id": context.authorization_id,
-            "target": context.target,
-            "profile": profile,
-            "tool": "nmap",
-            "tool_version": parsed.nmap_version,
             "result": parsed.model_dump(mode="json"),
+            "profile": profile,
+            "authorization_id": context.authorization_id,
+            "approval_id": context.approval_id,
         }
+        try:
+            result_id, envelope = self.evidence.ingest(
+                context,
+                evidence_type="nmap_result",
+                source_format="nmap_xml_normalized",
+                parser_version="chinescan-nmap-parser-v2",
+                tool="nmap",
+                tool_version=parsed.nmap_version,
+                payload=payload,
+                collected_at=parsed.finished_at,
+            )
+        except EvidenceIngestionError as exc:
+            raise AdapterFailure(f"NMAP_EVIDENCE_{str(exc).upper()}") from None
         with self.repository.member_context(
             context.organization_id, context.requester_user_id, write=True
         ):
             with self.repository.execution_provenance_context(context.model_dump(mode="json")):
-                self.repository.save(
-                    "evidence", result_id, {**payload, "evidence_type": "nmap_result"}
-                )
                 self.repository.save(
                     "scan",
                     result_id,
@@ -559,6 +571,7 @@ class GovernedNmapAdapter:
                             "host_count": parsed.host_count,
                             "scope_revision_id": context.scope_revision_id,
                             "authorization_id": context.authorization_id,
+                            "evidence_sha256": envelope.content_sha256,
                         },
                     },
                 )
@@ -573,6 +586,136 @@ class GovernedNmapAdapter:
                 "port_count": parsed.port_count,
                 "tool_version": parsed.nmap_version,
                 "evidence_record_type": "nmap_result",
+                "evidence_sha256": envelope.content_sha256,
+                "output_bytes": getattr(
+                    getattr(self.executor, "last_telemetry", None), "output_bytes", None
+                ),
+                "duration_seconds": getattr(
+                    getattr(self.executor, "last_telemetry", None), "duration_seconds", None
+                ),
+            },
+        )
+
+
+class GovernedNucleiAdapter:
+    """Restricted Nuclei adapter; templates and execution remain centrally governed."""
+
+    def __init__(self, repository: SQLiteRepository, executor: NucleiExecutor) -> None:
+        self.repository = repository
+        self.executor = executor
+        self.evidence = EvidenceIngestionService(repository)
+        self._capabilities = AdapterCapabilities(
+            adapter_id="builtin.governed-nuclei",
+            techniques=("vulnerability_scan",),
+            target_types=("ip", "cidr"),
+            action_class="controlled_active",
+            enabled=True,
+            performs_external_operations=True,
+        )
+
+    @property
+    def capabilities(self) -> AdapterCapabilities:
+        return self._capabilities
+
+    def validate_parameters(self, parameters: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return validate_nuclei_parameters(parameters, self.executor.approved_templates or {})
+        except (TypeError, ValueError):
+            raise ValueError("Nuclei parameters are invalid.") from None
+
+    def execute(
+        self,
+        context: ExecutionContext,
+        parameters: dict[str, Any],
+        control: AdapterControl,
+    ) -> AdapterResult:
+        if (
+            context.technique != "vulnerability_scan"
+            or context.asset_type not in {"ip", "cidr"}
+            or context.action_class != "controlled_active"
+            or context.adapter_id != self.capabilities.adapter_id
+            or context.adapter_version != "1"
+        ):
+            raise AdapterFailure("NUCLEI_EXECUTION_CONTEXT_INVALID")
+        try:
+            target = validate_nmap_target(context.target, asset_type=context.asset_type)
+            normalized = self.validate_parameters(parameters)
+        except (NmapTargetError, ValueError):
+            raise AdapterFailure("NUCLEI_PARAMETERS_INVALID") from None
+        if target != context.target:
+            raise AdapterFailure("NUCLEI_TARGET_NOT_CANONICAL")
+        availability_check = getattr(self.executor, "check_available", None)
+        if callable(availability_check):
+            try:
+                availability_check()
+            except NucleiExecutionError as exc:
+                raise AdapterFailure(f"NUCLEI_{exc.code.upper()}") from None
+        control.report_progress(5, "revalidating")
+        control.authorize_external_action(context.target, context.technique)
+        control.report_progress(10, "nuclei_started")
+        try:
+            parsed = self.executor.run(target=context.target, parameters=normalized)
+        except NucleiExecutionError as exc:
+            raise AdapterFailure(f"NUCLEI_{exc.code.upper()}") from None
+        control.check_cancelled()
+        payload = {
+            "result": parsed.model_dump(mode="json"),
+            "profile": normalized["profile"],
+            "template_ids": normalized["templates"],
+            "template_hashes": {
+                template: (self.executor.approved_templates or {}).get(template)
+                for template in normalized["templates"]
+            },
+            "authorization_id": context.authorization_id,
+            "approval_id": context.approval_id,
+        }
+        try:
+            result_id, envelope = self.evidence.ingest(
+                context,
+                evidence_type="nuclei_result",
+                source_format="nuclei_jsonl_normalized",
+                parser_version="chinescan-nuclei-parser-v1",
+                tool="nuclei",
+                tool_version=parsed.tool_version,
+                payload=payload,
+                collected_at=parsed.finished_at,
+            )
+        except EvidenceIngestionError as exc:
+            raise AdapterFailure(f"NUCLEI_EVIDENCE_{str(exc).upper()}") from None
+        with self.repository.member_context(
+            context.organization_id, context.requester_user_id, write=True
+        ):
+            with self.repository.execution_provenance_context(context.model_dump(mode="json")):
+                self.repository.save(
+                    "scan",
+                    result_id,
+                    {
+                        "scan_id": result_id,
+                        "target_id": context.asset_id,
+                        "scanner": f"nuclei:{parsed.tool_version}",
+                        "started_at": datetime.now(UTC).isoformat(),
+                        "finished_at": datetime.now(UTC).isoformat(),
+                        "status": "complete",
+                        "scan_options": {
+                            "profile": normalized["profile"],
+                            "finding_count": parsed.finding_count,
+                            "scope_revision_id": context.scope_revision_id,
+                            "authorization_id": context.authorization_id,
+                            "evidence_sha256": envelope.content_sha256,
+                        },
+                    },
+                )
+        control.report_progress(95, "nuclei_results_persisted")
+        return AdapterResult(
+            adapter_id=self.capabilities.adapter_id,
+            status="complete",
+            result_id=result_id,
+            summary={
+                "profile": normalized["profile"],
+                "finding_count": parsed.finding_count,
+                "tool_version": parsed.tool_version,
+                "evidence_record_type": "nuclei_result",
+                "evidence_sha256": envelope.content_sha256,
             },
         )
 
@@ -1095,6 +1238,7 @@ def build_default_adapter_registry(
     chain_import_adapter: GovernedAssessmentAdapter | None = None,
     chain_provider_adapter: GovernedAssessmentAdapter | None = None,
     nmap_adapter: GovernedAssessmentAdapter | None = None,
+    nuclei_adapter: GovernedAssessmentAdapter | None = None,
 ) -> AdapterRegistry:
     """Build the explicit allowlist of currently operational governed adapters."""
 
@@ -1111,4 +1255,6 @@ def build_default_adapter_registry(
         adapters += (chain_provider_adapter,)
     if nmap_adapter is not None:
         adapters += (nmap_adapter,)
+    if nuclei_adapter is not None:
+        adapters += (nuclei_adapter,)
     return AdapterRegistry(adapters)
