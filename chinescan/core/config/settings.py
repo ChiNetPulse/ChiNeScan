@@ -103,9 +103,21 @@ class ArtexIntegrationSettings(BaseModel):
         return self
 
 
+class NmapIntegrationSettings(BaseModel):
+    """Explicit administrator gate for the constrained Nmap foundation."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    binary: str = Field(default="nmap", min_length=1, max_length=255)
+    expected_major: int | None = Field(default=None, ge=1, le=99)
+    timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+    max_output_bytes: int = Field(default=4_194_304, ge=1024, le=33_554_432)
+
+
 class IntegrationsSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     artex: ArtexIntegrationSettings = Field(default_factory=ArtexIntegrationSettings)
+    nmap: NmapIntegrationSettings = Field(default_factory=NmapIntegrationSettings)
 
 
 class Settings(BaseSettings):

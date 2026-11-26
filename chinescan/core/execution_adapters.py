@@ -43,6 +43,9 @@ from chinescan.domain_assessment.probe import (
     NetworkDomainProbe,
 )
 from chinescan.domain_assessment.service import DomainAssessmentService
+from chinescan.integrations.nmap.executor import NmapExecutionError, NmapExecutor
+from chinescan.integrations.nmap.profiles import NMAP_PROFILES
+from chinescan.integrations.nmap.targets import NmapTargetError, validate_nmap_target
 from chinescan.log_analysis.service import (
     LOG_ANALYSIS_VERSION,
     LOG_RULESET_VERSION,
@@ -85,6 +88,7 @@ class ExecutionContext(BaseModel):
     repository_attestation_version: str | None = None
     adapter_id: str | None = None
     adapter_version: str | None = None
+    operation_parameters: dict[str, Any] | None = None
     scanner_version: str | None = None
     scan_bounds: dict[str, Any] | None = None
     exclusion_policy_version: str | None = None
@@ -215,6 +219,10 @@ class ExecutionContext(BaseModel):
             raise ValueError("Execution context does not contain a valid provider lookup binding.")
         if tuple(sorted(context.assignment_roles)) != context.assignment_roles:
             raise ValueError("Execution context assignment roles are not canonical.")
+        if context.operation_parameters is not None and not isinstance(
+            context.operation_parameters, dict
+        ):
+            raise ValueError("Execution context operation parameters are invalid.")
         return context
 
 
@@ -442,6 +450,130 @@ class DomainPostureAdapter:
             status="partial" if result.status != "complete" else "complete",
             result_id=result.scan_id,
             summary={"finding_count": len(result.findings), "scan_status": result.status},
+        )
+
+
+class GovernedNmapAdapter:
+    """Constrained Nmap adapter; admission and authorization stay centralized."""
+
+    def __init__(self, repository: SQLiteRepository, executor: NmapExecutor) -> None:
+        self.repository = repository
+        self.executor = executor
+        self._capabilities = AdapterCapabilities(
+            adapter_id="builtin.governed-nmap",
+            techniques=("port_scan",),
+            target_types=("ip", "cidr"),
+            action_class="controlled_active",
+            enabled=True,
+            performs_external_operations=True,
+        )
+
+    @property
+    def capabilities(self) -> AdapterCapabilities:
+        return self._capabilities
+
+    def validate_parameters(self, parameters: dict[str, Any]) -> dict[str, Any]:
+        if set(parameters) - {"profile", "ports"}:
+            raise ValueError("Nmap parameters contain unsupported fields.")
+        profile = parameters.get("profile")
+        if profile not in NMAP_PROFILES:
+            raise ValueError("Nmap profile is not supported.")
+        raw_ports = parameters.get("ports", [])
+        if not isinstance(raw_ports, list):
+            raise ValueError("Nmap ports must be a list.")
+        if any(isinstance(port, bool) or not isinstance(port, int) for port in raw_ports):
+            raise ValueError("Nmap ports must be integers.")
+        ports = sorted(set(raw_ports))
+        profile_data = NMAP_PROFILES[profile]
+        if profile_data.max_ports == 0 and ports:
+            raise ValueError("The selected Nmap profile does not accept ports.")
+        if len(ports) > profile_data.max_ports or any(not 1 <= port <= 65535 for port in ports):
+            raise ValueError("Nmap ports are outside the profile limits.")
+        return {"profile": profile, "ports": ports}
+
+    def execute(
+        self,
+        context: ExecutionContext,
+        parameters: dict[str, Any],
+        control: AdapterControl,
+    ) -> AdapterResult:
+        if (
+            context.technique != "port_scan"
+            or context.asset_type not in {"ip", "cidr"}
+            or context.action_class != "controlled_active"
+            or context.adapter_id != self.capabilities.adapter_id
+            or context.adapter_version != "1"
+        ):
+            raise AdapterFailure("NMAP_EXECUTION_CONTEXT_INVALID")
+        try:
+            validated_target = validate_nmap_target(context.target, asset_type=context.asset_type)
+            normalized = self.validate_parameters(parameters)
+        except (NmapTargetError, ValueError):
+            raise AdapterFailure("NMAP_PARAMETERS_INVALID") from None
+        if validated_target != context.target:
+            raise AdapterFailure("NMAP_TARGET_NOT_CANONICAL")
+        profile = normalized["profile"]
+        ports = normalized["ports"]
+        control.report_progress(5, "revalidating")
+        control.authorize_external_action(context.target, context.technique)
+        control.report_progress(10, "nmap_started")
+        try:
+            parsed = self.executor.run(target=context.target, profile=profile, ports=ports)
+        except NmapExecutionError as exc:
+            raise AdapterFailure(f"NMAP_{exc.code.upper()}") from None
+        control.check_cancelled()
+        result_id = str(uuid5(NAMESPACE_URL, f"chinescan-nmap:{context.job_id}"))
+        payload = {
+            "result_id": result_id,
+            "organization_id": context.organization_id,
+            "engagement_id": context.engagement_id,
+            "job_id": context.job_id,
+            "scope_revision_id": context.scope_revision_id,
+            "authorization_id": context.authorization_id,
+            "target": context.target,
+            "profile": profile,
+            "tool": "nmap",
+            "tool_version": parsed.nmap_version,
+            "result": parsed.model_dump(mode="json"),
+        }
+        with self.repository.member_context(
+            context.organization_id, context.requester_user_id, write=True
+        ):
+            with self.repository.execution_provenance_context(context.model_dump(mode="json")):
+                self.repository.save(
+                    "evidence", result_id, {**payload, "evidence_type": "nmap_result"}
+                )
+                self.repository.save(
+                    "scan",
+                    result_id,
+                    {
+                        "scan_id": result_id,
+                        "target_id": context.asset_id,
+                        "scanner": f"nmap:{parsed.nmap_version}",
+                        "started_at": datetime.now(UTC).isoformat(),
+                        "finished_at": datetime.now(UTC).isoformat(),
+                        "status": "complete",
+                        "scan_options": {
+                            "profile": profile,
+                            "port_count": parsed.port_count,
+                            "host_count": parsed.host_count,
+                            "scope_revision_id": context.scope_revision_id,
+                            "authorization_id": context.authorization_id,
+                        },
+                    },
+                )
+        control.report_progress(95, "nmap_results_persisted")
+        return AdapterResult(
+            adapter_id=self.capabilities.adapter_id,
+            status="complete",
+            result_id=result_id,
+            summary={
+                "profile": profile,
+                "host_count": parsed.host_count,
+                "port_count": parsed.port_count,
+                "tool_version": parsed.nmap_version,
+                "evidence_record_type": "nmap_result",
+            },
         )
 
 
@@ -962,6 +1094,7 @@ def build_default_adapter_registry(
     malware_adapter: GovernedAssessmentAdapter | None = None,
     chain_import_adapter: GovernedAssessmentAdapter | None = None,
     chain_provider_adapter: GovernedAssessmentAdapter | None = None,
+    nmap_adapter: GovernedAssessmentAdapter | None = None,
 ) -> AdapterRegistry:
     """Build the explicit allowlist of currently operational governed adapters."""
 
@@ -976,4 +1109,6 @@ def build_default_adapter_registry(
         adapters += (chain_import_adapter,)
     if chain_provider_adapter is not None:
         adapters += (chain_provider_adapter,)
+    if nmap_adapter is not None:
+        adapters += (nmap_adapter,)
     return AdapterRegistry(adapters)
