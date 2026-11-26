@@ -69,6 +69,8 @@ from chinescan.core.fs_policy import (
 from chinescan.core.github_import import GitHubImportError, GitHubImportService, session_binding
 from chinescan.core.identity import IdentityError, IdentityService
 from chinescan.core.log_evidence import LogEvidenceStore
+from chinescan.integrations.artex.client import ArtexHealthClient, ArtexIntegrationError
+from chinescan.integrations.artex.models import ArtexAuditEvent, ArtexSyncState
 from chinescan.core.log_locations import LogLocationService
 from chinescan.core.logging.redaction import redact
 from chinescan.core.logging.structured import configure_logging
@@ -721,6 +723,7 @@ def create_app(
                 active_settings.read_rate_limit,
                 active_settings.rate_limit_window_seconds,
             ),
+            "artex": (active_settings.integrations.artex.requests_per_minute, 60),
         }
     )
     hard_denied, soft_denied = policy_paths(active_settings)
@@ -1469,6 +1472,88 @@ def create_app(
             require_csrf,
         )
         application.router.routes.extend(malware_evidence_router.routes)
+
+    @application.get("/api/integrations/artex/status")
+    def artex_status(_session: Session = Depends(current_session)) -> dict[str, Any]:  # noqa: B008
+        """Return local bridge state without exposing configuration secrets or upstream data."""
+        profile = active_settings.integrations.artex
+        raw = repository.get("artex_sync_state", "artex:sync:health")
+        try:
+            state = ArtexSyncState.model_validate(raw) if raw else ArtexSyncState(
+                state="disabled" if not profile.enabled else "unknown"
+            )
+        except ValidationError:
+            state = ArtexSyncState(state="unknown", error_code="invalid_local_state")
+        return {
+            "integration": "ARTEX", "mode": profile.mode,
+            "enabled": profile.enabled and profile.health_enabled,
+            "active_operations": False, "state": state.state,
+            "checked_at": state.checked_at,
+            "version": state.health.version if state.health else None,
+            "error_code": state.error_code,
+        }
+
+    @application.get("/api/integrations/artex/health")
+    def artex_health(
+        request: Request, session: Session = Depends(current_session)  # noqa: B008
+    ) -> dict[str, Any]:
+        """Perform exactly one read-only health request after explicit config enablement."""
+        profile = active_settings.integrations.artex
+        if not profile.enabled or not profile.health_enabled:
+            raise HTTPException(status_code=403, detail={"code": "integration_disabled"})
+        host = request.client.host if request.client else "unknown"
+        retry_after = rate_limiter.check("artex", host)
+        if retry_after:
+            raise HTTPException(
+                status_code=429, detail={"code": "rate_limited"},
+                headers={"Retry-After": str(retry_after)},
+            )
+        correlation_id = str(getattr(request.state, "request_id", uuid4()))
+
+        def save_record(record_type: str, record_id: str, payload: dict[str, Any]) -> None:
+            org_id = repository._current_organization_id()
+            if org_id and session.user_id:
+                with repository.member_context(org_id, session.user_id, write=True):
+                    repository.save(record_type, record_id, payload)
+            else:
+                repository.save(record_type, record_id, payload)
+
+        def audit(event: ArtexAuditEvent) -> None:
+            save_record("artex_audit_event", event.event_id, event.model_dump(mode="json"))
+
+        audit(ArtexAuditEvent(
+            event_type="health_requested", outcome="started", correlation_id=correlation_id,
+            operator_id=session.email, configured_release_id=profile.release_id,
+        ))
+        try:
+            health = ArtexHealthClient(profile).get_health(correlation_id=correlation_id)
+        except ArtexIntegrationError as exc:
+            unavailable = exc.code == "upstream_unavailable"
+            state = ArtexSyncState(
+                state="unavailable" if unavailable else "invalid", error_code=exc.code
+            )
+            save_record("artex_sync_state", state.record_id, state.model_dump(mode="json"))
+            audit(ArtexAuditEvent(
+                event_type="health_failed", outcome="unavailable" if unavailable else "invalid",
+                correlation_id=correlation_id, operator_id=session.email,
+                configured_release_id=profile.release_id, error_code=exc.code,
+            ))
+            raise HTTPException(
+                status_code=503, detail={"code": exc.code, "state": state.state}
+            ) from None
+        state = ArtexSyncState(
+            state="available", checked_at=datetime.now().astimezone(), health=health
+        )
+        save_record("artex_sync_state", state.record_id, state.model_dump(mode="json"))
+        audit(ArtexAuditEvent(
+            event_type="health_succeeded", outcome="success", correlation_id=correlation_id,
+            operator_id=session.email, configured_release_id=profile.release_id,
+            upstream_version=health.version,
+        ))
+        return {
+            "integration": "ARTEX", "state": "available",
+            "health": health.model_dump(), "read_only": True,
+        }
 
     def github_import_enabled() -> None:
         if not active_settings.github_import_enabled:

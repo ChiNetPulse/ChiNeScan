@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, cast
 
-from pydantic import Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from chinescan.core.accounts import (
@@ -24,6 +24,88 @@ def default_data_path() -> Path:
 
 def default_reports_path() -> Path:
     return Path.home() / ".local" / "share" / "chinescan" / "reports"
+
+
+class ArtexIntegrationSettings(BaseModel):
+    """Milestone 1 ARTEX health-only settings. No credential field is intentional."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    mode: Literal[
+        "disabled", "health_only", "read_only_authenticated", "active_blocked"
+    ] = "disabled"
+    release_id: str | None = None
+    base_url: str | None = None
+    health_enabled: bool = False
+    task_list_enabled: bool = False
+    task_detail_enabled: bool = False
+    findings_list_enabled: bool = False
+    finding_detail_enabled: bool = False
+    findings_export_enabled: bool = False
+    report_enabled: bool = False
+    sensitive_data_acknowledged: bool = False
+    retention_policy_acknowledged: bool = False
+    max_response_bytes: int = Field(default=65_536, ge=256, le=1_048_576)
+    timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    requests_per_minute: int = Field(default=10, ge=1, le=60)
+
+    @model_validator(mode="after")
+    def validate_health_profile(self) -> ArtexIntegrationSettings:
+        if any(
+            (
+                self.task_list_enabled,
+                self.task_detail_enabled,
+                self.findings_list_enabled,
+                self.finding_detail_enabled,
+                self.findings_export_enabled,
+                self.report_enabled,
+            )
+        ):
+            raise ValueError(
+                "authenticated ARTEX features are blocked: "
+                "no safe ARTEX service credential model is available"
+            )
+        if not self.enabled:
+            if self.mode not in {"disabled", "active_blocked"} or self.health_enabled:
+                raise ValueError(
+                    "disabled ARTEX integration must use mode=disabled or active_blocked "
+                    "and all feature flags false"
+                )
+            return self
+        if self.mode != "health_only":
+            raise ValueError("Milestone 1 permits only the explicit health_only mode")
+        if not self.health_enabled:
+            raise ValueError("enabled ARTEX integration requires health_enabled=true")
+        if not self.release_id or len(self.release_id) > 128:
+            raise ValueError("enabled ARTEX health requires a pinned release_id")
+        if not self.base_url:
+            raise ValueError("enabled ARTEX health requires a base_url")
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(self.base_url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+        ):
+            raise ValueError(
+                "ARTEX base_url must be an absolute HTTP(S) URL without user information"
+            )
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("ARTEX base_url cannot include a path, query, or fragment")
+        if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("non-loopback ARTEX connections require HTTPS")
+        if not self.sensitive_data_acknowledged or not self.retention_policy_acknowledged:
+            raise ValueError(
+                "ARTEX health enablement requires sensitive-data and retention acknowledgements"
+            )
+        return self
+
+
+class IntegrationsSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    artex: ArtexIntegrationSettings = Field(default_factory=ArtexIntegrationSettings)
 
 
 class Settings(BaseSettings):
@@ -100,6 +182,7 @@ class Settings(BaseSettings):
     malware_known_bad_hashes: Path | None = None
     malware_rules_directory: Path | None = None
     data_source: Literal["real", "simulation"] = "real"
+    integrations: IntegrationsSettings = Field(default_factory=IntegrationsSettings)
     _allowed_root_validation: list[object] = PrivateAttr(default_factory=list)
 
     @model_validator(mode="after")

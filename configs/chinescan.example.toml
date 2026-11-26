@@ -1,5 +1,26 @@
 database_path = "~/.local/share/chinescan/chinescan.sqlite3"
 log_level = "INFO"
+
+# ARTEX Milestone 1 is health-only and disabled by default. No credential field exists.
+[integrations.artex]
+enabled = false
+mode = "disabled"
+health_enabled = false
+task_list_enabled = false
+task_detail_enabled = false
+findings_list_enabled = false
+finding_detail_enabled = false
+findings_export_enabled = false
+report_enabled = false
+# To enable health only, explicitly set enabled=true, mode="health_only",
+# health_enabled=true, release_id, base_url, and both policy acknowledgements.
+release_id = ""
+base_url = ""
+sensitive_data_acknowledged = false
+retention_policy_acknowledged = false
+max_response_bytes = 65536
+timeout_seconds = 3.0
+requests_per_minute = 10
 # Optional; required before Stage B1 managed malware intake. Choose a dedicated local path.
 # malware_managed_directory = "D:/chinescan-managed-samples"
 malware_evidence_org_quota_bytes = 1073741824
