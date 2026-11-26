@@ -58,8 +58,10 @@ from chinescan.core.storage.sqlite import (
     worker_leases,
 )
 from chinescan.domain_assessment.probe import ExecutionCancelled, ExecutionStopped
+from chinescan.integrations.nmap.targets import NmapTargetError, validate_nmap_target
 
 JOB_CONTEXT_TTL = timedelta(minutes=10)
+NMAP_TECHNIQUE = "port_scan"
 ACTIVE_JOB_LIMIT = 4
 GLOBAL_ACTIVE_JOB_LIMIT = 16
 DEFAULT_LEASE_DURATION_SECONDS = 30.0
@@ -154,8 +156,13 @@ class ExecutionGovernanceService:
                             ).validate_parameters(chain_request)
                         except (TypeError, ValueError):
                             raise ValueError("Assessment parameters are invalid.") from None
+                        stored_context_key = (
+                            "operation_parameters"
+                            if item["technique"] == NMAP_TECHNIQUE
+                            else "chain_context"
+                        )
                         if (
-                            item.get("execution_context", {}).get("chain_context")
+                            item.get("execution_context", {}).get(stored_context_key)
                             != requested_context
                         ):
                             raise ValueError(
@@ -195,7 +202,7 @@ class ExecutionGovernanceService:
                         "reason_code": "TECHNIQUE_UNSUPPORTED",
                         "explanation": "No enabled adapter supports this operation.",
                     }
-                if parameters and technique != CHAIN_IMPORT_TECHNIQUE:
+                if parameters and technique not in {CHAIN_IMPORT_TECHNIQUE, NMAP_TECHNIQUE}:
                     connection.rollback()
                     return {
                         "decision": "DENY",
@@ -261,6 +268,8 @@ class ExecutionGovernanceService:
                 malware_context: dict[str, Any] = {}
                 chain_context: dict[str, Any] = {}
                 chain_adapter_context: dict[str, Any] = {}
+                nmap_context: dict[str, Any] = {}
+                operation_parameters: dict[str, Any] = {}
                 policy_request_digest = decision["request_digest"]
                 request_digest = policy_request_digest
                 if asset.asset_type == "repository":
@@ -474,6 +483,37 @@ class ExecutionGovernanceService:
                         json.dumps(digest_context, sort_keys=True, separators=(",", ":")).encode()
                     ).hexdigest()
 
+                if technique == NMAP_TECHNIQUE:
+                    operation_parameters = parameters
+                    nmap_context = {
+                        "adapter_id": adapter.capabilities.adapter_id,
+                        "adapter_version": "1",
+                    }
+                    digest_context = {
+                        "policy_request_digest": policy_request_digest,
+                        "organization_id": organization_id,
+                        "engagement_id": engagement_id,
+                        "requester_user_id": user_id,
+                        "asset_id": asset_id,
+                        "target": decision["target"],
+                        "technique": technique,
+                        "action_class": decision["action_class"],
+                        "scope_revision_id": decision["scope_revision_id"],
+                        "authorization_id": decision["authorization_id"],
+                        "authorization_document_sha256": connection.execute(
+                            select(authorization_documents.c.sha256).where(
+                                authorization_documents.c.organization_id == organization_id,
+                                authorization_documents.c.authorization_id
+                                == decision["authorization_id"],
+                            )
+                        ).scalar_one_or_none(),
+                        "operation_parameters": operation_parameters,
+                        **nmap_context,
+                    }
+                    request_digest = hashlib.sha256(
+                        json.dumps(digest_context, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
+
                 if asset.asset_type == "malware_evidence":
                     malware_snapshot = connection.execute(
                         select(malware_evidence_snapshots).where(
@@ -585,12 +625,20 @@ class ExecutionGovernanceService:
                     "policy_decision_id": decision_id,
                     "request_digest": request_digest,
                     "policy_request_digest": policy_request_digest
-                    if (repository_context or log_context or malware_context or chain_context)
+                    if (
+                        repository_context
+                        or log_context
+                        or malware_context
+                        or chain_context
+                        or nmap_context
+                    )
                     else None,
                     **repository_context,
                     **log_context,
                     **malware_context,
                     **chain_adapter_context,
+                    **nmap_context,
+                    "operation_parameters": operation_parameters or None,
                     **({"chain_context": chain_context} if chain_context else {}),
                     "created_at": _stamp(now),
                     "expires_at": _stamp(now + JOB_CONTEXT_TTL),
@@ -612,7 +660,13 @@ class ExecutionGovernanceService:
                     "policy_decision_id": decision_id,
                     "request_digest": request_digest,
                     "policy_request_digest": policy_request_digest
-                    if (repository_context or log_context or malware_context or chain_context)
+                    if (
+                        repository_context
+                        or log_context
+                        or malware_context
+                        or chain_context
+                        or nmap_context
+                    )
                     else None,
                     "repository_binding_id": repository_context.get("repository_binding_id"),
                     "repository_snapshot_id": repository_context.get("repository_snapshot_id"),
@@ -635,12 +689,14 @@ class ExecutionGovernanceService:
                         or log_context
                         or malware_context
                         or chain_adapter_context
+                        or nmap_context
                     ).get("adapter_id"),
                     "adapter_version": (
                         repository_context
                         or log_context
                         or malware_context
                         or chain_adapter_context
+                        or nmap_context
                     ).get("adapter_version"),
                     "exclusion_policy_version": repository_context.get("exclusion_policy_version"),
                     "log_evidence_snapshot_id": log_context.get("log_evidence_snapshot_id"),
@@ -1184,7 +1240,47 @@ class ExecutionGovernanceService:
         ).scalar_one_or_none()
         if current_authorization_document_sha256 != item["authorization_document_sha256"]:
             return False, "AUTHORIZATION_DOCUMENT_CHANGED"
-        if item["asset_type"] == "repository":
+        if item["technique"] == NMAP_TECHNIQUE:
+            operation_parameters = (item.get("execution_context") or {}).get("operation_parameters")
+            if not isinstance(operation_parameters, dict):
+                return False, "NMAP_OPERATION_PARAMETERS_INVALID"
+            try:
+                adapter = self.adapters.resolve(item["asset_type"], item["technique"])
+                normalized_parameters = adapter.validate_parameters(operation_parameters)
+                normalized_target = validate_nmap_target(
+                    item["target"], asset_type=item["asset_type"]
+                )
+            except (NmapTargetError, TypeError, ValueError):
+                return False, "NMAP_CONTEXT_INVALID"
+            if (
+                normalized_parameters != operation_parameters
+                or normalized_target != item["target"]
+                or item.get("adapter_id") != "builtin.governed-nmap"
+                or item.get("adapter_version") != "1"
+            ):
+                return False, "NMAP_CONTEXT_INVALID"
+            digest_context = {
+                "policy_request_digest": item["policy_request_digest"],
+                "organization_id": item["organization_id"],
+                "engagement_id": item["engagement_id"],
+                "requester_user_id": item["requester_user_id"],
+                "asset_id": item["asset_id"],
+                "target": item["target"],
+                "technique": item["technique"],
+                "action_class": item["action_class"],
+                "scope_revision_id": item["scope_revision_id"],
+                "authorization_id": item["authorization_id"],
+                "authorization_document_sha256": item["authorization_document_sha256"],
+                "operation_parameters": operation_parameters,
+                "adapter_id": item["adapter_id"],
+                "adapter_version": item["adapter_version"],
+            }
+            digest = hashlib.sha256(
+                json.dumps(digest_context, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            if digest != item["request_digest"]:
+                return False, "EXECUTION_CONTEXT_DIGEST_MISMATCH"
+        elif item["asset_type"] == "repository":
             digest_context = {
                 "policy_request_digest": item["policy_request_digest"],
                 "organization_id": item["organization_id"],
@@ -3143,7 +3239,7 @@ class GovernedDomainWorker:
             return {"id": job_id, "status": "blocked"}
         try:
             context = ExecutionContext.from_job(job)
-            adapter_parameters = {}
+            adapter_parameters = context.operation_parameters or {}
             if context.technique == CHAIN_IMPORT_TECHNIQUE:
                 if context.chain_context is None:
                     raise AdapterFailure("CHAIN_IMPORT_CONTEXT_INVALID")

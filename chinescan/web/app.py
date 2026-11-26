@@ -52,6 +52,7 @@ from chinescan.core.errors import StorageError
 from chinescan.core.execution_adapters import (
     GovernedLogAnalysisAdapter,
     GovernedMalwareStaticTriageAdapter,
+    GovernedNmapAdapter,
     RepositoryCodeAssessmentAdapter,
     build_default_adapter_registry,
 )
@@ -112,6 +113,7 @@ from chinescan.core.repository_assessment import (
 from chinescan.core.storage.sqlite import SQLiteRepository
 from chinescan.integrations.artex.client import ArtexHealthClient, ArtexIntegrationError
 from chinescan.integrations.artex.models import ArtexAuditEvent, ArtexSyncState
+from chinescan.integrations.nmap.executor import NmapExecutor
 from chinescan.malware_analysis.managed import (
     ManagedSampleError,
     SampleRegistry,
@@ -143,6 +145,7 @@ from chinescan.web.log_evidence_api import create_log_evidence_router
 from chinescan.web.log_jobs import LogJobManager, LogSourceError, LogSourceRegistry
 from chinescan.web.malware_evidence_api import create_malware_evidence_router
 from chinescan.web.malware_jobs import MalwareDashboardManager
+from chinescan.web.nmap_api import create_nmap_router
 from chinescan.web.organization_api import create_organization_router
 from chinescan.web.rate_limit import InProcessRateLimiter
 from chinescan.web.repository_execution_api import create_repository_router
@@ -788,12 +791,26 @@ def create_app(
         deadline_seconds=active_settings.chain_trace_deadline_seconds,
         label_paths=tuple(chain_label_paths),
     )
+    nmap_adapter = (
+        GovernedNmapAdapter(
+            repository,
+            NmapExecutor(
+                binary=active_settings.integrations.nmap.binary,
+                timeout_seconds=active_settings.integrations.nmap.timeout_seconds,
+                max_output_bytes=active_settings.integrations.nmap.max_output_bytes,
+                expected_major=active_settings.integrations.nmap.expected_major,
+            ),
+        )
+        if active_settings.integrations.nmap.enabled
+        else None
+    )
     execution_governance.adapters = build_default_adapter_registry(
         repository,
         repository_adapter,
         log_analysis_adapter,
         chain_import_adapter=chain_import_adapter,
         chain_provider_adapter=chain_provider_adapter,
+        nmap_adapter=nmap_adapter,
     )
     execution_governance.repository_scan_bounds = {
         "max_files": active_settings.max_files,
@@ -951,6 +968,7 @@ def create_app(
     application.state.engagement_security_service = engagement_security_service
     application.state.execution_governance = execution_governance
     application.state.governed_domain_worker = governed_domain_worker
+    application.state.nmap_adapter = nmap_adapter
     application.state.session_store = sessions
     application.state.local_operator_user_id = organization_service.operator_user_id
     application.state.started_at = time.monotonic()
@@ -1439,6 +1457,16 @@ def create_app(
     )
     application.router.routes.extend(execution_router.routes)
 
+    nmap_router = create_nmap_router(
+        execution_governance,
+        governed_domain_worker,
+        repository,
+        active_settings.integrations.nmap,
+        current_session,
+        require_csrf,
+    )
+    application.router.routes.extend(nmap_router.routes)
+
     chain_execution_router = create_chain_execution_router(
         execution_governance, governed_domain_worker, current_session, require_csrf
     )
@@ -1503,6 +1531,23 @@ def create_app(
             "checked_at": state.checked_at,
             "version": state.health.version if state.health else None,
             "error_code": state.error_code,
+        }
+
+    @application.get("/api/integrations/nmap/status")
+    def nmap_status(_session: Session = Depends(current_session)) -> dict[str, Any]:  # noqa: B008
+        """Return non-sensitive Nmap readiness without probing the local binary."""
+        profile = active_settings.integrations.nmap
+        return {
+            "integration": "Nmap",
+            "enabled": profile.enabled,
+            "configuration_ready": bool(profile.enabled and profile.binary),
+            "profiles": [
+                "host_discovery",
+                "basic_port_assessment",
+                "service_identification",
+            ],
+            "target_types": ["ip", "cidr"],
+            "hostname_targets_supported": False,
         }
 
     @application.get("/api/integrations/artex/health")
