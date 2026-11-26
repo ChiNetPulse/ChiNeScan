@@ -7,14 +7,32 @@ Phase 2 durable job, lease, approval, provenance, and tenant repository boundari
 ## Execution isolation
 
 Scanner subprocesses use `run_supervised_subprocess` with `shell=False`, bounded
-stdout/stderr, deadlines, cancellation, and process-tree cleanup. When hardened
-isolation is required (the default for Nmap and Nuclei), a POSIX worker applies
-CPU, address-space, process-count, open-file, and output-file limits before exec.
-The readiness endpoint reports the host capability without exposing paths or
-environment data. On Windows the hardened profile fails closed because this
-application does not claim that Python limits are an equivalent sandbox. Network
-namespace, seccomp, container, and egress policy enforcement remain deployment
-responsibilities and are not implied by the application status.
+stdout/stderr, deadlines, cancellation, and process-tree cleanup. Capability
+reporting (`isolation_status()`) distinguishes between:
+
+1. **Platform support** (`platform_supported`): whether the host is Linux POSIX.
+2. **Runtime availability** (`runtime_available`): whether `resource.getrlimit`
+   succeeds for `RLIMIT_CPU`, `RLIMIT_AS`, `RLIMIT_NPROC`, `RLIMIT_NOFILE`, and
+   `RLIMIT_FSIZE`.
+3. **Enforced vs. unavailable controls** (`enforced_controls`,
+   `unavailable_controls`): explicitly lists which controls are active (e.g.,
+   `process_tree_cleanup`, `posix_rlimits`) and which are unavailable (e.g.,
+   `network_isolation`).
+
+When hardened isolation is required (the default for Nmap and Nuclei), a Linux
+POSIX worker verifies runtime `rlimit` availability and applies CPU,
+address-space, process-count, open-file, and output-file limits before `exec`.
+If any required isolation control (including deployment-managed network isolation
+when `network_isolation_required=True`) is unavailable, `require_isolation()`
+fails closed without falling back to weaker execution. On Windows, the hardened
+POSIX profile fails closed; Windows Job Object / process-group cleanup is
+reported as `process_tree_cleanup` only and is never represented as equivalent to
+Linux `rlimit`, namespace, cgroup, or seccomp isolation.
+
+Deployment prerequisites for Linux isolation remain the responsibility of the
+deployment operator: network namespaces, seccomp profiles, container sandboxing,
+and outbound egress firewalls must be provisioned externally and are never
+inferred or claimed by the application status.
 
 ## Scanner adapters
 
@@ -66,9 +84,24 @@ The authenticated endpoints are:
 ## Limitations
 
 No database migration is required: evidence remains a tenant-owned repository
-record and execution binding remains in the existing job JSON context. The current
-Windows host cannot prove the POSIX hardened profile, so enabled scanner instances
-are correctly reported as not ready there. The application does not claim a
-container sandbox, network egress firewall, exactly-once external execution, or
-automatic evidence deletion. Those controls require deployment policy and a later
-operational review.
+record and execution binding remains in the existing job JSON context.
+
+* **Deployment-managed network isolation:** The application cannot locally
+  enforce network namespaces or egress firewalls (`network_isolation=False`).
+  Hardened profiles requiring network isolation fail closed unless deployment
+  controls satisfy the policy. Operators must provision network namespaces,
+  seccomp, container boundaries, and egress filtering externally.
+* **Windows isolation:** Windows hosts cannot enforce the POSIX `rlimit`
+  hardened profile (`platform_supported=False`, `hardened_supported=False`).
+  Enabled hardened scanner profiles fail closed on Windows; only
+  `process_tree_cleanup` is supported.
+* **No exactly-once execution guarantee:** External scanner invocations are
+  at-least-once/reconcilable, not exactly-once. Durable job leases, execution
+  state, idempotent `EvidenceIngestionService` persistence (job-plus-SHA256
+  record IDs), and authorized reconciliation preserve integrity, and uncertain
+  outcomes are never marked as successful or blindly retried.
+* **Evidence retention and legal holds:** `EvidenceEnvelope` records a
+  `retention_until` deadline (365 days by default; configurable 1–3650 days).
+  Automated retention deletion and legal-hold workflows are not implemented in
+  Phase 5; administrators remain responsible for retention enforcement and
+  litigation/audit preservation.

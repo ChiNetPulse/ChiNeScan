@@ -52,3 +52,18 @@ filtering.
 The implementation does not claim exactly-once external execution, a container
 sandbox, hostname-target support, automated evidence deletion/legal holds, or
 distributed worker isolation. ARTEX remains health-only and disabled by default.
+
+* **Deployment-managed network isolation:** `network_isolation` is always reported
+  as `False` by the application; hardened profiles requiring network isolation
+  fail closed unless externally provisioned network namespaces and egress
+  firewalls satisfy deployment policy.
+* **Windows host isolation:** Windows hosts report `platform_supported=False` and
+  `hardened_supported=False`, failing closed for hardened scanner profiles while
+  retaining `process_tree_cleanup` (Job Object / process-group termination).
+* **Execution semantics:** External scanner jobs are durable, lease-governed, and
+  reconcilable with idempotent `EvidenceIngestionService` persistence, not
+  strictly exactly-once; uncertain outcomes remain non-terminal until reconciled.
+* **Evidence retention & legal holds:** `EvidenceEnvelope.retention_until` records
+  a 365-day default retention deadline; automated deletion and legal-hold
+  workflows remain deferred to a later operational milestone and must be managed
+  by administrators.
