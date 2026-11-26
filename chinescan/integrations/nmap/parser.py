@@ -6,7 +6,7 @@ import re
 from datetime import UTC, datetime
 from ipaddress import IPv4Address, IPv6Address
 
-from defusedxml import ElementTree as ET
+from defusedxml import ElementTree as ET  # type: ignore[import-untyped]
 
 from chinescan.integrations.nmap.models import NmapHost, NmapPort, NmapProfileName, NmapScanResult
 
