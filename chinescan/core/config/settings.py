@@ -31,9 +31,9 @@ class ArtexIntegrationSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
-    mode: Literal[
-        "disabled", "health_only", "read_only_authenticated", "active_blocked"
-    ] = "disabled"
+    mode: Literal["disabled", "health_only", "read_only_authenticated", "active_blocked"] = (
+        "disabled"
+    )
     release_id: str | None = None
     base_url: str | None = None
     health_enabled: bool = False

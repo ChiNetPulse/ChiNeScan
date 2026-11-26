@@ -113,8 +113,12 @@ def test_artex_is_disabled_by_default() -> None:
 
 def test_health_route_only() -> None:
     assert validate_outbound_route("GET", "/api/health") == "/api/health"
-    for method, target in (("POST", "/api/tasks"), ("GET", "/api/tasks"),
-                           ("GET", "/api/health?debug=true"), ("GET", "/api/evidence.zip")):
+    for method, target in (
+        ("POST", "/api/tasks"),
+        ("GET", "/api/tasks"),
+        ("GET", "/api/health?debug=true"),
+        ("GET", "/api/evidence.zip"),
+    ):
         with pytest.raises(RouteDenied):
             validate_outbound_route(method, target)
 
@@ -141,11 +145,18 @@ def test_health_enablement_requires_all_operator_gates() -> None:
 
 def test_non_loopback_cleartext_and_url_components_are_rejected() -> None:
     common = {
-        "enabled": True, "mode": "health_only", "health_enabled": True,
-        "release_id": "build-placeholder", "sensitive_data_acknowledged": True,
+        "enabled": True,
+        "mode": "health_only",
+        "health_enabled": True,
+        "release_id": "build-placeholder",
+        "sensitive_data_acknowledged": True,
         "retention_policy_acknowledged": True,
     }
-    for base_url in ("http://artex.example.invalid", "https://artex.example.invalid/api", "https://user:pass@artex.example.invalid"):
+    for base_url in (
+        "http://artex.example.invalid",
+        "https://artex.example.invalid/api",
+        "https://user:pass@artex.example.invalid",
+    ):
         with pytest.raises(ValidationError):
             ArtexIntegrationSettings(**common, base_url=base_url)
 
@@ -161,10 +172,14 @@ def test_health_schema_is_strict_and_bounded() -> None:
 
 def test_audit_model_rejects_unexpected_sensitive_fields() -> None:
     with pytest.raises(ValidationError):
-        ArtexAuditEvent.model_validate({
-            "event_type": "health_succeeded", "outcome": "success",
-            "correlation_id": "test", "authorization": "secret",
-        })
+        ArtexAuditEvent.model_validate(
+            {
+                "event_type": "health_succeeded",
+                "outcome": "success",
+                "correlation_id": "test",
+                "authorization": "secret",
+            }
+        )
 
 
 @pytest.mark.parametrize("status_code", [301, 302, 307, 308])

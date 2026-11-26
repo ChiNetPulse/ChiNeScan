@@ -40,6 +40,7 @@ class ArtexSyncState(BaseModel):
 
 class ArtexInstanceProfile(BaseModel):
     """Secret-free profile projection; credential fields are forbidden."""
+
     model_config = ConfigDict(extra="forbid")
     instance_id: str = Field(pattern=r"^artex:[a-zA-Z0-9_-]{1,64}$")
     release_id: str = Field(min_length=1, max_length=128)
