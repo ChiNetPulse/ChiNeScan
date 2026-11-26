@@ -102,25 +102,27 @@ def make_preexec_fn(profile: IsolationProfile) -> Any:
         )
     import resource  # noqa: PLC0415
 
+    resource_module: Any = resource
+
     def apply_limits() -> None:
-        resource.setrlimit(  # type: ignore[attr-defined]
-            resource.RLIMIT_CPU,  # type: ignore[attr-defined]
+        resource_module.setrlimit(
+            resource_module.RLIMIT_CPU,
             (profile.cpu_seconds, profile.cpu_seconds),
         )
-        resource.setrlimit(  # type: ignore[attr-defined]
-            resource.RLIMIT_AS,  # type: ignore[attr-defined]
+        resource_module.setrlimit(
+            resource_module.RLIMIT_AS,
             (profile.memory_bytes, profile.memory_bytes),
         )
-        resource.setrlimit(  # type: ignore[attr-defined]
-            resource.RLIMIT_NPROC,  # type: ignore[attr-defined]
+        resource_module.setrlimit(
+            resource_module.RLIMIT_NPROC,
             (profile.max_processes, profile.max_processes),
         )
-        resource.setrlimit(  # type: ignore[attr-defined]
-            resource.RLIMIT_NOFILE,  # type: ignore[attr-defined]
+        resource_module.setrlimit(
+            resource_module.RLIMIT_NOFILE,
             (profile.max_open_files, profile.max_open_files),
         )
-        resource.setrlimit(  # type: ignore[attr-defined]
-            resource.RLIMIT_FSIZE,  # type: ignore[attr-defined]
+        resource_module.setrlimit(
+            resource_module.RLIMIT_FSIZE,
             (profile.max_file_bytes, profile.max_file_bytes),
         )
 
