@@ -1,6 +1,6 @@
 # Phase 4 — Nmap execution foundation (implementation report)
 
-Status: implementation in progress on `release/phase-4`.
+Status: implemented and merged to `main` via PR #39 (`a82a9762460990364db7cd94ebf8e7bfb9956584`).
 
 ## Scope
 
@@ -49,9 +49,12 @@ enable ARTEX execution.
 
 ## Verification
 
-Focused Nmap tests (7 passed), the neighboring authorization/adapter/durable
-job selection (133 passed), and the full Python suite (936 passed, 5
-deselected) pass in the current working tree. Frontend tests (81), TypeScript,
-production build/CSP, Rust tests (65), Rust format/Clippy, Alembic single-head,
-targeted Ruff/mypy, and diff checks also pass. A complete release/PR/CI result
-remains pending.
+Focused Nmap tests (10 passed), the neighboring authorization/adapter/durable
+job selection (133 passed), and the local full Python suite (936 passed, 5
+deselected) passed before release. The merged CI quality run passed with 930
+passed, 10 skipped, and 5 deselected; it reported 79.89% coverage against the
+configured 80% threshold, while Ruff, strict mypy, pip-audit, and Bandit all
+passed. Frontend tests (81), TypeScript, production build/CSP, Rust checks,
+Alembic single-head, container scanning, and secret scanning passed in CI.
+The post-merge `main` CI run `45786186459` completed successfully. The
+coverage diagnostic remains a quality follow-up; it did not fail the workflow.
