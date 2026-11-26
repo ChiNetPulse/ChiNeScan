@@ -48,6 +48,138 @@ def test_nmap_status_is_authenticated_and_disabled_by_default(tmp_path: Path) ->
     assert status.status_code == 200
     assert status.json()["enabled"] is False
     assert status.json()["hostname_targets_supported"] is False
+    organization_id = "11111111-1111-4111-8111-111111111111"
+    engagement_id = "22222222-2222-4222-8222-222222222222"
+    profiles = client.get(
+        f"/api/organizations/{organization_id}/engagements/{engagement_id}/nmap/profiles"
+    )
+    assert profiles.status_code == 200
+    assert profiles.json()["enabled"] is False
+    csrf_headers = {
+        "Origin": "http://127.0.0.1",
+        "X-CSRF-Token": login.json()["csrf_token"],
+    }
+    disabled = client.post(
+        f"/api/organizations/{organization_id}/engagements/{engagement_id}/nmap/executions",
+        json={
+            "asset_id": "33333333-3333-4333-8333-333333333333",
+            "profile": "host_discovery",
+            "ports": [],
+            "idempotency_key": "nmap-disabled-request",
+        },
+        headers=csrf_headers,
+    )
+    assert disabled.status_code == 404
+    missing = client.get(
+        f"/api/organizations/{organization_id}/engagements/{engagement_id}/nmap/executions/"
+        "44444444-4444-4444-8444-444444444444/result"
+    )
+    assert missing.status_code == 404
+
+
+def test_nmap_executor_rejects_bad_versions_and_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["nmap", "--version"], 0, b"not nmap", b""
+        ),
+    )
+    with pytest.raises(NmapExecutionError) as invalid:
+        NmapExecutor().check_available()
+    assert invalid.value.code == "nmap_version_invalid"
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["nmap", "--version"], 0, b"Nmap version 7.95\n", b""
+        ),
+    )
+    with pytest.raises(NmapExecutionError) as unsupported:
+        NmapExecutor(expected_major=8).check_available()
+    assert unsupported.value.code == "nmap_version_unsupported"
+
+    class FailedProcess:
+        returncode = 2
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.stdout = self
+            self.read_once = False
+
+        def read(self, _size: int) -> bytes:
+            if self.read_once:
+                return b""
+            self.read_once = True
+            return VALID_XML
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    monkeypatch.setattr(subprocess, "Popen", FailedProcess)
+    with pytest.raises(NmapExecutionError) as failed:
+        NmapExecutor().run(target="192.0.2.10", profile="host_discovery", ports=[])
+    assert failed.value.code == "nmap_failed"
+
+
+def test_nmap_executor_maps_timeout_and_parse_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["nmap", "--version"], 0, b"Nmap version 7.95\n", b""
+        ),
+    )
+
+    class TimeoutProcess:
+        returncode = -9
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.stdout = self
+            self.timed_out = False
+            self.read_once = False
+
+        def read(self, _size: int) -> bytes:
+            if self.read_once:
+                return b""
+            self.read_once = True
+            return b""
+
+        def wait(self, timeout: float | None = None) -> int:
+            if timeout is not None and not self.timed_out:
+                self.timed_out = True
+                raise subprocess.TimeoutExpired("nmap", timeout)
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    monkeypatch.setattr(subprocess, "Popen", TimeoutProcess)
+    with pytest.raises(NmapExecutionError) as timeout:
+        NmapExecutor(timeout_seconds=0.01).run(
+            target="192.0.2.10", profile="host_discovery", ports=[]
+        )
+    assert timeout.value.code == "nmap_timeout"
+
+    class InvalidXmlProcess(TimeoutProcess):
+        def read(self, _size: int) -> bytes:
+            if self.read_once:
+                return b""
+            self.read_once = True
+            return b"<nmaprun version='7.95'>"
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", InvalidXmlProcess)
+    with pytest.raises(NmapExecutionError) as parse_error:
+        NmapExecutor().run(target="192.0.2.10", profile="host_discovery", ports=[])
+    assert parse_error.value.code == "nmap_output_invalid"
 
 
 def test_nmap_targets_are_canonical_and_bounded() -> None:

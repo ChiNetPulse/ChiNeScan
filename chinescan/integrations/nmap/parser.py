@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from ipaddress import IPv4Address, IPv6Address
+
+from defusedxml import ElementTree as ET
 
 from chinescan.integrations.nmap.models import NmapHost, NmapPort, NmapProfileName, NmapScanResult
 
