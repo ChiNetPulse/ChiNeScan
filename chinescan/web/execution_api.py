@@ -38,6 +38,12 @@ class ChainProviderExecutionRequest(BaseModel):
     idempotency_key: str = Field(min_length=16, max_length=80)
 
 
+class ReconciliationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    resolution: str = Field(pattern="^(confirmed_success|confirmed_failure)$")
+    evidence_reference: str = Field(min_length=3, max_length=120)
+
+
 def create_execution_router(
     governance: ExecutionGovernanceService,
     worker: GovernedDomainWorker,
@@ -114,6 +120,20 @@ def create_execution_router(
         except PermissionError:
             raise HTTPException(status_code=404, detail="Organization not found.") from None
 
+    @router.get("/reconciliation")
+    def list_reconciliation(
+        organization_id: str,
+        engagement_id: str,
+        limit: int = Query(default=50, ge=1, le=100),
+        session: Session = Depends(current_session),
+    ) -> dict[str, Any]:
+        items = governance.list_reconciliation_jobs(
+            principal(session), organization_id, engagement_id, limit
+        )
+        if items is None:
+            raise HTTPException(status_code=404, detail="Engagement not found.")
+        return {"items": items}
+
     @router.get("/{job_id}")
     def get_execution(
         organization_id: str,
@@ -169,6 +189,37 @@ def create_execution_router(
             "cancellation_outcome": result["outcome"],
             "idempotent": result.get("idempotent", False),
         }
+
+    @router.post("/{job_id}/reconcile", status_code=200, dependencies=[Depends(require_csrf)])
+    def reconcile_execution(
+        organization_id: str,
+        engagement_id: str,
+        job_id: str,
+        payload: ReconciliationRequest,
+        session: Session = Depends(current_session),
+    ) -> dict[str, Any]:
+        try:
+            result = governance.resolve_reconciliation(
+                principal(session),
+                organization_id,
+                engagement_id,
+                job_id,
+                resolution=payload.resolution,
+                evidence_reference=payload.evidence_reference,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        if result is None or result["outcome"] == "forbidden":
+            raise HTTPException(status_code=404, detail="Execution job not found.")
+        if result["outcome"] == "invalid_state":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "reconciliation_state_invalid",
+                    "message": "Job is not awaiting reconciliation.",
+                },
+            )
+        return result
 
     @router.get("")
     def list_executions(

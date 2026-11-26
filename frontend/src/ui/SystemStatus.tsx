@@ -24,8 +24,21 @@ type Diagnostics = {
   scan_bounds: Record<string, number>;
   recent_errors: ErrorSummary[];
 };
+type ArtexStatus = {
+  integration: string;
+  mode: string;
+  enabled: boolean;
+  configuration_ready: boolean;
+  authentication: string;
+  capabilities: string[];
+  active_operations: boolean;
+  state: 'disabled' | 'unknown' | 'available' | 'unavailable' | 'invalid';
+  checked_at: string | null;
+  version: string | null;
+  error_code: string | null;
+};
 type RequestState = 'not checked' | 'received' | 'failed' | 'rate limited' | 'timed out';
-type Snapshot = { health: Health | null; checks: Check[]; diagnostics: Diagnostics | null; online: boolean | null; requestStates: { health: RequestState; readiness: RequestState; diagnostics: RequestState } };
+type Snapshot = { health: Health | null; checks: Check[]; diagnostics: Diagnostics | null; artex: ArtexStatus | null; online: boolean | null; requestStates: { health: RequestState; readiness: RequestState; diagnostics: RequestState; artex: RequestState } };
 class RateLimitedError extends Error {}
 
 const HEALTHY_POLL_INTERVAL_MS = 30_000;
@@ -88,6 +101,33 @@ function decodeDiagnostics(value: unknown): Diagnostics {
   };
 }
 
+function decodeArtexStatus(value: unknown): ArtexStatus {
+  if (!isRecord(value) || value.integration !== 'ARTEX' || typeof value.mode !== 'string' ||
+    typeof value.enabled !== 'boolean' || typeof value.configuration_ready !== 'boolean' ||
+    typeof value.authentication !== 'string' || !Array.isArray(value.capabilities) ||
+    !value.capabilities.every((item) => typeof item === 'string') ||
+    typeof value.active_operations !== 'boolean' ||
+    !['disabled', 'unknown', 'available', 'unavailable', 'invalid'].includes(String(value.state)) ||
+    (value.checked_at !== null && typeof value.checked_at !== 'string') ||
+    (value.version !== null && typeof value.version !== 'string') ||
+    (value.error_code !== null && typeof value.error_code !== 'string')) {
+    throw new Error('ARTEX status response was invalid.');
+  }
+  return {
+    integration: value.integration,
+    mode: value.mode,
+    enabled: value.enabled,
+    configuration_ready: value.configuration_ready,
+    authentication: value.authentication,
+    capabilities: value.capabilities,
+    active_operations: value.active_operations,
+    state: value.state as ArtexStatus['state'],
+    checked_at: value.checked_at,
+    version: value.version,
+    error_code: value.error_code,
+  };
+}
+
 async function get<T>(url: string, signal: AbortSignal, decode: (value: unknown) => T): Promise<{ value: T; status: number }> {
   const response = await fetch(url, { credentials: 'same-origin', signal });
   if (response.status === 401) throw new UnauthorizedError();
@@ -100,7 +140,7 @@ async function get<T>(url: string, signal: AbortSignal, decode: (value: unknown)
 }
 
 export function SystemStatus({ onUnauthorized }: { onUnauthorized: () => void }) {
-  const [snapshot, setSnapshot] = useState<Snapshot>({ health: null, checks: [], diagnostics: null, online: null, requestStates: { health: 'not checked', readiness: 'not checked', diagnostics: 'not checked' } });
+  const [snapshot, setSnapshot] = useState<Snapshot>({ health: null, checks: [], diagnostics: null, artex: null, online: null, requestStates: { health: 'not checked', readiness: 'not checked', diagnostics: 'not checked', artex: 'not checked' } });
   const [checking, setChecking] = useState(false);
   const [announcement, setAnnouncement] = useState('');
   const refreshRef = useRef<(() => Promise<void>) | null>(null);
@@ -129,10 +169,11 @@ export function SystemStatus({ onUnauthorized }: { onUnauthorized: () => void })
           get('/api/health', controller.signal, decodeHealth),
           get('/api/ready', controller.signal, decodeChecks),
           get('/api/diagnostics', controller.signal, decodeDiagnostics),
+          get('/api/integrations/artex/status', controller.signal, decodeArtexStatus),
         ]);
         if (stopped) return;
         if (results.some((item) => item.status === 'rejected' && item.reason instanceof UnauthorizedError)) { onUnauthorized(); return; }
-        const [health, ready, diagnostics] = results;
+        const [health, ready, diagnostics, artex] = results;
         const stateOf = (item: PromiseSettledResult<unknown>): RequestState => item.status === 'fulfilled'
           ? 'received' : item.reason instanceof RateLimitedError ? 'rate limited'
             : item.reason instanceof DOMException && item.reason.name === 'AbortError' ? 'timed out' : 'failed';
@@ -140,12 +181,13 @@ export function SystemStatus({ onUnauthorized }: { onUnauthorized: () => void })
           health: health.status === 'fulfilled' ? health.value.value as Health : current.health,
           checks: ready.status === 'fulfilled' ? ready.value.value as Check[] : current.checks,
           diagnostics: diagnostics.status === 'fulfilled' ? diagnostics.value.value as Diagnostics : current.diagnostics,
+          artex: artex.status === 'fulfilled' ? artex.value.value as ArtexStatus : current.artex,
           online: health.status === 'fulfilled' ? health.value.status < 500 : false,
-          requestStates: { health: stateOf(health), readiness: stateOf(ready), diagnostics: stateOf(diagnostics) },
+          requestStates: { health: stateOf(health), readiness: stateOf(ready), diagnostics: stateOf(diagnostics), artex: stateOf(artex) },
         }));
-        const failed = [health, ready, diagnostics].some((item) => item.status === 'rejected');
+        const failed = [health, ready, diagnostics, artex].some((item) => item.status === 'rejected');
         if (manual) setAnnouncement(failed
-          ? `System check complete with partial results: health ${stateOf(health)}; readiness ${stateOf(ready)}; diagnostics ${stateOf(diagnostics)}.`
+          ? `System check complete with partial results: health ${stateOf(health)}; readiness ${stateOf(ready)}; diagnostics ${stateOf(diagnostics)}; ARTEX ${stateOf(artex)}.`
           : 'System check complete: connected to the local service.');
         if (failed) {
           const delay = retryDelay;
@@ -187,7 +229,8 @@ export function SystemStatus({ onUnauthorized }: { onUnauthorized: () => void })
   }, [onUnauthorized]);
   return <div className="status-workspace" aria-live="polite">
     <section className="panel status-connectivity" aria-label="Connectivity"><strong>{snapshot.online === null ? 'Checking local service' : snapshot.online ? 'Connected to local service' : 'Service offline'}</strong><span>{snapshot.online === null ? 'Checking service health and readiness.' : snapshot.online ? 'Polling for service health and readiness.' : 'The local service is unavailable. Retrying automatically.'}</span><button type="button" aria-label="Check system status now" onClick={() => { void refreshRef.current?.(); }} disabled={checking}>{checking ? 'Checking…' : 'Check now'}</button><span role="status" aria-live="polite">{announcement}</span></section>
-    <section className="panel status-panel"><div className="panel-heading"><h2>System checks</h2><span>Version {snapshot.health?.version ?? 'Unavailable'}</span></div><p>Request results · Health: {snapshot.requestStates.health} · readiness: {snapshot.requestStates.readiness} · diagnostics: {snapshot.requestStates.diagnostics}</p><ul className="status-checks">{snapshot.checks.map((check) => <li key={check.id}><div><strong>{check.label}</strong><p>{check.detail}</p>{check.action_hint && <small>Action: {check.action_hint}</small>}</div><span className={`status-badge status-${check.state.toLowerCase()}`}>[{check.state}]</span></li>)}</ul></section>
+    <section className="panel status-panel"><div className="panel-heading"><h2>System checks</h2><span>Version {snapshot.health?.version ?? 'Unavailable'}</span></div><p>Request results · Health: {snapshot.requestStates.health} · readiness: {snapshot.requestStates.readiness} · diagnostics: {snapshot.requestStates.diagnostics} · ARTEX: {snapshot.requestStates.artex}</p><ul className="status-checks">{snapshot.checks.map((check) => <li key={check.id}><div><strong>{check.label}</strong><p>{check.detail}</p>{check.action_hint && <small>Action: {check.action_hint}</small>}</div><span className={`status-badge status-${check.state.toLowerCase()}`}>[{check.state}]</span></li>)}</ul></section>
+    {snapshot.artex && <section className="panel status-panel" aria-label="ARTEX integration status"><div className="panel-heading"><h2>ARTEX integration</h2><span>{snapshot.artex.state}</span></div><p>{snapshot.artex.enabled ? 'Health-only integration enabled.' : 'Integration disabled.'} {snapshot.artex.configuration_ready ? 'Configuration is ready.' : 'Configuration is not ready.'}</p><p>Authentication: {snapshot.artex.authentication}. Capabilities: {snapshot.artex.capabilities.length ? snapshot.artex.capabilities.join(', ') : 'none'}.</p>{snapshot.artex.version && <p>Last reported version: {snapshot.artex.version}</p>}{snapshot.artex.error_code && <p>Safe failure category: {snapshot.artex.error_code}</p>}</section>}
     {snapshot.diagnostics && <div className="status-grid"><section className="panel status-panel"><h2>Local configuration</h2><p>Operator state: <strong>{snapshot.diagnostics.operator_state}</strong></p><p>Allowed roots: {snapshot.diagnostics.allowed_roots.valid} valid, {snapshot.diagnostics.allowed_roots.ignored} ignored</p><h3>Scan bounds</h3><dl>{Object.entries(snapshot.diagnostics.scan_bounds).map(([key, value]) => <div key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd>{value}</dd></div>)}</dl></section><section className="panel status-panel"><h2>Recent errors</h2>{snapshot.diagnostics.recent_errors.length ? <ul>{snapshot.diagnostics.recent_errors.map((item) => <li key={item.request_id}><strong>{item.error_code}</strong> {item.route}<p>{item.message}</p></li>)}</ul> : <p>No recent errors.</p>}</section></div>}
   </div>;
 }
