@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     database_path: Path = Field(default_factory=default_data_path)
     reports_dir: Path = Field(default_factory=default_reports_path)
     malware_managed_directory: Path | None = None
+    malware_evidence_org_quota_bytes: int = Field(
+        default=1_073_741_824, ge=67_108_864, le=20_000_000_000
+    )
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     api_token: str | None = Field(default=None, repr=False)
     session_absolute_ttl_seconds: int = Field(
@@ -56,12 +59,31 @@ class Settings(BaseSettings):
     github_import_max_bytes: int = Field(default=524_288_000, ge=1, le=10_737_418_240)
     github_import_max_files: int = Field(default=50_000, ge=1, le=1_000_000)
     github_import_max_projects: int = Field(default=20, ge=1, le=10_000)
-    max_files: int = 50_000
-    max_total_bytes: int = 1_073_741_824
-    max_file_bytes: int = 16_777_216
-    max_depth: int = 32
-    per_file_seconds: float = 2.0
-    job_deadline_seconds: int = 300
+    max_files: int = Field(default=50_000, ge=1, le=200_000)
+    max_total_bytes: int = Field(default=1_073_741_824, ge=1024, le=10_737_418_240)
+    max_file_bytes: int = Field(default=16_777_216, ge=1024, le=134_217_728)
+    max_depth: int = Field(default=32, ge=1, le=64)
+    per_file_seconds: float = Field(default=2.0, gt=0.0, le=60.0)
+    job_deadline_seconds: int = Field(default=300, ge=1, le=3600)
+    execution_per_org_active_limit: int = Field(default=2, ge=1, le=16)
+    execution_global_active_limit: int = Field(default=8, ge=1, le=64)
+    execution_per_org_queued_limit: int = Field(default=4, ge=1, le=64)
+    execution_global_queued_limit: int = Field(default=16, ge=1, le=256)
+    execution_max_queue_wait_seconds: int = Field(default=900, ge=1, le=86_400)
+    execution_operation_timeout_seconds: float = Field(default=60.0, ge=0.5, le=600.0)
+    execution_shutdown_grace_seconds: float = Field(default=5.0, ge=0.1, le=120.0)
+    archive_max_entries: int = Field(default=10_000, ge=1, le=100_000)
+    archive_max_nesting: int = Field(default=4, ge=1, le=16)
+    archive_max_decompressed_bytes: int = Field(default=268_435_456, ge=1024, le=2_147_483_648)
+    parser_max_output_bytes: int = Field(default=4_194_304, ge=1024, le=33_554_432)
+    max_findings_per_job: int = Field(default=5_000, ge=1, le=50_000)
+    subprocess_timeout_seconds: float = Field(default=60.0, ge=0.5, le=600.0)
+    subprocess_max_output_bytes: int = Field(default=4_194_304, ge=1024, le=33_554_432)
+    network_connect_timeout_seconds: float = Field(default=5.0, ge=0.1, le=30.0)
+    network_read_timeout_seconds: float = Field(default=10.0, ge=0.1, le=60.0)
+    network_max_response_bytes: int = Field(default=1_048_576, ge=256, le=16_777_216)
+    safe_retry_max_attempts: int = Field(default=2, ge=0, le=5)
+    safe_retry_delay_seconds: float = Field(default=0.5, ge=0.0, le=30.0)
     code_excluded_paths: list[str] = Field(default_factory=list)
     malware_max_files: int = 50_000
     malware_max_total_bytes: int = 1_073_741_824
@@ -69,10 +91,32 @@ class Settings(BaseSettings):
     malware_max_depth: int = 32
     malware_per_file_seconds: float = 2.0
     malware_job_deadline_seconds: int = 300
+    repository_snapshot_max_bytes: int = Field(default=5_368_709_120, ge=1, le=10_737_418_240)
+    repository_snapshot_org_quota_bytes: int = Field(
+        default=10_737_418_240, ge=1, le=107_374_182_400
+    )
+    log_evidence_max_bytes: int = Field(default=250_000_000, ge=1, le=250_000_000)
+    log_evidence_org_quota_bytes: int = Field(default=2_000_000_000, ge=1, le=20_000_000_000)
     malware_known_bad_hashes: Path | None = None
     malware_rules_directory: Path | None = None
     data_source: Literal["real", "simulation"] = "real"
     _allowed_root_validation: list[object] = PrivateAttr(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_repository_snapshot_limits(self) -> Settings:
+        if self.repository_snapshot_org_quota_bytes < self.repository_snapshot_max_bytes:
+            raise ValueError(
+                "repository organization quota must be at least the per-snapshot limit"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_log_evidence_limits(self) -> Settings:
+        if self.log_evidence_org_quota_bytes < self.log_evidence_max_bytes:
+            raise ValueError(
+                "log evidence organization quota must be at least the per-snapshot limit"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_configured_roots(self) -> Settings:
@@ -92,6 +136,13 @@ class Settings(BaseSettings):
         )
         self.allowed_roots = roots
         self._allowed_root_validation = cast(list[object], statuses)
+        return self
+
+    @model_validator(mode="after")
+    def validate_resource_governance_limits(self) -> Settings:
+        from chinescan.core.resource_governance import ResourceLimits
+
+        ResourceLimits.from_settings(self)
         return self
 
     @property

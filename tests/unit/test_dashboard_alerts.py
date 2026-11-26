@@ -4,6 +4,7 @@ import pytest
 
 from chinescan.core.dashboard_alerts import AlertStateError, DashboardAlerts
 from chinescan.core.dashboard_intelligence import DashboardIntelligence
+from chinescan.core.errors import StorageError
 from chinescan.core.storage.sqlite import SQLiteRepository
 
 
@@ -62,8 +63,11 @@ def test_invalid_alert_transition_is_rejected(tmp_path):
         alerts.transition(alert["alert_id"], "acknowledge", "analyst")
 
 
-def test_malware_triage_is_scored_and_persisted_alert_refresh_is_idempotent(tmp_path):
+def test_malware_triage_is_scored_and_persisted_alert_refresh_is_idempotent(
+    tmp_path, authorize_local_repository
+):
     repository, alerts = _service(tmp_path)
+    authorize_local_repository(repository)
     repository.save(
         "malware_analysis",
         "triage-1",
@@ -92,6 +96,25 @@ def test_malware_triage_is_scored_and_persisted_alert_refresh_is_idempotent(tmp_
     assert alert["rule_id"] == "malware_triage_hit"
     assert alert["occurrence_count"] == 1
     assert len(alerts.audit(alert["alert_id"])) == 1
+    repository.close()
+
+
+def test_security_signal_persists_without_tenant_repository_access(tmp_path):
+    repository, alerts = _service(tmp_path)
+    intelligence = DashboardIntelligence(repository, alerts)
+    signal = {
+        "key": "csrf-block:test-request",
+        "kind": "authorization_block",
+        "summary": "A same-origin request failed CSRF validation.",
+        "module": "Security Dashboard",
+    }
+    # No organization context is established: this operation is limited to
+    # persisting the server-generated security signal and cannot scan records.
+    persisted = intelligence.record_security_signal(signal)
+    assert len(persisted) == 1
+    assert persisted[0]["rule_id"] == "authorization_guard_block"
+    with pytest.raises(StorageError, match="authorized organization context"):
+        intelligence.refresh_alerts()
     repository.close()
 
 

@@ -1364,11 +1364,10 @@ def test_chain_web_auth_csrf_validation_and_network_gate(tmp_path) -> None:
         assert client.get("/api/chain/traces/not-a-scan/graph").status_code == 404
         assert client.get("/api/chain/traces/not-a-scan/export/graph-json").status_code == 404
         assert client.get("/api/chain/traces/not-a-scan/export/unknown").status_code == 404
-        non_chain_repo = SQLiteRepository(database)
-        non_chain_repo.save(
-            "scan", "ordinary-scan", {"scan_id": "ordinary-scan", "scanner": "builtin"}
-        )
-        non_chain_repo.close()
+        with app.state.repository.local_operator_context():
+            app.state.repository.save(
+                "scan", "ordinary-scan", {"scan_id": "ordinary-scan", "scanner": "builtin"}
+            )
         assert client.get("/api/chain/traces/ordinary-scan/graph").status_code == 404
 
 
@@ -1395,7 +1394,9 @@ def test_chain_cli_is_offline_without_explicit_network_opt_in(tmp_path) -> None:
     assert "explicitly opt in" in result.output
 
 
-def test_chain_cli_label_file_loads_provenance_and_downgrades_only_labeled_lead(tmp_path) -> None:
+def test_chain_cli_label_file_loads_provenance_and_downgrades_only_labeled_lead(
+    tmp_path, local_operator_credentials, authorize_local_repository
+) -> None:
     from typer.testing import CliRunner
 
     from chinescan.chain_trace.labels import load_labels
@@ -1461,6 +1462,7 @@ def test_chain_cli_label_file_loads_provenance_and_downgrades_only_labeled_lead(
         output = json.loads(result.output)
         repository = SQLiteRepository(database)
         try:
+            authorize_local_repository(repository)
             scan = repository.get("scan", output["scan_id"])
             findings = [repository.get("finding", key) for key in scan["finding_ids"]]
         finally:
@@ -1620,17 +1622,16 @@ def test_chain_web_fake_provider_job_graph_and_exports(tmp_path, monkeypatch) ->
         assert failed["status"] == "failed"
         assert "secret key" not in str(failed)
         assert "WEB_API_SECRET_SENTINEL" not in json.dumps(failed)
-        persisted = SQLiteRepository(database)
         all_records = []
-        for record_type in (
-            "chain_job",
-            "scan",
-            "chain_graph",
-            "finding",
-            "authorization_record",
-        ):
-            all_records.extend(persisted.list_records(record_type))
-        persisted.close()
+        with app.state.repository.local_operator_context():
+            for record_type in (
+                "chain_job",
+                "scan",
+                "chain_graph",
+                "finding",
+                "authorization_record",
+            ):
+                all_records.extend(app.state.repository.list_records(record_type))
         assert "WEB_API_SECRET_SENTINEL" not in json.dumps(all_records)
 
 

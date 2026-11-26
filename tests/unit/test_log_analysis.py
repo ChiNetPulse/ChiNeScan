@@ -812,7 +812,9 @@ def test_service_persists_events_alerts_and_sorted_timeline(repository) -> None:
     assert all(item["occurrence_count"] >= 1 for item in extracted)
 
 
-def test_logs_cli_summary_and_malformed_partial_exit(tmp_path: Path, monkeypatch) -> None:
+def test_logs_cli_summary_and_malformed_partial_exit(
+    tmp_path: Path, monkeypatch, local_operator_credentials
+) -> None:
     database = tmp_path / "logs.sqlite3"
     monkeypatch.setenv("CHINESCAN_DATABASE_PATH", str(database))
     result = runner.invoke(

@@ -4,7 +4,6 @@ from pathlib import Path
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
-from chinescan.core.storage.sqlite import SQLiteRepository
 from chinescan.web.app import create_app
 from chinescan.web.auth import create_operator
 
@@ -38,10 +37,10 @@ def test_mutating_routes_reject_missing_csrf_and_wrong_typed_record_ids(tmp_path
     credential = tmp_path / "operator.json"
     create_operator(credential, "analyst@example.test", "Synthetic secure passphrase 71!")
     database = tmp_path / "db.sqlite3"
-    repository = SQLiteRepository(database)
-    repository.save("chain_job", "shared-job-id", {"job_id": "shared-job-id"})
-    repository.close()
     app = create_app(database, credential, serve_frontend=False)
+    repository = app.state.repository
+    with repository.local_operator_context():
+        repository.save("chain_job", "shared-job-id", {"job_id": "shared-job-id"})
     client = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))
     try:
         login = client.post(
@@ -57,6 +56,7 @@ def test_mutating_routes_reject_missing_csrf_and_wrong_typed_record_ids(tmp_path
             "/api/auth/signup",
             "/api/auth/forgot-password",
             "/api/auth/reset-password",
+            "/api/auth/invitations/accept",
         }
         for route in routes:
             if not route.path.startswith("/api/") or not (route.methods or set()).intersection(

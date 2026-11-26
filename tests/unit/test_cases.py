@@ -24,9 +24,12 @@ from chinescan.core.models.investigation import (
     Event,
     Scan,
 )
+from chinescan.core.organizations import OrganizationService
 from chinescan.core.reporting import render_case_report
 from chinescan.core.storage.sqlite import SQLiteRepository
 from chinescan.log_analysis.service import LogAnalysisService
+from chinescan.web.app import create_app
+from chinescan.web.auth import create_operator, operator_auth_epoch, operator_identity_id
 
 runner = CliRunner()
 FIXTURE_ROOT = Path(__file__).parents[2] / "fixtures" / "sample-logs"
@@ -37,7 +40,13 @@ def test_case_cli_workflow_persists_and_exports_redacted_reports(
 ) -> None:
     database = tmp_path / "case-workflow.sqlite3"
     monkeypatch.setenv("CHINESCAN_DATABASE_PATH", str(database))
-    repository = SQLiteRepository(database)
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    credential = tmp_path / ".config" / "chinescan" / "operator.json"
+    create_operator(credential, "case-test@example.test", "safe local password")
+    monkeypatch.setenv("CHINESCAN_OPERATOR_CREDENTIAL_FILE", str(credential))
+    _app_instance = create_app(database, credential, serve_frontend=False)
+    repository = _app_instance.state.repository
+    repository.bind_local_operator_context()
     log_result = LogAnalysisService(repository).analyze(FIXTURE_ROOT)
     finding = Finding(
         finding_id="finding-case-fixture",
@@ -156,6 +165,12 @@ def test_case_cli_workflow_persists_and_exports_redacted_reports(
 
     reopened = SQLiteRepository(database)
     try:
+        OrganizationService(reopened).ensure_operator(
+            "case-test@example.test",
+            operator_auth_epoch(credential),
+            operator_identity_id(credential),
+        )
+        reopened.bind_local_operator_context()
         persisted = CaseWorkflow(reopened).get_case(case_id)
         assert persisted.status == CaseStatus.IN_PROGRESS
         assert persisted.notes[0].body == note_text

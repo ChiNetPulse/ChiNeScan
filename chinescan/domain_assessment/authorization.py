@@ -11,6 +11,7 @@ from pathlib import Path
 
 MAX_AUTH_FILE_BYTES = 64_000
 _LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.I)
+_NUMERIC_ADDRESS = re.compile(r"^(?:[0-9]+|0x[0-9a-f]+)(?:\.(?:[0-9]+|0x[0-9a-f]+)){0,3}$", re.I)
 
 
 class AuthorizationError(ValueError):
@@ -34,15 +35,19 @@ def normalize_hostname(value: str) -> str:
         raise AuthorizationError("target must be a hostname, not a URL or address")
     candidate = raw.rstrip(".")
     try:
-        ipaddress.ip_address(candidate)
-        raise AuthorizationError("IP literals are not accepted as domain targets")
-    except ValueError as exc:
-        if isinstance(exc, AuthorizationError):
-            raise
-    try:
         hostname = candidate.encode("idna").decode("ascii").lower()
     except UnicodeError as exc:
         raise AuthorizationError("target hostname is not valid IDNA") from exc
+    # Apply address checks after IDNA: compatibility characters and Unicode
+    # dot separators can normalize to ambiguous legacy IPv4 forms.
+    if _NUMERIC_ADDRESS.fullmatch(hostname):
+        raise AuthorizationError("ambiguous numeric host is not accepted as a domain")
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        raise AuthorizationError("IP literals are not accepted as domain targets")
     labels = hostname.split(".")
     if (
         len(hostname) > 253

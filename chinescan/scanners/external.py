@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
-import threading
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
 from chinescan.core.models.common import Severity
 from chinescan.core.models.finding import Finding
@@ -81,81 +79,36 @@ class _JsonTool:
         self.timeout_seconds = timeout_seconds
 
     def _run(self, target: Path, args: list[str], accepted_codes: set[int]) -> Any:
+        from chinescan.core.subprocess_supervision import (
+            SubprocessExecutionError,
+            run_supervised_subprocess,
+        )
+
         executable = shutil.which(self.executable)
         if executable is None:
             raise ScannerError(f"{self.name} is not installed or not available on PATH.")
         # External scanner plugins should not inherit cloud tokens, package registry
         # credentials, or other secrets from the parent process.
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if key.upper() in _INHERITED_ENV_ALLOWLIST
-        }
-        env["DO_NOT_TRACK"] = "1"
-        env["SEMGREP_SEND_METRICS"] = "off"
-        process: subprocess.Popen[bytes] | None = None
-        stdout = bytearray()
-        stderr = bytearray()
-        exceeded = threading.Event()
-
-        def drain(pipe: BinaryIO, buffer: bytearray) -> None:
-            try:
-                while chunk := pipe.read(_OUTPUT_CHUNK_BYTES):
-                    if len(buffer) + len(chunk) > MAX_OUTPUT_BYTES:
-                        remaining = max(0, MAX_OUTPUT_BYTES - len(buffer))
-                        buffer.extend(chunk[:remaining])
-                        exceeded.set()
-                        if process is not None:
-                            process.kill()
-                    elif not exceeded.is_set():
-                        buffer.extend(chunk)
-            finally:
-                pipe.close()
-
-        threads: list[threading.Thread] = []
         try:
-            process = subprocess.Popen(
+            result = run_supervised_subprocess(
                 [executable, *args],
                 cwd=target,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=False,
-                env=env,
+                timeout_seconds=self.timeout_seconds,
+                max_output_bytes=MAX_OUTPUT_BYTES,
+                env_allowlist=frozenset(_INHERITED_ENV_ALLOWLIST),
+                extra_env={"DO_NOT_TRACK": "1", "SEMGREP_SEND_METRICS": "off"},
+                popen_factory=subprocess.Popen,
             )
-            assert process.stdout is not None and process.stderr is not None
-            threads = [
-                threading.Thread(target=drain, args=(process.stdout, stdout), daemon=True),
-                threading.Thread(target=drain, args=(process.stderr, stderr), daemon=True),
-            ]
-            for thread in threads:
-                thread.start()
-            try:
-                returncode = process.wait(timeout=self.timeout_seconds)
-            except subprocess.TimeoutExpired as exc:
-                process.kill()
-                process.wait()
+        except SubprocessExecutionError as exc:
+            if exc.code == "SUBPROCESS_TIMEOUT":
                 raise ScannerError(f"{self.name} exceeded its configured timeout.") from exc
-            except BaseException:
-                process.kill()
-                process.wait()
-                raise
-            finally:
-                for thread in threads:
-                    thread.join()
-        except OSError as exc:
-            if process is not None and process.poll() is None:
-                process.kill()
-                process.wait()
-            for pipe in (process.stdout, process.stderr) if process is not None else ():
-                if pipe is not None:
-                    pipe.close()
+            if exc.code == "SUBPROCESS_OUTPUT_LIMIT_EXCEEDED":
+                raise ScannerError(f"{self.name} exceeded the configured output limit.") from exc
             raise ScannerError(f"{self.name} could not be started.") from exc
-        if exceeded.is_set():
-            raise ScannerError(f"{self.name} exceeded the configured output limit.")
-        if returncode not in accepted_codes:
-            raise ScannerError(f"{self.name} exited with status {returncode}.")
+        if result.returncode not in accepted_codes:
+            raise ScannerError(f"{self.name} exited with status {result.returncode}.")
         try:
-            return json.loads(stdout.decode("utf-8", errors="replace") or "null")
+            return json.loads(result.stdout.decode("utf-8", errors="replace") or "null")
         except json.JSONDecodeError as exc:
             raise ScannerError(f"{self.name} returned invalid JSON output.") from exc
 

@@ -2,19 +2,43 @@ database_path = "~/.local/share/chinescan/chinescan.sqlite3"
 log_level = "INFO"
 # Optional; required before Stage B1 managed malware intake. Choose a dedicated local path.
 # malware_managed_directory = "D:/chinescan-managed-samples"
+malware_evidence_org_quota_bytes = 1073741824
+# Governed local repository snapshot limits (90-day post-closure retention is fixed).
+repository_snapshot_max_bytes = 5368709120
+repository_snapshot_org_quota_bytes = 10737418240
 # Filesystem browsing is disabled until local roots are explicitly approved.
 # Use single-quoted TOML strings for Windows paths to preserve backslashes.
 # allowed_roots = ['C:\src']
 # extra_denied_paths = []
 # allow_soft_denied = false
 #
-# Bounded scanning defaults (reserved for later project-scanning phases).
-# max_files = 50000
-# max_total_bytes = 1073741824
-# max_file_bytes = 16777216
-# max_depth = 32
-# per_file_seconds = 2.0
-# job_deadline_seconds = 300
+# Bounded scanning and execution resource governance defaults (all require restart on change).
+# Operator-defined ceilings are enforced in ResourceLimits; environment overrides cannot exceed them.
+# max_files = 50000                       # count (1..200000)
+# max_total_bytes = 1073741824            # bytes (1024..10737418240)
+# max_file_bytes = 16777216               # bytes (1024..134217728)
+# max_depth = 32                          # directory levels (1..64)
+# per_file_seconds = 2.0                  # seconds (0<x<=60)
+# job_deadline_seconds = 300              # seconds (1..3600)
+# execution_per_org_active_limit = 2      # active jobs per org (1..16)
+# execution_global_active_limit = 8       # active jobs globally (1..64)
+# execution_per_org_queued_limit = 4      # queued+active jobs per org (1..64)
+# execution_global_queued_limit = 16      # queued+active jobs globally (1..256)
+# execution_max_queue_wait_seconds = 900  # seconds (1..86400)
+# execution_operation_timeout_seconds = 60.0 # seconds (0.5..600)
+# execution_shutdown_grace_seconds = 5.0  # seconds (0.1..120)
+# archive_max_entries = 10000             # entries (1..100000)
+# archive_max_nesting = 4                 # depth (1..16)
+# archive_max_decompressed_bytes = 268435456 # bytes (1024..2147483648)
+# parser_max_output_bytes = 4194304       # bytes (1024..33554432)
+# max_findings_per_job = 5000             # findings (1..50000)
+# subprocess_timeout_seconds = 60.0       # seconds (0.5..600)
+# subprocess_max_output_bytes = 4194304   # bytes (1024..33554432)
+# network_connect_timeout_seconds = 5.0   # seconds (0.1..30)
+# network_read_timeout_seconds = 10.0     # seconds (0.1..60)
+# network_max_response_bytes = 1048576    # bytes (256..16777216)
+# safe_retry_max_attempts = 2             # count (0..5)
+# safe_retry_delay_seconds = 0.5          # seconds (0..30)
 # Additional code assessment exclusions (Git ignore syntax; built-in generated/vendor exclusions remain active).
 # code_excluded_paths = ['generated/**', 'vendor/**']
 #

@@ -8,6 +8,7 @@ import socket
 import ssl
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -92,10 +93,21 @@ class NetworkDomainProbe:
 
     name = "builtin-domain-posture"
 
-    def __init__(self, settings: ProbeSettings | None = None) -> None:
+    def __init__(
+        self,
+        settings: ProbeSettings | None = None,
+        *,
+        before_external_action: Callable[[], bool] | None = None,
+    ) -> None:
         self.settings = settings or ProbeSettings()
+        self.before_external_action = before_external_action
+
+    def _authorize_next_action(self) -> None:
+        if self.before_external_action is not None and not self.before_external_action():
+            raise ExecutionStopped("Execution authorization changed before network activity.")
 
     def assess(self, hostname: str, profile: str) -> ProbeResult:
+        self._authorize_next_action()
         records_queue: queue.Queue[tuple[Any, OSError | None]] = queue.Queue(maxsize=1)
 
         def resolve() -> None:
@@ -141,6 +153,7 @@ class NetworkDomainProbe:
         for address in checked_addresses:
             try:
                 wait_for_request_slot()
+                self._authorize_next_action()
                 status, response_headers, cert = _head_request(
                     address,
                     hostname,
@@ -157,6 +170,7 @@ class NetworkDomainProbe:
             for address in checked_addresses:
                 try:
                     wait_for_request_slot()
+                    self._authorize_next_action()
                     status, response_headers, _ = _head_request(
                         address,
                         hostname,
@@ -184,6 +198,14 @@ def _is_public_address(value: str) -> bool:
         or address.is_loopback
         or address.is_link_local
     )
+
+
+class ExecutionStopped(RuntimeError):
+    """Raised when execution policy no longer permits the next network action."""
+
+
+class ExecutionCancelled(RuntimeError):
+    """Raised when worker cancellation prevents another external operation."""
 
 
 def _head_request(

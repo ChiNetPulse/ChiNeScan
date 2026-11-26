@@ -67,7 +67,9 @@ class ParseBatch:
     errors: list[str] = field(default_factory=list)
 
 
-def parse_log_data(data: bytes, name: str, source_ref: str) -> ParseBatch:
+def parse_log_data(
+    data: bytes, name: str, source_ref: str, control: object | None = None
+) -> ParseBatch:
     """Parse one bounded file or archive member without preserving raw lines."""
     suffix = PurePosixPath(name.lower()).suffix
     try:
@@ -75,16 +77,17 @@ def parse_log_data(data: bytes, name: str, source_ref: str) -> ParseBatch:
     except UnicodeDecodeError:
         return ParseBatch(errors=[f"{source_ref}: invalid UTF-8 input"])
     if suffix in {".json", ".jsonl", ".ndjson"}:
-        return _parse_json(text, suffix, source_ref)
+        return _parse_json(text, suffix, source_ref, control)
     if suffix == ".csv":
-        return _parse_csv(text, source_ref)
+        return _parse_csv(text, source_ref, control)
     if suffix == ".xml":
-        return _parse_windows_event_xml(text, source_ref)
-    iis_batch = _parse_iis_access(text, source_ref)
+        return _parse_windows_event_xml(text, source_ref, control)
+    iis_batch = _parse_iis_access(text, source_ref, control)
     if iis_batch is not None:
         return iis_batch
     batch = ParseBatch()
     for line_number, line in enumerate(io.StringIO(text), start=1):
+        _check_cancelled(control)
         if line_number > MAX_LINES_PER_SOURCE:
             batch.errors.append(f"{source_ref}: line count limit reached")
             break
@@ -114,7 +117,9 @@ def parse_log_data(data: bytes, name: str, source_ref: str) -> ParseBatch:
     return batch
 
 
-def _parse_json(text: str, suffix: str, source_ref: str) -> ParseBatch:
+def _parse_json(
+    text: str, suffix: str, source_ref: str, control: object | None = None
+) -> ParseBatch:
     batch = ParseBatch()
     if suffix == ".json":
         try:
@@ -124,12 +129,14 @@ def _parse_json(text: str, suffix: str, source_ref: str) -> ParseBatch:
         if parsed is not None:
             values = parsed if isinstance(parsed, list) else [parsed]
             for index, item in enumerate(values, start=1):
+                _check_cancelled(control)
                 if len(batch.events) >= MAX_RECORDS_PER_SOURCE:
                     batch.errors.append(f"{source_ref}: event count limit reached")
                     break
-                batch.events.extend(_json_item(item, source_ref, index, batch))
+                batch.events.extend(_json_item(item, source_ref, index, batch, control=control))
             return batch
     for line_number, line in enumerate(io.StringIO(text), start=1):
+        _check_cancelled(control)
         if line_number > MAX_LINES_PER_SOURCE:
             batch.errors.append(f"{source_ref}: line count limit reached")
             break
@@ -147,23 +154,30 @@ def _parse_json(text: str, suffix: str, source_ref: str) -> ParseBatch:
         except (json.JSONDecodeError, RecursionError):
             batch.errors.append(f"{ref}: malformed JSON record")
             continue
-        batch.events.extend(_json_item(item, source_ref, line_number, batch))
+        batch.events.extend(_json_item(item, source_ref, line_number, batch, control=control))
     return batch
 
 
 def _json_item(
-    item: Any, source_ref: str, line_number: int, batch: ParseBatch, depth: int = 0
+    item: Any,
+    source_ref: str,
+    line_number: int,
+    batch: ParseBatch,
+    depth: int = 0,
+    control: object | None = None,
 ) -> list[Event]:
+    _check_cancelled(control)
     if depth > 4:
         batch.errors.append(f"{source_ref}:{line_number}: JSON nesting limit reached")
         return []
     if isinstance(item, dict) and isinstance(item.get("Records"), list):
         output: list[Event] = []
         for index, record in enumerate(item["Records"], start=1):
+            _check_cancelled(control)
             if len(batch.events) + len(output) >= MAX_RECORDS_PER_SOURCE:
                 batch.errors.append(f"{source_ref}:{line_number}: event count limit reached")
                 break
-            output.extend(_json_item(record, source_ref, index, batch, depth + 1))
+            output.extend(_json_item(record, source_ref, index, batch, depth + 1, control))
         return output
     if not isinstance(item, dict):
         batch.errors.append(f"{source_ref}:{line_number}: expected a JSON object")
@@ -180,15 +194,16 @@ def _json_item(
     return [event]
 
 
-def _parse_csv(text: str, source_ref: str) -> ParseBatch:
+def _parse_csv(text: str, source_ref: str, control: object | None = None) -> ParseBatch:
     batch = ParseBatch()
     try:
         reader = csv.DictReader(io.StringIO(text, newline=""))
         if not reader.fieldnames:
             return ParseBatch(errors=[f"{source_ref}: CSV header is missing"])
         if _is_windows_event_csv(reader.fieldnames):
-            return _parse_windows_event_csv(text, source_ref)
+            return _parse_windows_event_csv(text, source_ref, control)
         for line_number, row in enumerate(reader, start=2):
+            _check_cancelled(control)
             if len(batch.events) >= MAX_RECORDS_PER_SOURCE:
                 batch.errors.append(f"{source_ref}: event count limit reached")
                 break
@@ -269,11 +284,14 @@ def _event_record(record: dict[str, Any], source_ref: str, line_number: int) -> 
     )
 
 
-def _parse_windows_event_csv(text: str, source_ref: str) -> ParseBatch:
+def _parse_windows_event_csv(
+    text: str, source_ref: str, control: object | None = None
+) -> ParseBatch:
     batch = ParseBatch()
     try:
         reader = csv.DictReader(io.StringIO(text, newline=""))
         for line_number, row in enumerate(reader, start=2):
+            _check_cancelled(control)
             if line_number > MAX_LINES_PER_SOURCE:
                 batch.errors.append(f"{source_ref}: line count limit reached")
                 break
@@ -342,12 +360,15 @@ def _parse_windows_event_csv(text: str, source_ref: str) -> ParseBatch:
     return batch
 
 
-def _parse_windows_event_xml(text: str, source_ref: str) -> ParseBatch:
+def _parse_windows_event_xml(
+    text: str, source_ref: str, control: object | None = None
+) -> ParseBatch:
     batch = ParseBatch()
     lines = text.splitlines()
     if len(lines) > MAX_LINES_PER_SOURCE:
         return ParseBatch(errors=[f"{source_ref}: line count limit reached"])
     for number, line in enumerate(lines, start=1):
+        _check_cancelled(control)
         if len(line.encode("utf-8")) > MAX_LINE_BYTES:
             return ParseBatch(errors=[f"{source_ref}:{number}: line exceeds size limit"])
 
@@ -372,6 +393,7 @@ def _parse_windows_event_xml(text: str, source_ref: str) -> ParseBatch:
 
     def start(tag: str, attributes: dict[str, str]) -> None:
         nonlocal current, current_line, capture_tag, capture_name, capture_text, found_event
+        _check_cancelled(control)
         element = local_name(tag)
         attrs = {local_name(key): value for key, value in attributes.items()}
         if element == "event":
@@ -505,11 +527,14 @@ def _parse_access(line: str, ref: str) -> Event | None:
     )
 
 
-def _parse_iis_access(text: str, source_ref: str) -> ParseBatch | None:
+def _parse_iis_access(
+    text: str, source_ref: str, control: object | None = None
+) -> ParseBatch | None:
     fields: list[str] | None = None
     batch = ParseBatch()
     saw_fields = False
     for line_number, line in enumerate(io.StringIO(text), start=1):
+        _check_cancelled(control)
         if line_number > MAX_LINES_PER_SOURCE:
             batch.errors.append(f"{source_ref}: line count limit reached")
             break
@@ -752,3 +777,8 @@ def _source_type(name: str) -> str:
     if "windows" in lower or "event" in lower or "security" in lower:
         return "windows_event_export"
     return "json" if lower.endswith((".json", ".jsonl", ".ndjson")) else "csv"
+
+
+def _check_cancelled(control: object | None) -> None:
+    if control is not None:
+        control.check_cancelled()  # type: ignore[attr-defined]

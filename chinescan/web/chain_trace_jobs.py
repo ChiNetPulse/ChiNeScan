@@ -28,10 +28,13 @@ class ChainTraceJobManager:
         self.stop_requested = False
 
     def start(self) -> None:
-        for row in self.repository.list_records("chain_job"):
-            if row.get("status") in {"queued", "running"}:
-                row.update(status="interrupted", error="Server restarted.")
-                self.repository.save("chain_job", row["job_id"], row)
+        with self.repository.local_operator_context():
+            for row in self.repository.list_records("chain_job"):
+                if row.get("status") in {"queued", "running"}:
+                    row.update(status="interrupted", error="Server restarted.")
+                    self.repository.save("chain_job", row["job_id"], row)
+        # ContextVars do not cross the worker thread boundary. Re-establish the
+        # authenticated local operator scope inside the worker thread itself.
         self.thread = threading.Thread(target=self.run, daemon=True, name="chinescan-chain-jobs")
         self.thread.start()
 
@@ -69,6 +72,11 @@ class ChainTraceJobManager:
         return rows[offset : offset + limit], len(rows)
 
     def run(self) -> None:
+        """Run one queue cycle in an explicitly selected local-operator workspace."""
+        with self.repository.local_operator_context():
+            self._run_local_operator()
+
+    def _run_local_operator(self) -> None:
         while True:
             with self.condition:
                 while not self.queue and not self.stop_requested:

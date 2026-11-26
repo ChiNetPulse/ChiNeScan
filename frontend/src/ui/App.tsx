@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, safeLocalUrl, setCsrfToken, UnauthorizedError } from '../api';
-import type { Finding, ModuleCapability, Overview, Page, Scan } from '../types';
+import type {
+  Engagement,
+  EngagementAssignment,
+  Finding,
+  GlobalExecutionDiagnostics,
+  ModuleCapability,
+  Organization,
+  Overview,
+  Page,
+  Scan,
+} from '../types';
+import { AccountSecurityWorkspace } from './AccountSecurityWorkspace';
 import { CasesWorkspace } from './CasesWorkspace';
 import { CodeJobsWorkspace } from './CodeJobsWorkspace';
 import { ChainTraceWorkspace } from './ChainTraceWorkspace';
@@ -10,10 +21,31 @@ import { ProjectsWorkspace } from './ProjectsWorkspace';
 import { ScanityReportImport } from './ScanityReportImport';
 import { SystemStatus } from './SystemStatus';
 import { DashboardScoresAlerts } from './DashboardScoresAlerts';
+import { OrganizationsWorkspace } from './OrganizationsWorkspace';
 import { TerminalBackdrop } from './TerminalBackdrop';
+import {
+  UnifiedEngagementWorkspace,
+  type EngagementSectionTab,
+} from './UnifiedEngagementWorkspace';
+import { UnifiedJobsMonitor } from './UnifiedJobsMonitor';
 import { useGlassTracking } from './glass';
 
-type Section = 'overview' | 'scans' | 'findings' | 'cases' | 'jobs' | 'projects' | 'logs' | 'malware' | 'chain' | 'status' | 'modules';
+type Section =
+  | 'overview'
+  | 'organizations'
+  | 'engagement'
+  | 'executions'
+  | 'scans'
+  | 'findings'
+  | 'cases'
+  | 'jobs'
+  | 'projects'
+  | 'logs'
+  | 'malware'
+  | 'chain'
+  | 'account'
+  | 'status'
+  | 'modules';
 type Detail = { kind: 'scan'; id: string } | { kind: 'finding'; id: string } | null;
 type AuthPage = 'login' | 'signup' | 'forgot' | 'forgot-confirmed' | 'reset';
 
@@ -43,6 +75,14 @@ export function App() {
   const [caseScanId, setCaseScanId] = useState('');
   const [modules, setModules] = useState<ModuleCapability[]>([]);
   const loadModules = useCallback(async () => setModules(await api.modules()), []);
+  const [contextOrgs, setContextOrgs] = useState<Organization[]>([]);
+  const [selectedOrgId, setSelectedOrgId] = useState('');
+  const [contextEngagements, setContextEngagements] = useState<Engagement[]>([]);
+  const [selectedEngId, setSelectedEngId] = useState('');
+  const [contextAssignments, setContextAssignments] = useState<EngagementAssignment[]>([]);
+  const [currentUserId, setCurrentUserId] = useState('');
+  const [engagementTab, setEngagementTab] = useState<EngagementSectionTab>('overview');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [backgroundMode, setBackgroundMode] = useState<'full' | 'reduced' | 'off'>(() => {
     try {
       const legacy = window.localStorage.getItem('gnet-scan-terminal-motion');
@@ -58,8 +98,59 @@ export function App() {
 
   const signOut = useCallback(() => {
     setCsrfToken(''); setEmail(''); setOverview(null); setScanPage(null); setFindingPage(null);
-    setDetail(null); setDetailData(null); setAuthPage('login'); window.history.replaceState({}, '', '/');
+    setDetail(null); setDetailData(null); setContextOrgs([]); setSelectedOrgId('');
+    setContextEngagements([]); setSelectedEngId(''); setContextAssignments([]); setCurrentUserId('');
+    setAuthPage('login'); window.history.replaceState({}, '', '/');
   }, []);
+
+  const loadContextOrgs = useCallback(async () => {
+    try {
+      const [orgsRes, meRes] = await Promise.all([
+        api.organizations().catch(() => ({ items: [] as Organization[] })),
+        api.currentUser().catch(() => null),
+      ]);
+      setContextOrgs(orgsRes.items);
+      if (meRes) setCurrentUserId(meRes.id);
+      setSelectedOrgId((cur) =>
+        orgsRes.items.some((o) => o.id === cur) ? cur : orgsRes.items[0]?.id ?? ''
+      );
+    } catch {
+      /* Context selector degrades gracefully if user has no orgs */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!email) return;
+    void loadContextOrgs();
+  }, [email, loadContextOrgs]);
+
+  useEffect(() => {
+    setContextEngagements([]);
+    setSelectedEngId('');
+    setContextAssignments([]);
+    if (!email || !selectedOrgId) return;
+    let active = true;
+    api.organizationEngagements(selectedOrgId).then((res) => {
+      if (!active) return;
+      setContextEngagements(res.items);
+      setSelectedEngId(res.items[0]?.id ?? '');
+    }).catch((reason: unknown) => {
+      if (reason instanceof UnauthorizedError) signOut();
+    });
+    return () => { active = false; };
+  }, [email, selectedOrgId, signOut]);
+
+  useEffect(() => {
+    setContextAssignments([]);
+    if (!email || !selectedOrgId || !selectedEngId) return;
+    let active = true;
+    api.engagementAssignments(selectedOrgId, selectedEngId).then((res) => {
+      if (active) setContextAssignments(res.items);
+    }).catch((reason: unknown) => {
+      if (reason instanceof UnauthorizedError) signOut();
+    });
+    return () => { active = false; };
+  }, [email, selectedOrgId, selectedEngId, signOut]);
 
   useEffect(() => {
     api.session().then(async (session) => {
@@ -100,8 +191,9 @@ export function App() {
   async function submitLogin(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError('');
     const form = new FormData(event.currentTarget);
+    const totp = String(form.get('totp_code') ?? '').trim();
     try {
-      const session = await api.login(String(form.get('email')), String(form.get('password')));
+      const session = await api.login(String(form.get('email')), String(form.get('password')), totp || undefined);
       setCsrfToken(session.csrf_token); setEmail(session.email);
     } catch (reason) { setError(messageOf(reason)); }
     finally { setBusy(false); }
@@ -137,26 +229,120 @@ export function App() {
           ? <RecoveryInstructions onBack={() => navigateAuth('login', setAuthPage)} onReset={() => navigateAuth('reset', setAuthPage)}/>
           : <Login error={error} busy={busy} signupAvailable={signupAvailable} onSubmit={submitLogin} onRetry={() => window.location.reload()} onSignup={() => { navigateAuth('signup', setAuthPage); setError(''); }} onForgot={() => { navigateAuth('forgot', setAuthPage); setError(''); }} />;
 
-  const title = section === 'chain' ? 'On-chain tracing' : section === 'overview' ? 'Overview' : section === 'scans' ? 'Scan history' : section === 'findings' ? 'Findings' : section === 'cases' ? 'Cases' : section === 'jobs' ? 'Code assessments' : section === 'projects' ? 'Projects' : section === 'malware' ? 'Malware triage' : section === 'status' ? 'System status' : section === 'modules' ? 'Modules' : 'Log analysis';
-  const nav = (id: Section, label: string, glyph: string) => <button data-glass className={`nav-link ${section === id ? 'active' : ''}`} key={id} onClick={() => { setSection(id); setPage(0); setFilter(''); setDetail(null); }}><span className="nav-glyph" aria-hidden="true">{glyph}</span>{label}{id === 'scans' && overview ? <span className="nav-count">{overview.scan_count}</span> : null}</button>;
+  const title = section === 'chain' ? 'On-chain tracing' : section === 'overview' ? 'Overview' : section === 'scans' ? 'Scan history' : section === 'findings' ? 'Findings' : section === 'cases' ? 'Cases' : section === 'jobs' ? 'Code assessments' : section === 'projects' ? 'Projects' : section === 'malware' ? 'Malware triage' : section === 'status' ? 'System status' : section === 'modules' ? 'Modules' : section === 'organizations' ? 'Organizations & engagements' : section === 'engagement' ? 'Engagement workspace' : section === 'executions' ? 'Governed execution jobs' : section === 'account' ? 'Account security' : 'Log analysis';
+  const nav = (id: Section, label: string, glyph: string) => <button data-glass className={`nav-link ${section === id ? 'active' : ''}`} key={id} onClick={() => { setSection(id); setPage(0); setFilter(''); setDetail(null); setMobileNavOpen(false); }}><span className="nav-glyph" aria-hidden="true">{glyph}</span>{label}{id === 'scans' && overview ? <span className="nav-count">{overview.scan_count}</span> : null}</button>;
+  const activeOrg = contextOrgs.find((o) => o.id === selectedOrgId) ?? null;
+  const activeEng = contextEngagements.find((e) => e.id === selectedEngId) ?? null;
+  const activeAssignment = contextAssignments.find((a) => a.user_id === currentUserId && a.status === 'active');
 
   return <div className="app-shell">
     <svg className="glass-filter-defs" aria-hidden="true" focusable="false"><filter id="glass-refraction"><feTurbulence type="fractalNoise" baseFrequency=".012 .025" numOctaves="2" seed="8"/><feDisplacementMap in="SourceGraphic" scale="3"/></filter></svg>
     <TerminalBackdrop mode={backgroundMode}/>
-    <aside className="sidebar">
+    <aside id="main-sidebar" className={`sidebar ${mobileNavOpen ? 'mobile-open' : ''}`}>
       <div className="brand"><div className="brand-mark" aria-hidden="true"><span>C</span><i /></div><div><strong>ChiNeScan</strong><small>LOCAL SECURITY WORKSTATION</small></div></div>
       <div className="nav-caption">WORKSPACE</div>
-      <nav aria-label="Main navigation">{nav('overview', 'Overview', '⌂')}{nav('projects', 'Projects', '▧')}{nav('jobs', 'Code assessments', '⌘')}{nav('logs', 'Log analysis', '≋')}{nav('malware', 'Malware triage', '◇')}{nav('chain', 'On-chain tracing', '◎')}{nav('scans', 'Scans', '⌕')}{nav('findings', 'Findings', '◈')}{nav('cases', 'Cases', '▤')}{nav('modules', 'Modules', '▦')}{nav('status', 'System status', '◉')}</nav>
-      <div className="sidebar-bottom"><div className="local-indicator"><span />LOCAL INSTANCE</div><p>Assessment data stays on this device.</p><div className="profile"><div className="avatar">{email.slice(0, 1).toUpperCase()}</div><div className="profile-name"><strong>{email}</strong><small>Local operator</small></div><button className="icon-button" onClick={logout} disabled={busy} aria-label="Sign out" title="Sign out">↗</button></div></div>
+      <nav aria-label="Main navigation">{nav('overview', 'Overview', '⌂')}{nav('organizations', 'Organizations', '▤')}{nav('engagement', 'Engagements', '◈')}{nav('executions', 'Governed Jobs', '⚡')}{nav('projects', 'Projects', '▧')}{nav('jobs', 'Code assessments', '⌘')}{nav('logs', 'Log analysis', '≋')}{nav('malware', 'Malware triage', '◇')}{nav('chain', 'On-chain tracing', '◎')}{nav('scans', 'Scans', '⌕')}{nav('findings', 'Findings', '◈')}{nav('cases', 'Cases', '▤')}{nav('account', 'Account security', '◉')}{nav('modules', 'Modules', '▦')}{nav('status', 'System status', '◉')}</nav>
+      <div className="sidebar-bottom"><div className="local-indicator"><span />LOCAL INSTANCE</div><p>Assessment data stays on this device.</p><div className="profile"><div className="avatar">{email.slice(0, 1).toUpperCase()}</div><div className="profile-name"><strong>{email}</strong><small>{activeOrg ? `${activeOrg.role} · ${activeOrg.name}` : 'Local operator'}</small></div><button className="icon-button" onClick={logout} disabled={busy} aria-label="Sign out" title="Sign out">↗</button></div></div>
     </aside>
     <main className="main-content">
-      <header className="topbar"><div className="breadcrumbs"><span>ChiNeScan</span><b>/</b><strong>{title}</strong></div><div className="topbar-right"><label className="motion-control">Background<select className="motion-toggle" aria-label="Background animation" value={backgroundMode} onChange={(event) => { const next = event.target.value as 'full' | 'reduced' | 'off'; setBackgroundMode(next); try { window.localStorage.setItem('chinescan-terminal-motion', next); } catch { /* Storage can be unavailable in hardened browser contexts. */ } }}><option value="full">Full</option><option value="reduced">Reduced</option><option value="off">Off</option></select></label><span className="secure-pill"><span>●</span> Loopback secured</span><div className="top-avatar">{email.slice(0, 1).toUpperCase()}</div></div></header>
+      <header className="topbar"><div className="breadcrumbs"><button type="button" className="mobile-nav-toggle" aria-expanded={mobileNavOpen} aria-controls="main-sidebar" onClick={() => setMobileNavOpen((v) => !v)}>☰</button><span>ChiNeScan</span><b>/</b><strong>{title}</strong></div><div className="topbar-right"><label className="motion-control">Background<select className="motion-toggle" aria-label="Background animation" value={backgroundMode} onChange={(event) => { const next = event.target.value as 'full' | 'reduced' | 'off'; setBackgroundMode(next); try { window.localStorage.setItem('chinescan-terminal-motion', next); } catch { /* Storage can be unavailable in hardened browser contexts. */ } }}><option value="full">Full</option><option value="reduced">Reduced</option><option value="off">Off</option></select></label><span className="secure-pill"><span>●</span> Loopback secured</span><div className="top-avatar">{email.slice(0, 1).toUpperCase()}</div></div></header>
+      {contextOrgs.length > 0 && (
+        <section className="context-bar" aria-label="Organization and engagement context">
+          <label>
+            Organization{' '}
+            <select
+              aria-label="Active organization"
+              value={selectedOrgId}
+              onChange={(event) => {
+                setSelectedOrgId(event.target.value);
+              }}
+            >
+              {contextOrgs.map((org) => (
+                <option key={org.id} value={org.id}>{org.name} ({org.role})</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Engagement{' '}
+            <select
+              aria-label="Active engagement"
+              value={selectedEngId}
+              onChange={(event) => setSelectedEngId(event.target.value)}
+            >
+              {contextEngagements.length === 0 ? (
+                <option value="">No engagements</option>
+              ) : (
+                contextEngagements.map((eng) => (
+                  <option key={eng.id} value={eng.id}>{eng.name} ({eng.status})</option>
+                ))
+              )}
+            </select>
+          </label>
+          {activeOrg && (
+            <span className="context-role-pill">
+              Org role: <strong>{activeOrg.role}</strong> · Assignment:{' '}
+              <strong>{activeAssignment ? activeAssignment.role : 'none'}</strong>
+            </span>
+          )}
+          {activeEng && section !== 'engagement' && (
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => { setEngagementTab('overview'); setSection('engagement'); }}
+            >
+              Open engagement workspace
+            </button>
+          )}
+        </section>
+      )}
       <section className="page-content">
-        <div className="page-heading"><div><div className="eyebrow">LOCAL ANALYST WORKSPACE</div><h1>{title}</h1><p>{section === 'overview' ? 'A clear view of your locally stored assessment activity.' : section === 'scans' ? 'Review completed and partial local assessments.' : section === 'findings' ? 'Triage heuristic findings with evidence and uncertainty in view.' : section === 'cases' ? 'Investigate persisted scans with notes, links, timelines, and reports.' : section === 'jobs' ? 'Start and review bounded assessments of operator-approved local projects.' : section === 'projects' ? 'Organize approved code folders and review their assessment history.' : section === 'malware' ? 'Static triage of operator-registered samples. No execution.' : section === 'status' ? 'Check local service connectivity, readiness, and recent errors.' : section === 'modules' ? 'Review what each module can assess today and where its coverage stops.' : 'Analyze operator-approved local exports with bounded parsing and local detections.'}</p></div>{section !== 'overview' && section !== 'cases' && section !== 'jobs' && section !== 'logs' && section !== 'projects' && section !== 'status' && section !== 'modules' && <div className="list-controls"><label className="filter-control"><span aria-hidden="true">⌕</span><select aria-label={section === 'scans' ? 'Filter scan status' : 'Filter finding severity'} value={filter} onChange={(event) => { setPage(0); setFilter(event.target.value); }}><option value="">All {section === 'scans' ? 'statuses' : 'severities'}</option>{section === 'scans' ? <><option value="complete">Complete</option><option value="partial">Partial</option></> : <>{['critical','high','medium','low','info'].map((value) => <option key={value} value={value}>{value[0].toUpperCase() + value.slice(1)}</option>)}</>}</select></label></div>}</div>
+        <div className="page-heading"><div><div className="eyebrow">LOCAL ANALYST WORKSPACE</div><h1>{title}</h1><p>{section === 'overview' ? 'A clear view of your locally stored assessment activity.' : section === 'scans' ? 'Review completed and partial local assessments.' : section === 'findings' ? 'Triage heuristic findings with evidence and uncertainty in view.' : section === 'cases' ? 'Investigate persisted scans with notes, links, timelines, and reports.' : section === 'jobs' ? 'Start and review bounded assessments of operator-approved local projects.' : section === 'projects' ? 'Organize approved code folders and review their assessment history.' : section === 'malware' ? 'Static triage of operator-registered samples. No execution.' : section === 'status' ? 'Check local service connectivity, readiness, and recent errors.' : section === 'modules' ? 'Review what each module can assess today and where its coverage stops.' : section === 'engagement' ? 'Governed multi-tenant engagement scope, authorization, evidence workflows, and audit history.' : section === 'executions' ? 'Durable governed job ledger with lease status, cancellation, and reconciliation state.' : section === 'account' ? 'Manage your password, TOTP two-factor authentication, recovery codes, and invitations.' : 'Analyze operator-approved local exports with bounded parsing and local detections.'}</p></div>{!['overview', 'cases', 'jobs', 'logs', 'projects', 'status', 'modules', 'organizations', 'engagement', 'executions', 'account'].includes(section) && <div className="list-controls"><label className="filter-control"><span aria-hidden="true">⌕</span><select aria-label={section === 'scans' ? 'Filter scan status' : 'Filter finding severity'} value={filter} onChange={(event) => { setPage(0); setFilter(event.target.value); }}><option value="">All {section === 'scans' ? 'statuses' : 'severities'}</option>{section === 'scans' ? <><option value="complete">Complete</option><option value="partial">Partial</option></> : <>{['critical','high','medium','low','info'].map((value) => <option key={value} value={value}>{value[0].toUpperCase() + value.slice(1)}</option>)}</>}</select></label></div>}</div>
+        {['projects', 'jobs', 'logs', 'malware', 'chain'].includes(section) && activeEng && (
+          <div className="status-banner" role="note">
+            <span>Legacy local-operator tool. For tenant-isolated, scope-governed workflows, use the Engagement Workspace.</span>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => {
+                setEngagementTab(section === 'logs' ? 'logs' : section === 'malware' ? 'malware' : section === 'chain' ? 'chain' : 'repositories');
+                setSection('engagement');
+              }}
+            >
+              Switch to governed workflow
+            </button>
+          </div>
+        )}
         {error && <div className="alert-error" role="alert"><span>!</span><div><strong>We couldn’t load this view</strong><p>{error}</p></div><button onClick={() => void loadSection(section, page * 20, filter)}>Retry</button></div>}
         {busy && <div className="loading-line" aria-label="Loading"><span /></div>}
         {section === 'overview' && overview && <DashboardScoresAlerts onUnauthorized={signOut} onNavigate={(target) => { setSection(target); setPage(0); setFilter(''); setDetail(null); }} />}
         {section === 'overview' && <OverviewPanel data={overview} onScans={() => setSection('scans')} onFindings={() => setSection('findings')} onOpen={(id) => setDetail({ kind: 'scan', id })} />}
+        {section === 'organizations' && <OrganizationsWorkspace onUnauthorized={signOut} />}
+        {section === 'engagement' && (
+          <UnifiedEngagementWorkspace
+            organization={activeOrg}
+            engagement={activeEng}
+            assignments={contextAssignments}
+            currentUserId={currentUserId}
+            initialTab={engagementTab}
+            onUnauthorized={signOut}
+            onOpenScan={(id) => { setSection('scans'); setDetail({ kind: 'scan', id }); }}
+            onOpenCases={() => setSection('cases')}
+          />
+        )}
+        {section === 'executions' && (
+          <UnifiedJobsMonitor
+            organizationId={selectedOrgId}
+            engagementId={selectedEngId}
+            onUnauthorized={signOut}
+            onSelectScan={(id) => { setSection('scans'); setDetail({ kind: 'scan', id }); }}
+          />
+        )}
+        {section === 'account' && (
+          <AccountSecurityWorkspace
+            onUnauthorized={signOut}
+            onAccountChanged={() => void loadContextOrgs()}
+          />
+        )}
         {section === 'scans' && <ScanTable data={scanPage} page={page} onPage={setPage} onOpen={(id) => setDetail({ kind: 'scan', id })} />}
         {section === 'findings' && <FindingTable data={findingPage} page={page} onPage={setPage} onOpen={(id) => setDetail({ kind: 'finding', id })} />}
         {section === 'jobs' && <CodeJobsWorkspace onUnauthorized={signOut} onOpenScan={(id) => { setSection('scans'); setDetail({ kind: 'scan', id }); }} onCreateCase={(id) => { setCaseScanId(id); setSection('cases'); }} />}
@@ -165,12 +351,38 @@ export function App() {
         {section === 'logs' && <LogJobsWorkspace onUnauthorized={signOut} />}
         {section === 'malware' && <MalwareWorkspace onUnauthorized={signOut} onOpenProjects={() => setSection('projects')} />}
         {section === 'cases' && <CasesWorkspace onUnauthorized={signOut} initialScanId={caseScanId}/>}
-        {section === 'status' && <SystemStatus onUnauthorized={signOut} />}
+        {section === 'status' && <><SystemStatus onUnauthorized={signOut} /><ExecutionResourceDiagnosticsPanel onUnauthorized={signOut} /></>}
         {section === 'modules' && <ModulesWorkspace modules={modules} onLoad={loadModules} onUnauthorized={signOut} />}
       </section>
     </main>
     {detail && <DetailPanel detail={detailData} kind={detail.kind} onClose={() => setDetail(null)} onOpenFinding={(id) => setDetail({ kind: 'finding', id })} onRefreshScan={async (id) => { setDetailData(await api.scan(id)); }} onUnauthorized={signOut} onCreateCase={(id) => { setCaseScanId(id); setDetail(null); setSection('cases'); }} />}
   </div>;
+}
+
+function ExecutionResourceDiagnosticsPanel({ onUnauthorized }: { onUnauthorized: () => void }) {
+  const [diag, setDiag] = useState<GlobalExecutionDiagnostics | null>(null);
+  const [denied, setDenied] = useState(false);
+
+  useEffect(() => {
+    api.executionResourceDiagnostics().then(setDiag).catch((reason: unknown) => {
+      if (reason instanceof UnauthorizedError) onUnauthorized();
+      else setDenied(true);
+    });
+  }, [onUnauthorized]);
+
+  if (denied || !diag) return null;
+  return (
+    <section className="panel-card" aria-label="Local operator execution resource diagnostics" style={{ marginTop: 18 }}>
+      <h2>Global Execution Resource Diagnostics (Local Operator Only)</h2>
+      <div className="quota-strip">
+        <span>Global active: <strong>{diag.global_active_jobs}</strong></span>
+        <span>Global queued: <strong>{diag.global_queued_jobs}</strong></span>
+        <span>Total reserved: <strong>{diag.global_reserved_jobs}</strong></span>
+        <span>Reconciliation required: <strong>{diag.reconciliation_required_jobs}</strong></span>
+        <span>Workers: <strong>{diag.workers.length}</strong></span>
+      </div>
+    </section>
+  );
 }
 
 function ModulesWorkspace({ modules, onLoad, onUnauthorized }: { modules: ModuleCapability[]; onLoad: () => Promise<void>; onUnauthorized: () => void }) {
@@ -193,7 +405,22 @@ function ModulesWorkspace({ modules, onLoad, onUnauthorized }: { modules: Module
 }
 
 function Login({ error, busy, signupAvailable, onSubmit, onRetry, onSignup, onForgot }: { error: string; busy: boolean; signupAvailable: boolean; onSubmit: (event: React.FormEvent<HTMLFormElement>) => void; onRetry: () => void; onSignup: () => void; onForgot: () => void }) {
-  return <AuthShell><div className="login-label">LOCAL SECURITY WORKSPACE</div><h1>Welcome back</h1><p>Sign in to access your local assessment data.</p><form onSubmit={onSubmit}><label htmlFor="login-email">Email</label><input id="login-email" name="email" type="email" autoComplete="email" required maxLength={254}/><label htmlFor="login-password">Password</label><input id="login-password" name="password" type="password" autoComplete="current-password" required maxLength={1024}/>{error && <div className="login-error" role="alert" aria-live="assertive">{error}<button type="button" onClick={onRetry}>Retry session check</button></div>}<button className="primary-button" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}<span aria-hidden="true">→</span></button></form><button type="button" className="signup-link" onClick={onForgot}>Forgot password?</button>{signupAvailable ? <button type="button" className="signup-link" onClick={onSignup}>Create operator account</button> : <p role="status" aria-live="polite">An operator account is already configured. Sign in or use forgot password to recover access.</p>}<AuthFooter/></AuthShell>;
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteError, setInviteError] = useState('');
+  const [inviteBusy, setInviteBusy] = useState(false);
+  return <AuthShell><div className="login-label">LOCAL SECURITY WORKSPACE</div><h1>{inviteOpen ? 'Accept organization invitation' : 'Welcome back'}</h1><p>{inviteOpen ? 'Activate your invited account with a one-time invitation token.' : 'Sign in to access your local assessment data.'}</p>{inviteOpen ? <form onSubmit={async (event) => {
+    event.preventDefault(); setInviteBusy(true); setInviteError('');
+    const form = new FormData(event.currentTarget);
+    const token = String(form.get('token') ?? '').trim();
+    const password = String(form.get('password') ?? '');
+    const displayName = String(form.get('display_name') ?? '').trim();
+    try {
+      const res = await api.acceptInvitation(token, password || undefined, displayName || undefined);
+      setCsrfToken(res.csrf_token);
+      window.location.reload();
+    } catch (reason) { setInviteError(messageOf(reason)); }
+    finally { setInviteBusy(false); }
+  }}><label htmlFor="invite-token">Invitation token</label><input id="invite-token" name="token" required minLength={16} maxLength={256}/><label htmlFor="invite-name">Display name (new accounts)</label><input id="invite-name" name="display_name" maxLength={120}/><label htmlFor="invite-password">Password (12+ chars for new accounts, or current password)</label><input id="invite-password" name="password" type="password" maxLength={1024}/>{inviteError && <div className="login-error" role="alert">{inviteError}</div>}<button className="primary-button" disabled={inviteBusy}>{inviteBusy ? 'Activating…' : 'Accept invitation'}<span aria-hidden="true">→</span></button></form> : <form onSubmit={onSubmit}><label htmlFor="login-email">Email</label><input id="login-email" name="email" type="email" autoComplete="email" required maxLength={254}/><label htmlFor="login-password">Password</label><input id="login-password" name="password" type="password" autoComplete="current-password" required maxLength={1024}/><label htmlFor="login-totp">Authenticator / recovery code (if enabled)</label><input id="login-totp" name="totp_code" autoComplete="one-time-code" maxLength={64}/>{error && <div className="login-error" role="alert" aria-live="assertive">{error}<button type="button" onClick={onRetry}>Retry session check</button></div>}<button className="primary-button" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}<span aria-hidden="true">→</span></button></form>}<button type="button" className="signup-link" onClick={() => { setInviteOpen((v) => !v); setInviteError(''); }}>{inviteOpen ? 'Back to sign in' : 'Have an invitation token?'}</button><button type="button" className="signup-link" onClick={onForgot}>Forgot password?</button>{signupAvailable ? <button type="button" className="signup-link" onClick={onSignup}>Create operator account</button> : <p role="status" aria-live="polite">An operator account is already configured. Sign in or use forgot password to recover access.</p>}<AuthFooter/></AuthShell>;
 }
 
 function SignupDisabled({ onBack }: { onBack: () => void }) {

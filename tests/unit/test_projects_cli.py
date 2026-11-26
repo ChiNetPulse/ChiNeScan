@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from chinescan.cli.app import app as cli_app
-from chinescan.core.accounts import create_operator
+from chinescan.core.accounts import create_operator, ensure_operator_identity_id
 from chinescan.core.config.settings import Settings
 from chinescan.web.app import create_app
 
@@ -33,6 +33,10 @@ def test_projects_cli_add_and_api_list_share_core_state(tmp_path: Path, monkeypa
     monkeypatch.setenv("CHINESCAN_CONFIG_PATH", str(config))
     monkeypatch.setenv("CHINESCAN_DATABASE_PATH", str(database))
     monkeypatch.setenv("CHINESCAN_REPORTS_DIR", str(private / "reports"))
+    credential = private / "operator.json"
+    create_operator(credential, "parity@example.test", "projects-parity-password-123")
+    ensure_operator_identity_id(credential, "6b2c7a73-482c-46d4-a7ae-008119dc8ee5")
+    monkeypatch.setenv("CHINESCAN_OPERATOR_CREDENTIAL_FILE", str(credential))
     cli_result = CliRunner().invoke(
         cli_app, ["projects", "add", "--name", "Parity fixture", "--path", str(root), "--json"]
     )
@@ -56,8 +60,6 @@ def test_projects_cli_add_and_api_list_share_core_state(tmp_path: Path, monkeypa
     assert cli_location_result.exit_code == 0, cli_location_result.stderr
     cli_location = json.loads(cli_location_result.stdout)
 
-    credential = private / "operator.json"
-    create_operator(credential, "parity@example.test", "projects-parity-password-123")
     settings = Settings(
         _env_file=None,
         allowed_roots=[root],

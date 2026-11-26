@@ -275,12 +275,14 @@ class EvmProvider:
         max_requests: int = 100,
         clock: Callable[[], float] = time.monotonic,
         chain_id: int | None = None,
+        before_request: Callable[[], None] | None = None,
     ) -> None:
         self.endpoint = endpoint
         self.api_key = api_key
         self.http_get = http_get
         self.chain = chain
         self.chain_id = chain_id
+        self.before_request = before_request
         self.retries = max(0, min(5, retries))
         self.throttle_seconds = min(5.0, max(0.0, throttle_seconds))
         self.sleep = sleep
@@ -311,6 +313,8 @@ class EvmProvider:
                 return None, "trace_deadline"
             if self.requests_made >= self.max_requests:
                 return None, "request_limit"
+            if self.before_request is not None:
+                self.before_request()
             try:
                 self.requests_made += 1
                 response = self.http_get(

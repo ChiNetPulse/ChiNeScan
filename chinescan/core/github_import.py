@@ -594,6 +594,10 @@ class GitHubImportService:
             self._worker.join(timeout=self.settings.github_import_timeout_seconds + 10)
 
     def _work(self) -> None:
+        with self.repository.local_operator_context():
+            self._work_local_operator()
+
+    def _work_local_operator(self) -> None:
         while not self._stopping.is_set():
             try:
                 job = self._queue.get(timeout=0.25)

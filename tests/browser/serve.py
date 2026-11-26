@@ -217,53 +217,64 @@ def main() -> None:
         managed_root.mkdir(parents=True, exist_ok=True)
     if operator_email is not None and operator_password is not None:
         create_operator(credentials, operator_email, operator_password)
+        from chinescan.core.organizations import OrganizationService
+        from chinescan.web.auth import operator_auth_epoch, operator_identity_id
 
-    repository = SQLiteRepository(database)
-    finding = Finding(
-        finding_id="browser-finding-high",
-        title="Synthetic high severity fixture",
-        description=(
-            '<svg onload="window.__evidenceExecuted=true"> synthetic password=fixture-secret-value'
-        ),
-        severity=Severity.HIGH,
-        fingerprint="browser-fingerprint-high",
-        scanner="fixture-scanner",
-        rule_id="FIXTURE-001",
-        location="synthetic/project.py:17",
-        tags=["browser-test"],
-    )
-    critical = Finding(
-        finding_id="browser-finding-critical",
-        title="Synthetic critical fixture",
-        severity=Severity.CRITICAL,
-        fingerprint="browser-fingerprint-critical",
-        scanner="fixture-scanner",
-        rule_id="FIXTURE-002",
-    )
-    event = Event(
-        event_id="browser-event-fixture",
-        occurred_at=datetime.now(UTC),
-        kind="synthetic-fixture",
-        summary="Synthetic browser event fixture",
-        source="fixture-scanner",
-    )
-    scan = Scan(
-        scan_id="browser-scan-fixture",
-        target_id="synthetic-target-that-must-not-leak",
-        scanner="fixture-scanner",
-        started_at=datetime.now(UTC),
-        finding_ids=[finding.finding_id, critical.finding_id],
-        project_types=["synthetic-python"],
-    )
-    for record_type, record in (
-        ("finding", finding),
-        ("finding", critical),
-        ("event", event),
-        ("scan", scan),
-    ):
-        key = {"finding": "finding_id", "event": "event_id", "scan": "scan_id"}[record_type]
-        repository.save(record_type, str(getattr(record, key)), record.model_dump(mode="json"))
-    repository.close()
+        identity_id = operator_identity_id(credentials)
+        assert identity_id is not None
+        repository = SQLiteRepository(database)
+        OrganizationService(repository).ensure_operator(
+            operator_email, operator_auth_epoch(credentials), identity_id
+        )
+        finding = Finding(
+            finding_id="browser-finding-high",
+            title="Synthetic high severity fixture",
+            description=(
+                '<svg onload="window.__evidenceExecuted=true"> '
+                "synthetic password=fixture-secret-value"
+            ),
+            severity=Severity.HIGH,
+            fingerprint="browser-fingerprint-high",
+            scanner="fixture-scanner",
+            rule_id="FIXTURE-001",
+            location="synthetic/project.py:17",
+            tags=["browser-test"],
+        )
+        critical = Finding(
+            finding_id="browser-finding-critical",
+            title="Synthetic critical fixture",
+            severity=Severity.CRITICAL,
+            fingerprint="browser-fingerprint-critical",
+            scanner="fixture-scanner",
+            rule_id="FIXTURE-002",
+        )
+        event = Event(
+            event_id="browser-event-fixture",
+            occurred_at=datetime.now(UTC),
+            kind="synthetic-fixture",
+            summary="Synthetic browser event fixture",
+            source="fixture-scanner",
+        )
+        scan = Scan(
+            scan_id="browser-scan-fixture",
+            target_id="synthetic-target-that-must-not-leak",
+            scanner="fixture-scanner",
+            started_at=datetime.now(UTC),
+            finding_ids=[finding.finding_id, critical.finding_id],
+            project_types=["synthetic-python"],
+        )
+        with repository.local_operator_context():
+            for record_type, record in (
+                ("finding", finding),
+                ("finding", critical),
+                ("event", event),
+                ("scan", scan),
+            ):
+                key = {"finding": "finding_id", "event": "event_id", "scan": "scan_id"}[record_type]
+                repository.save(
+                    record_type, str(getattr(record, key)), record.model_dump(mode="json")
+                )
+        repository.close()
 
     application = create_app(
         database,

@@ -76,7 +76,34 @@ def _override_session(application: FastAPI, path: str) -> None:
         csrf_token="test-csrf-token",
         expires_at=1_000_000_000_000.0,
         auth_epoch="fixture-auth-epoch",
+        user_id=application.state.local_operator_user_id,
     )
+
+
+def test_diagnostics_requires_local_operator_identity(tmp_path: Path) -> None:
+    application, _settings, _database, _credential = _app_fixture(tmp_path)
+    _override_session(application, "/api/ready")
+    _override_session(application, "/api/diagnostics")
+    for path in ("/api/ready", "/api/diagnostics"):
+        route = next(
+            item for item in application.routes if isinstance(item, APIRoute) and item.path == path
+        )
+        dependency = next(item.call for item in route.dependant.dependencies)
+        application.dependency_overrides[dependency] = lambda: Session(
+            email="other@example.test",
+            csrf_token="test-csrf-token",
+            expires_at=1_000_000_000_000.0,
+            auth_epoch="fixture-auth-epoch",
+            user_id="not-the-local-operator",
+        )
+    try:
+        with TestClient(
+            application, base_url="http://127.0.0.1", client=("127.0.0.1", 49320)
+        ) as client:
+            assert client.get("/api/ready").status_code == 404
+            assert client.get("/api/diagnostics").status_code == 404
+    finally:
+        application.state.repository.close()
 
 
 def _check_fixture(state: Literal["PASS", "WARN", "FAIL"]) -> dict[str, str]:
@@ -110,9 +137,12 @@ def _port_is_free(
     raise OSError("fixture port is free")
 
 
-def test_report_is_path_free_and_checks_database_read_only(tmp_path: Path) -> None:
+def test_report_is_path_free_and_checks_database_read_only(
+    tmp_path: Path, authorize_local_repository
+) -> None:
     database = tmp_path / "private" / "records.sqlite3"
     repository = SQLiteRepository(database)
+    authorize_local_repository(repository)
     repository.save("project", "project-one", {"status": "active"})
     repository.close()
     settings = Settings(
@@ -451,7 +481,7 @@ def test_ready_degraded_for_invalid_allowed_root_and_missing_optional_storage(
 def test_ready_fails_for_corrupt_credentials_unwritable_database_missing_dirs_and_frontend(
     tmp_path: Path, monkeypatch
 ) -> None:
-    corrupt_app, _settings, _database, _credential = _app_fixture(
+    corrupt_app, corrupt_settings, corrupt_database, corrupt_credential = _app_fixture(
         tmp_path / "corrupt", credential_state="corrupt"
     )
     _override_session(corrupt_app, "/api/ready")
@@ -459,8 +489,17 @@ def test_ready_fails_for_corrupt_credentials_unwritable_database_missing_dirs_an
         corrupt_app, base_url="http://127.0.0.1", client=("127.0.0.1", 49324)
     ) as client:
         corrupt_response = client.get("/api/ready")
-    assert corrupt_response.status_code == 503
-    corrupt_checks = {item["id"]: item["state"] for item in corrupt_response.json()["checks"]}
+    # An invalid credential store cannot establish a local operator principal, even when the
+    # dependency is overridden for this readiness test.
+    assert corrupt_response.status_code == 404
+    corrupt_report = build_report(
+        settings=corrupt_settings,
+        database_path=corrupt_database,
+        credential_path=corrupt_credential,
+        frontend_dist=web_app_module.FRONTEND_DIST,
+        errors=corrupt_app.state.diagnostic_errors,
+    )
+    corrupt_checks = {item["id"]: item["state"] for item in corrupt_report["checks"]}
     assert corrupt_checks["credentials"] == "FAIL"
 
     missing_directories, _settings, _database, _credential = _app_fixture(

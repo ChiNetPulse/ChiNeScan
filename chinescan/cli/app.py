@@ -31,7 +31,13 @@ app.command("doctor")(commands.doctor)
 app.command("status")(commands.status)
 app.add_typer(commands.config_app, name="config")
 app.command("code")(commands.code_scan)
+app.command("code-engagement")(commands.governed_code_scan)
 app.command("logs")(commands.logs_ingest)
+app.command("log-evidence-register")(commands.log_evidence_register)
+app.command("log-engagement")(commands.governed_log_analysis)
+app.command("chain-engagement")(commands.governed_chain_trace)
+app.command("malware-evidence-register")(commands.malware_evidence_register)
+app.command("malware-engagement")(commands.governed_malware_triage)
 
 
 @app.command("scan")

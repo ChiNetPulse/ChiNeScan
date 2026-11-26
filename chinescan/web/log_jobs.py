@@ -253,15 +253,16 @@ class LogJobManager:
         self._stopping = False
 
     def start(self) -> None:
-        with self.lock:
-            for job in self.repository.list_records("log_job"):
-                if job.get("status") in {"queued", "running"}:
-                    job.update(
-                        status="interrupted",
-                        finished_at=_now(),
-                        error="Server restarted before the job completed.",
-                    )
-                    self.repository.save("log_job", job["job_id"], job)
+        with self.repository.local_operator_context():
+            with self.lock:
+                for job in self.repository.list_records("log_job"):
+                    if job.get("status") in {"queued", "running"}:
+                        job.update(
+                            status="interrupted",
+                            finished_at=_now(),
+                            error="Server restarted before the job completed.",
+                        )
+                        self.repository.save("log_job", job["job_id"], job)
         self._thread = threading.Thread(target=self._run, name="chinescan-log-jobs", daemon=True)
         self._thread.start()
 
@@ -348,6 +349,10 @@ class LogJobManager:
             return self.repository.get("log_job", job_id)
 
     def _run(self) -> None:
+        with self.repository.local_operator_context():
+            self._run_local_operator()
+
+    def _run_local_operator(self) -> None:
         while True:
             with self._condition:
                 while not self._queue and not self._stopping:

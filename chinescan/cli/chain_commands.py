@@ -13,9 +13,8 @@ from chinescan.chain_trace.providers.evm import EvmProvider, stdlib_http_get
 from chinescan.chain_trace.providers.offline import OfflineProvider
 from chinescan.chain_trace.registry import load_registry, normalize_address
 from chinescan.chain_trace.service import ChainTraceService
-from chinescan.cli.commands import _settings
+from chinescan.cli.commands import _local_cli_repository, _settings
 from chinescan.core.report_store import ReportStoreError, save_scan_reports
-from chinescan.core.storage.sqlite import SQLiteRepository
 
 app = typer.Typer(help="Offline-first on-chain wallet tracing.")
 
@@ -65,7 +64,7 @@ def trace_command(
     from chinescan.chain_trace.labels import load_labels
 
     labels, label_gaps = load_labels(label_paths)
-    repository = SQLiteRepository(settings.database_path)
+    repository = _local_cli_repository(settings.database_path)
     try:
         try:
             scan, findings = ChainTraceService(provider, labels, repository, label_gaps).trace(
@@ -113,7 +112,7 @@ def export_command(
     format: str = typer.Option(..., "--format"),
     output: Path = typer.Option(..., "--output"),  # noqa: B008
 ) -> None:
-    repository = SQLiteRepository(_settings().database_path)
+    repository = _local_cli_repository(_settings().database_path)
     try:
         graph = repository.get("chain_graph", scan_id)
         if graph is None:

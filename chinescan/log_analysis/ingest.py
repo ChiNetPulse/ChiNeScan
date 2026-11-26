@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from chinescan.core.models.investigation import Event
+from chinescan.domain_assessment.probe import ExecutionCancelled
 from chinescan.log_analysis.parsers import parse_log_data
 
 MAX_LOG_FILES = 10_000
@@ -49,7 +50,7 @@ class BinaryReader(Protocol):
     def read(self, size: int = -1) -> bytes: ...
 
 
-def ingest_path(path: Path) -> IngestResult:
+def ingest_path(path: Path, *, control: object | None = None) -> IngestResult:
     """Read one local log file or directory; archives are streamed and never extracted."""
     try:
         root = path.expanduser().resolve(strict=True)
@@ -63,6 +64,7 @@ def ingest_path(path: Path) -> IngestResult:
     result = IngestResult()
     total_bytes = 0
     for candidate in candidates[:MAX_LOG_FILES]:
+        _check_cancelled(control)
         if candidate.is_symlink() or not _supported(candidate.name):
             if root.is_file():
                 result.errors.append(f"{candidate}: unsupported log format")
@@ -79,7 +81,7 @@ def ingest_path(path: Path) -> IngestResult:
         if total_bytes > MAX_TOTAL_BYTES:
             raise LogIngestionError("Input exceeds the total ingestion size limit.")
         result.source_count += 1
-        _ingest_file(candidate, result)
+        _ingest_file(candidate, result, control)
         if any("total expanded-byte limit reached" in error for error in result.errors):
             break
         if len(result.events) >= MAX_EVENTS:
@@ -120,43 +122,47 @@ def _supported(name: str) -> bool:
     return suffix in _FORMATS | _ARCHIVES
 
 
-def _ingest_file(path: Path, result: IngestResult) -> None:
+def _ingest_file(path: Path, result: IngestResult, control: object | None = None) -> None:
     lower = path.name.lower()
     try:
         if lower.endswith(".zip"):
-            _ingest_zip(path, result)
+            _ingest_zip(path, result, control)
         elif lower.endswith((".tar", ".tar.gz", ".tar.bz2", ".tar.xz", ".tgz")):
-            _ingest_tar(path, result)
+            _ingest_tar(path, result, control)
         elif lower.endswith(".gz"):
-            _ingest_gzip(path, result)
+            _ingest_gzip(path, result, control)
         else:
-            data, truncated = _read_log_prefix(path, _remaining_member_budget(result))
+            data, truncated = _read_log_prefix(path, _remaining_member_budget(result), control)
             read_size = len(data)
             if truncated:
                 data = _complete_lines_prefix(data)
-            _parse_member(data, path.name, str(path), result)
+            _parse_member(data, path.name, str(path), result, control)
             result.bytes_processed += read_size - len(data)
             if truncated:
                 result.errors.append(_truncation_error(path.name, read_size))
+    except ExecutionCancelled:
+        raise
     except _ExpansionLimitReached:
         result.errors.append(f"{path}: total expanded-byte limit reached")
     except Exception as exc:  # isolate malformed/untrusted input with an explicit diagnostic
         result.errors.append(f"{path}: archive or file read failed ({type(exc).__name__})")
 
 
-def _ingest_gzip(path: Path, result: IngestResult) -> None:
+def _ingest_gzip(path: Path, result: IngestResult, control: object | None = None) -> None:
     with gzip.open(path, "rb") as stream:
         total_remaining = MAX_TOTAL_BYTES - result.bytes_processed
         if total_remaining < MAX_FILE_BYTES:
-            data = _read_stream(stream, max(1, total_remaining))
+            data = _read_stream(stream, max(1, total_remaining), control)
             truncated = False
         else:
-            data, truncated = _read_log_stream_prefix(stream, min(MAX_FILE_BYTES, total_remaining))
+            data, truncated = _read_log_stream_prefix(
+                stream, min(MAX_FILE_BYTES, total_remaining), control
+            )
     member_name = path.name[:-3]
     read_size = len(data)
     if truncated:
         data = _complete_lines_prefix(data)
-    _parse_member(data, member_name, f"{path}::{member_name}", result)
+    _parse_member(data, member_name, f"{path}::{member_name}", result, control)
     result.bytes_processed += read_size - len(data)
     if truncated:
         result.errors.append(_truncation_error(path.name, read_size, decompressed=True))
@@ -172,15 +178,18 @@ def _truncation_error(name: str, read_size: int, *, decompressed: bool = False) 
     )
 
 
-def _read_log_prefix(path: Path, limit: int) -> tuple[bytes, bool]:
+def _read_log_prefix(path: Path, limit: int, control: object | None = None) -> tuple[bytes, bool]:
     with path.open("rb") as stream:
-        return _read_log_stream_prefix(stream, limit)
+        return _read_log_stream_prefix(stream, limit, control)
 
 
-def _read_log_stream_prefix(stream: BinaryReader, limit: int) -> tuple[bytes, bool]:
+def _read_log_stream_prefix(
+    stream: BinaryReader, limit: int, control: object | None = None
+) -> tuple[bytes, bool]:
     """Read one bounded log prefix and distinguish true truncation from an exact-size file."""
     output = bytearray()
     while len(output) < limit:
+        _check_cancelled(control)
         chunk = stream.read(min(64 * 1024, limit - len(output)))
         if not chunk:
             return bytes(output), False
@@ -194,13 +203,14 @@ def _complete_lines_prefix(data: bytes) -> bytes:
     return data[: boundary + 1] if boundary >= 0 else b""
 
 
-def _ingest_zip(path: Path, result: IngestResult) -> None:
+def _ingest_zip(path: Path, result: IngestResult, control: object | None = None) -> None:
     total = 0
     with zipfile.ZipFile(path) as archive:
         infos = archive.infolist()
         if len(infos) > MAX_ARCHIVE_MEMBERS:
             result.errors.append(f"{path}: archive member count limit reached")
         for info in infos[:MAX_ARCHIVE_MEMBERS]:
+            _check_cancelled(control)
             mode = info.external_attr >> 16
             if info.is_dir() or stat.S_ISLNK(mode) or not _supported(info.filename):
                 continue
@@ -209,18 +219,19 @@ def _ingest_zip(path: Path, result: IngestResult) -> None:
                 continue
             with archive.open(info) as stream:
                 try:
-                    data = _read_stream(stream, _remaining_member_budget(result, total))
+                    data = _read_stream(stream, _remaining_member_budget(result, total), control)
                 except _ExpansionLimitReached:
                     result.errors.append(f"{path}: total expanded-byte limit reached")
                     return
             total += len(data)
-            _parse_member(data, info.filename, f"{path}::{info.filename}", result)
+            _parse_member(data, info.filename, f"{path}::{info.filename}", result, control)
 
 
-def _ingest_tar(path: Path, result: IngestResult) -> None:
+def _ingest_tar(path: Path, result: IngestResult, control: object | None = None) -> None:
     total = 0
     with tarfile.open(path, mode="r:*") as archive:
         for index, member in enumerate(archive):
+            _check_cancelled(control)
             if index >= MAX_ARCHIVE_MEMBERS:
                 result.errors.append(f"{path}: archive member count limit reached")
                 break
@@ -235,12 +246,12 @@ def _ingest_tar(path: Path, result: IngestResult) -> None:
                 continue
             with stream:
                 try:
-                    data = _read_stream(stream, _remaining_member_budget(result, total))
+                    data = _read_stream(stream, _remaining_member_budget(result, total), control)
                 except _ExpansionLimitReached:
                     result.errors.append(f"{path}: total expanded-byte limit reached")
                     return
             total += len(data)
-            _parse_member(data, member.name, f"{path}::{member.name}", result)
+            _parse_member(data, member.name, f"{path}::{member.name}", result, control)
 
 
 def _read_bounded(path: Path, limit: int) -> bytes:
@@ -257,9 +268,10 @@ def _remaining_member_budget(result: IngestResult, archive_bytes: int = 0) -> in
     return remaining
 
 
-def _read_stream(stream: BinaryReader, limit: int) -> bytes:
+def _read_stream(stream: BinaryReader, limit: int, control: object | None = None) -> bytes:
     output = bytearray()
     while len(output) < limit:
+        _check_cancelled(control)
         chunk = stream.read(min(64 * 1024, limit - len(output)))
         if not chunk:
             break
@@ -269,14 +281,29 @@ def _read_stream(stream: BinaryReader, limit: int) -> bytes:
     return bytes(output)
 
 
-def _parse_member(data: bytes, name: str, source_ref: str, result: IngestResult) -> None:
+def _parse_member(
+    data: bytes,
+    name: str,
+    source_ref: str,
+    result: IngestResult,
+    control: object | None = None,
+) -> None:
     result.bytes_processed += len(data)
-    batch = parse_log_data(data, PurePosixPath(name).name, _safe_source_ref(source_ref))
+    batch = parse_log_data(
+        data, PurePosixPath(name).name, _safe_source_ref(source_ref), control=control
+    )
     remaining = max(0, MAX_EVENTS - len(result.events))
     result.events.extend(batch.events[:remaining])
     if len(batch.events) > remaining:
         result.errors.append("Input reached the event count limit.")
     result.errors.extend(batch.errors)
+
+
+def _check_cancelled(control: object | None) -> None:
+    if control is not None:
+        check = getattr(control, "check_cancelled", None)
+        if check is not None:
+            check()
 
 
 def _safe_source_ref(source_ref: str) -> str:
