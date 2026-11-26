@@ -13,6 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from chinescan.core.execution_isolation import (
+    IsolationProfile,
+    make_preexec_fn,
+    require_isolation,
+)
 from chinescan.core.resource_governance import ExecutionDeadlineExceeded
 
 DEFAULT_ENV_ALLOWLIST = frozenset(
@@ -225,6 +230,8 @@ def run_supervised_subprocess(
     input_bytes: bytes | None = None,
     cancellation: threading.Event | None = None,
     deadline_at: float | None = None,
+    isolation_profile: IsolationProfile | None = None,
+    require_hardened_isolation: bool = False,
     popen_factory: Any = None,
 ) -> SupervisedProcessResult:
     """Execute a subprocess under strict timeout, output-size, and tree-cleanup controls."""
@@ -236,6 +243,13 @@ def run_supervised_subprocess(
         raise ValueError("timeout_seconds must be positive.")
     if max_output_bytes <= 0:
         raise ValueError("max_output_bytes must be positive.")
+    if require_hardened_isolation and isolation_profile is None:
+        raise ValueError("isolation_profile is required when hardened isolation is enabled.")
+    preexec_fn: Any = None
+    if isolation_profile is not None:
+        if require_hardened_isolation:
+            require_isolation(isolation_profile)
+        preexec_fn = make_preexec_fn(isolation_profile) if os.name == "posix" else None
 
     executable = resolve_executable(command[0])
     args = [executable, *command[1:]]
@@ -308,6 +322,8 @@ def run_supervised_subprocess(
             popen_kwargs["creationflags"] = creationflags
         else:
             popen_kwargs["start_new_session"] = True
+            if preexec_fn is not None:
+                popen_kwargs["preexec_fn"] = preexec_fn
 
         launcher = popen_factory or subprocess.Popen
         process = launcher(args, **popen_kwargs)  # type: ignore[call-overload]

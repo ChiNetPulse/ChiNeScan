@@ -16,6 +16,7 @@ import type {
 import { EngagementLogEvidenceWorkspace } from './EngagementLogEvidenceWorkspace';
 import { EngagementSecurityWorkspace } from './EngagementSecurityWorkspace';
 import { UnifiedJobsMonitor } from './UnifiedJobsMonitor';
+import { ScannerWorkspace } from './ScannerWorkspace';
 
 export type EngagementSectionTab =
   | 'overview'
@@ -26,6 +27,7 @@ export type EngagementSectionTab =
   | 'malware'
   | 'chain'
   | 'jobs'
+  | 'scanners'
   | 'findings'
   | 'reports'
   | 'audit';
@@ -230,6 +232,7 @@ export function UnifiedEngagementWorkspace({
     { id: 'malware', label: 'Malware Triage' },
     { id: 'chain', label: 'Chain Tracing' },
     { id: 'jobs', label: 'Execution Jobs' },
+    { id: 'scanners', label: 'Scanners' },
     { id: 'findings', label: 'Findings & Results' },
     { id: 'reports', label: 'Reports' },
     { id: 'audit', label: 'Audit History' },
@@ -445,6 +448,10 @@ export function UnifiedEngagementWorkspace({
           onUnauthorized={onUnauthorized}
           onSelectScan={onOpenScan}
         />
+      )}
+
+      {tab === 'scanners' && (
+        <ScannerWorkspace organizationId={orgId} engagementId={engId} onUnauthorized={onUnauthorized} />
       )}
 
       {tab === 'findings' && (

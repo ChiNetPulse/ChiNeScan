@@ -43,6 +43,11 @@ CEILING_NETWORK_READ_TIMEOUT_SECONDS = 60.0
 CEILING_NETWORK_MAX_RESPONSE_BYTES = 16_777_216
 CEILING_SAFE_RETRY_MAX_ATTEMPTS = 5
 CEILING_SAFE_RETRY_DELAY_SECONDS = 30.0
+CEILING_SCANNER_CPU_SECONDS = 600
+CEILING_SCANNER_MEMORY_BYTES = 4_294_967_296
+CEILING_SCANNER_PROCESS_COUNT = 256
+CEILING_SCANNER_OPEN_FILES = 4096
+CEILING_SCANNER_TEMP_BYTES = 536_870_912
 
 
 def default_workload_limits() -> dict[str, int]:
@@ -127,6 +132,16 @@ class ResourceLimits(BaseModel):
         default=4_194_304, ge=1024, le=CEILING_SUBPROCESS_MAX_OUTPUT_BYTES
     )
 
+    # Scanner worker enforcement. These are administrative ceilings, not caller
+    # parameters, and are passed to the isolated subprocess boundary.
+    scanner_cpu_seconds: int = Field(default=60, ge=1, le=CEILING_SCANNER_CPU_SECONDS)
+    scanner_memory_bytes: int = Field(
+        default=536_870_912, ge=16_777_216, le=CEILING_SCANNER_MEMORY_BYTES
+    )
+    scanner_process_count: int = Field(default=64, ge=1, le=CEILING_SCANNER_PROCESS_COUNT)
+    scanner_open_files: int = Field(default=256, ge=16, le=CEILING_SCANNER_OPEN_FILES)
+    scanner_temp_bytes: int = Field(default=33_554_432, ge=1024, le=CEILING_SCANNER_TEMP_BYTES)
+
     # Network and safe-retry bounds
     network_connect_timeout_seconds: float = Field(
         default=5.0, ge=0.1, le=CEILING_NETWORK_CONNECT_TIMEOUT_SECONDS
@@ -201,6 +216,11 @@ class ResourceLimits(BaseModel):
             max_findings_per_job=settings.max_findings_per_job,
             subprocess_timeout_seconds=float(settings.subprocess_timeout_seconds),
             subprocess_max_output_bytes=settings.subprocess_max_output_bytes,
+            scanner_cpu_seconds=settings.scanner_cpu_seconds,
+            scanner_memory_bytes=settings.scanner_memory_bytes,
+            scanner_process_count=settings.scanner_process_count,
+            scanner_open_files=settings.scanner_open_files,
+            scanner_temp_bytes=settings.scanner_temp_bytes,
             network_connect_timeout_seconds=float(settings.network_connect_timeout_seconds),
             network_read_timeout_seconds=float(settings.network_read_timeout_seconds),
             network_max_response_bytes=settings.network_max_response_bytes,
