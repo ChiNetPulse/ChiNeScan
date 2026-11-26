@@ -7,7 +7,7 @@ from pathlib import Path
 
 import tomli_w
 
-from chinescan.core.config.settings import Settings, default_config_path
+from chinescan.core.config.settings import ArtexIntegrationSettings, Settings, default_config_path
 from chinescan.core.errors import ConfigurationError
 
 MAX_CONFIG_BYTES = 1_048_576
@@ -22,6 +22,7 @@ def init_config(path: Path | None = None) -> Path:
         "database_path": str(Settings().database_path),
         "reports_dir": str(Settings().reports_dir),
         "log_level": "INFO",
+        "integrations": {"artex": {"enabled": False, "mode": "disabled", "health_enabled": False}},
     }
     try:
         with target.open("x", encoding="utf-8") as stream:
@@ -48,6 +49,16 @@ def load_settings(
         if target.exists() and target.stat().st_size > MAX_CONFIG_BYTES:
             raise OSError("configuration exceeds size limit")
         data = tomllib.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+        integrations = data.setdefault("integrations", {})
+        if not isinstance(integrations, dict):
+            raise ValueError("integrations must be a TOML table")
+        artex = integrations.setdefault("artex", {})
+        if not isinstance(artex, dict):
+            raise ValueError("integrations.artex must be a TOML table")
+        for key in ArtexIntegrationSettings.model_fields:
+            env_name = f"CHINESCAN_INTEGRATIONS__ARTEX__{key.upper()}"
+            if env_name in os.environ:
+                artex[key] = os.environ[env_name]
         for key in Settings.model_fields:
             env_name = f"CHINESCAN_{key.upper()}"
             if env_name in os.environ:
