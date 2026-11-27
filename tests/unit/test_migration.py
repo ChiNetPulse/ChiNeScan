@@ -46,7 +46,7 @@ def test_repository_asset_migration_upgrades_and_empty_downgrade_is_safe(tmp_pat
             revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert revision == "0015_durable_job_leases_actions"
+            assert revision == "0016_phase6_governance"
             checks = inspect(connection).get_check_constraints("engagement_assets")
             assert any("chain_address" in str(item.get("sqltext")) for item in checks)
         command.downgrade(config, "0009_execution_result_provenance")
@@ -61,7 +61,7 @@ def test_repository_asset_migration_upgrades_and_empty_downgrade_is_safe(tmp_pat
             revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert revision == "0015_durable_job_leases_actions"
+            assert revision == "0016_phase6_governance"
     finally:
         engine.dispose()
 
@@ -178,7 +178,7 @@ def test_repository_migration_preserves_records_and_enforces_tenant_binding(
             )
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0015_durable_job_leases_actions"
+                == "0016_phase6_governance"
             )
 
         with engine.begin() as connection:
@@ -245,7 +245,7 @@ def test_malware_backend_revision_upgrades_existing_records_without_rewrite(tmp_
 
             assert (
                 MigrationContext.configure(connection).get_current_revision()
-                == "0015_durable_job_leases_actions"
+                == "0016_phase6_governance"
             )
     finally:
         repository.close()
@@ -397,7 +397,7 @@ def test_malware_evidence_migration_enforces_tenant_constraints_and_downgrades_e
             )
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0015_durable_job_leases_actions"
+                == "0016_phase6_governance"
             )
         with pytest.raises(RuntimeError, match="history exists"):
             command.downgrade(config, "0011_governed_log_evidence")

@@ -1,0 +1,25 @@
+[Unit]
+Description=ChineScan ordinary backend API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chinescan
+Group=chinescan
+WorkingDirectory=/opt/chinescan
+EnvironmentFile=/etc/chinescan/chinescan.env
+ExecStart=/opt/chinescan/.venv/bin/chinescan web serve --host 127.0.0.1 --port 8765 --secure-cookie
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/chinescan
+MemoryMax=700M
+TasksMax=128
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

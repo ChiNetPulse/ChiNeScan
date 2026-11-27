@@ -261,6 +261,14 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         "execution_action_attempts",
         "worker_leases",
     }
+    phase6_tables = {
+        "execution_capability_snapshots",
+        "retention_policies",
+        "legal_holds",
+        "legal_hold_records",
+        "retention_jobs",
+        "retention_audit_events",
+    }
     extras = tables - {"records", "alembic_version"}
     app_extras = extras - {"sqlite_sequence"}
     if (
@@ -275,6 +283,7 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         - malware_evidence_tables
         - identity_tables
         - durable_job_tables
+        - phase6_tables
     ):
         return None, "database contains an unsupported table layout"
     columns = connection.execute("PRAGMA table_info(records)").fetchall()
@@ -388,6 +397,20 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         | durable_job_tables
     ):
         return revision, "durable job lease and action tables do not match the supported schema"
+    if revision == "0016_phase6_governance" and app_extras != (
+        dashboard_tables
+        | organization_tables
+        | engagement_security_tables
+        | execution_tables
+        | execution_provenance_tables
+        | repository_tables
+        | log_evidence_tables
+        | malware_evidence_tables
+        | identity_tables
+        | durable_job_tables
+        | phase6_tables
+    ):
+        return revision, "Phase 6 governance tables do not match the supported schema"
     supported_revisions = {
         "0004_dashboard_alerts",
         "0005_identity_organizations",
@@ -401,6 +424,7 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         "0013_governed_chain_trace",
         "0014_multi_user_identity_sessions",
         "0015_durable_job_leases_actions",
+        "0016_phase6_governance",
     }
     if revision not in supported_revisions and extras:
         return revision, "dashboard alert tables do not match migration revision"
@@ -428,6 +452,7 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         "0013_governed_chain_trace",
         "0014_multi_user_identity_sessions",
         "0015_durable_job_leases_actions",
+        "0016_phase6_governance",
     }:
         for table_name in organization_tables:
             if not connection.execute(
@@ -445,6 +470,7 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         "0013_governed_chain_trace",
         "0014_multi_user_identity_sessions",
         "0015_durable_job_leases_actions",
+        "0016_phase6_governance",
     }:
         for table_name in engagement_security_tables:
             if not connection.execute(
@@ -480,6 +506,7 @@ def _schema_revision(connection: sqlite3.Connection) -> tuple[str | None, str | 
         "0013_governed_chain_trace",
         "0014_multi_user_identity_sessions",
         "0015_durable_job_leases_actions",
+        "0016_phase6_governance",
     }:
         required = {
             "id",
@@ -1464,6 +1491,7 @@ def verify_backup(backup_directory: Path | str) -> VerificationResult:
         "0013_governed_chain_trace",
         "0014_multi_user_identity_sessions",
         "0015_durable_job_leases_actions",
+        "0016_phase6_governance",
     }:
         declared = manifest.get("repository_snapshots")
         actual = _repository_snapshot_rows(database)
@@ -1501,6 +1529,7 @@ def verify_backup(backup_directory: Path | str) -> VerificationResult:
         "0013_governed_chain_trace",
         "0014_multi_user_identity_sessions",
         "0015_durable_job_leases_actions",
+        "0016_phase6_governance",
     }:
         declared = manifest.get("log_evidence_snapshots")
         actual = _log_evidence_rows(database)

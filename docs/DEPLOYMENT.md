@@ -143,3 +143,99 @@ environment when available. Do not put credentials in repository files or CI art
 The eventual workflow should promote the exact image digest built and checked by CI, serialize
 deployments, run a post-deployment health check, and provide a tested rollback path. No deployment
 or automated rollback is currently implemented.
+
+### Oracle/Vercel hybrid templates
+
+The repository includes local-only deployment templates in `deploy/oracle/`:
+`chinescan.service`, `nginx-chinescan.conf.template`, and
+`chinescan.env.template`. They are starting points, not proof of a deployed
+service. Populate them only on the target host after an HTTPS hostname,
+Supabase connection string, and secret-management procedure have been
+approved. The systemd unit keeps the API on loopback and applies a modest
+memory/task ceiling for the micro VM.
+
+For a Vercel same-origin/reverse-proxy arrangement, configure the actual API
+hostname in the Vercel project and set `VITE_API_BASE_URL` to the deployed
+same-origin `/api` path or use the platform's reviewed rewrite. The backend's
+`CHINESCAN_TRUSTED_PROXY=true` mode is opt-in and accepts writes only when the
+request arrives through loopback, uses `X-Forwarded-Proto: https`, carries an
+allowlisted `CHINESCAN_CORS_ALLOWED_ORIGINS` origin, and has a matching
+forwarded host. Direct public host access and unlisted origins remain denied.
+Do not enable this mode until the reverse proxy strips client-supplied
+forwarded headers and the API port is firewalled from the internet.
+
+## Phase 6 hardened execution prerequisites
+
+The default Phase 6 scanner profile fails closed unless every mandatory control is initialized and
+verified for the actual worker process. The application now initializes the native Linux
+namespace/seccomp bootstrap when requested and uses Landlock for explicit filesystem roots where
+the kernel provides it. Delegated cgroups, a production filesystem boundary, and approved egress
+firewall policy remain deployment gates; `scripts/phase6_preflight.py` reports unavailable
+controls rather than treating host capability detection as enforcement. Do not enable hardened
+scanner execution until the deployment acceptance checks have passed.
+
+### Linux
+
+The hardened Linux deployment requires a supported 5.x-or-newer kernel with user, mount, PID, and
+network namespaces; cgroups v2 with delegated CPU, memory, and process controllers; a seccomp
+profile or libseccomp policy; an unprivileged worker identity; Landlock ABI 1 or later with
+explicit read/write roots or an equivalent private filesystem boundary; a private writable work
+directory; and an egress firewall or container network policy that blocks loopback, link-local, metadata,
+private, reserved, unauthorized IPv4/IPv6, DNS, proxy, and direct-IP bypasses. The worker must be
+allowed to create only the namespaces and cgroup subtree explicitly delegated by the service
+manager. Verify effective `/proc`, namespace links, cgroup membership/limits, seccomp status,
+capability sets, Landlock/filesystem visibility, and prohibited connection attempts from inside the
+worker. The application network namespace is deny-all; approved destinations require a
+deployment-backed policy applied to the worker and descendants.
+
+### Approved-destination helper contract
+
+The application default is `DENY_ALL`. An approved-destination execution must provide an immutable
+policy containing the scope revision ID, authorization ID, expiry, hostname, every validated IPv4
+or IPv6 address, protocol, and port. Set `CHINESCAN_NETWORK_POLICY_HELPER` only to a deployment-
+owned executable that accepts:
+
+```text
+<helper> --policy-json <canonical-policy-json> -- <worker-command>
+```
+
+The helper must create the execution network namespace, configure only the approved routes,
+install an execution-scoped deny-by-default firewall for TCP and UDP, restrict DNS to the
+approved resolver path, verify IPv4 and IPv6 rules, then `exec` the worker command. It must reject
+expired or scope-mismatched policy, redirects/proxy routes outside the policy, and direct-IP
+connections not present in the policy. It must apply the same boundary to descendants and remove
+execution-scoped resources on exit. The application refuses approved-destination startup when the
+helper is absent; it never falls back to host networking. No helper or host firewall is installed
+by the current Windows/WSL2 development environment.
+
+### Windows
+
+The supported Windows profile currently verifies Job Object process-tree, CPU, memory, and active
+process limits. Restricted tokens, AppContainer, filesystem ACL boundaries, and outbound network
+policy are not claimed by this release. A deployment may only advertise those controls after native
+Windows tests prove the effective token, ACL-denied access, child-process inheritance, and blocked
+network attempts. Use a dedicated low-privilege service identity and host firewall rules that
+restrict the worker to the approved destinations; application URL validation is not a substitute.
+
+### Acceptance procedure
+
+Run `py -3.12 scripts/phase6_preflight.py` before every hardened deployment, then execute the
+platform-native integration and prohibited-operation tests from the CI environment on the target
+kernel/Windows host. Record the exact worker identity, namespace/cgroup/seccomp state, firewall
+policy, and cleanup result. A missing privilege, delegated controller, firewall rule, native test,
+or verification artifact leaves hardened execution unavailable and the Phase 6 release blocked.
+
+### Hybrid backend database configuration
+
+SQLite remains the default and is required for the existing local backup and recovery commands.
+An Oracle backend may opt into the reviewed PostgreSQL adapter with:
+
+```text
+CHINESCAN_DATABASE_URL=postgresql+psycopg://<backend-user>:<password>@<supabase-host>:5432/postgres
+```
+
+The URL is backend-only and must be supplied through the Oracle secret environment. The backend
+refuses to start unless the reviewed `supabase/migrations/20261127000000_chinescan_baseline.sql`
+has already been applied and `alembic_version` is `0016_phase6_governance`. Do not put the URL in
+Vercel variables or frontend bundles. The PostgreSQL adapter does not yet replace SQLite backup,
+restore, or evidence-object lifecycle operations.

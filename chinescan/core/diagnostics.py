@@ -225,29 +225,63 @@ def build_report(
     )
     db_ok = False
     try:
-        if not db_path.is_file():
-            raise OSError("database is not present")
-        if not os.access(db_path, os.W_OK) or not os.access(db_path.parent, os.W_OK):
-            raise PermissionError("database write access is unavailable")
-        with sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True) as connection:
-            connection.execute("BEGIN")
-            connection.execute("SELECT 1").fetchone()
-            connection.execute("CREATE TEMP TABLE chinescan_diagnostics_probe (value INTEGER)")
-            connection.execute("INSERT INTO chinescan_diagnostics_probe VALUES (1)")
-            connection.execute("DELETE FROM chinescan_diagnostics_probe")
-            counts: dict[str, Any] = {}
-            for kind in ("project", "project_log_location", "code_job", "log_job", "malware_job"):
-                grouped: dict[str, int] = {}
-                rows = connection.execute(
-                    "SELECT payload FROM records WHERE record_type = ?", (kind,)
-                ).fetchall()
-                for row in rows:
-                    record = json.loads(str(row[0]))
-                    stored_state = str(record.get("status", "unknown"))
-                    state = stored_state if stored_state in _SAFE_RECORD_STATES else "other"
-                    grouped[state] = grouped.get(state, 0) + 1
-                counts[kind] = grouped
-            connection.rollback()
+        counts: dict[str, dict[str, int]]
+        if loaded.database_url:
+            from sqlalchemy import create_engine, text
+
+            from chinescan.core.storage.postgres import postgresql_driver_url
+
+            engine = create_engine(postgresql_driver_url(loaded.database_url), pool_pre_ping=True)
+            try:
+                with engine.connect() as connection:
+                    connection.execute(text("SELECT 1"))
+                    revision = connection.execute(
+                        text("SELECT version_num FROM alembic_version LIMIT 1")
+                    ).scalar_one_or_none()
+                if revision != "0016_phase6_governance":
+                    raise OSError("PostgreSQL schema revision is not the reviewed baseline")
+            finally:
+                engine.dispose()
+            counts = {
+                kind: {}
+                for kind in (
+                    "project",
+                    "project_log_location",
+                    "code_job",
+                    "log_job",
+                    "malware_job",
+                )
+            }
+        else:
+            if not db_path.is_file():
+                raise OSError("database is not present")
+            if not os.access(db_path, os.W_OK) or not os.access(db_path.parent, os.W_OK):
+                raise PermissionError("database write access is unavailable")
+            with sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True) as connection:
+                connection.execute("BEGIN")
+                connection.execute("SELECT 1").fetchone()
+                connection.execute("CREATE TEMP TABLE chinescan_diagnostics_probe (value INTEGER)")
+                connection.execute("INSERT INTO chinescan_diagnostics_probe VALUES (1)")
+                connection.execute("DELETE FROM chinescan_diagnostics_probe")
+                counts = {}
+                for kind in (
+                    "project",
+                    "project_log_location",
+                    "code_job",
+                    "log_job",
+                    "malware_job",
+                ):
+                    grouped: dict[str, int] = {}
+                    rows = connection.execute(
+                        "SELECT payload FROM records WHERE record_type = ?", (kind,)
+                    ).fetchall()
+                    for row in rows:
+                        record = json.loads(str(row[0]))
+                        stored_state = str(record.get("status", "unknown"))
+                        state = stored_state if stored_state in _SAFE_RECORD_STATES else "other"
+                        grouped[state] = grouped.get(state, 0) + 1
+                    counts[kind] = grouped
+                connection.rollback()
         db_ok = True
     except Exception:
         counts = {

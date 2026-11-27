@@ -58,9 +58,11 @@ users = Table(
     Column("email_normalized", String(254), nullable=False, unique=True, index=True),
     Column("display_name", String(120), nullable=False),
     Column("status", String(20), nullable=False),
+    Column("platform_role", String(20), nullable=False, default="user", server_default="user"),
     Column("auth_epoch", String(64), nullable=False),
     Column("created_at", String(40), nullable=False),
     Column("updated_at", String(40), nullable=False),
+    CheckConstraint("platform_role IN ('user', 'superuser')", name="ck_users_platform_role"),
 )
 organizations = Table(
     "organizations",
@@ -1078,6 +1080,9 @@ user_credentials = Table(
     Column("totp_verify_failed_at", JSON, nullable=False, server_default="[]"),
     Column("migrated_operator_epoch", String(64)),
     Column("password_updated_at", String(40)),
+    Column("bootstrap_token_hash", String(64)),
+    Column("bootstrap_expires_at", Float),
+    Column("bootstrap_used_at", Float),
     Column("created_at", String(40), nullable=False),
     Column("updated_at", String(40), nullable=False),
     ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
@@ -1197,6 +1202,146 @@ worker_leases = Table(
     CheckConstraint("status IN ('active','stopping','stopped')", name="ck_worker_lease_status"),
 )
 
+# Phase 6 execution assurance and evidence lifecycle governance.  These tables
+# deliberately keep the organization key on every row so a missing join can
+# never turn into a cross-tenant read or delete.
+execution_capability_snapshots = Table(
+    "execution_capability_snapshots",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("organization_id", String(36), nullable=False),
+    Column("job_id", String(36)),
+    Column("profile", String(24), nullable=False),
+    Column("platform", String(32), nullable=False),
+    Column("policy_version", String(40), nullable=False),
+    Column("required_controls", JSON, nullable=False),
+    Column("available_controls", JSON, nullable=False),
+    Column("enforced_controls", JSON, nullable=False),
+    Column("unavailable_controls", JSON, nullable=False),
+    Column("initialization_status", String(24), nullable=False),
+    Column("failure_reason", String(160)),
+    Column("execution_identity", String(128)),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
+    ForeignKeyConstraint(["job_id"], ["execution_jobs.id"], ondelete="SET NULL"),
+    CheckConstraint(
+        "initialization_status IN ('initialized','failed','unavailable')",
+        name="ck_capability_snapshot_status",
+    ),
+)
+Index(
+    "ix_capability_snapshots_org_job",
+    execution_capability_snapshots.c.organization_id,
+    execution_capability_snapshots.c.job_id,
+)
+
+retention_policies = Table(
+    "retention_policies",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("organization_id", String(36), nullable=False),
+    Column("engagement_id", String(36)),
+    Column("evidence_category", String(80)),
+    Column("retention_days", Integer, nullable=False),
+    Column("version", Integer, nullable=False, server_default="1"),
+    Column("status", String(16), nullable=False),
+    Column("effective_at", String(40), nullable=False),
+    Column("expires_at", String(40)),
+    Column("created_by", String(36), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
+    ForeignKeyConstraint(["created_by"], ["users.id"], ondelete="RESTRICT"),
+    ForeignKeyConstraint(
+        ["engagement_id", "organization_id"],
+        ["engagements.id", "engagements.organization_id"],
+        ondelete="CASCADE",
+    ),
+    CheckConstraint("retention_days >= 1", name="ck_retention_policy_days"),
+    CheckConstraint(
+        "status IN ('active','expired','superseded')", name="ck_retention_policy_status"
+    ),
+)
+Index(
+    "ix_retention_policy_lookup", retention_policies.c.organization_id, retention_policies.c.status
+)
+
+legal_holds = Table(
+    "legal_holds",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("organization_id", String(36), nullable=False),
+    Column("engagement_id", String(36)),
+    Column("reason", String(500), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("created_by", String(36), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    Column("released_by", String(36)),
+    Column("released_at", String(40)),
+    ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
+    ForeignKeyConstraint(["created_by"], ["users.id"], ondelete="RESTRICT"),
+    ForeignKeyConstraint(["released_by"], ["users.id"], ondelete="RESTRICT"),
+    CheckConstraint("status IN ('active','released')", name="ck_legal_hold_status"),
+)
+Index("ix_legal_holds_org_status", legal_holds.c.organization_id, legal_holds.c.status)
+
+legal_hold_records = Table(
+    "legal_hold_records",
+    metadata,
+    Column("hold_id", String(36), primary_key=True),
+    Column("record_type", String(80), primary_key=True),
+    Column("record_id", String(255), primary_key=True),
+    Column("organization_id", String(36), nullable=False),
+    ForeignKeyConstraint(["hold_id"], ["legal_holds.id"], ondelete="CASCADE"),
+    ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
+)
+Index(
+    "ix_legal_hold_records_record",
+    legal_hold_records.c.organization_id,
+    legal_hold_records.c.record_type,
+    legal_hold_records.c.record_id,
+)
+
+retention_jobs = Table(
+    "retention_jobs",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("organization_id", String(36), nullable=False),
+    Column("record_type", String(80), nullable=False),
+    Column("record_id", String(255), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("decision_reason", String(120), nullable=False),
+    Column("attempt_count", Integer, nullable=False, server_default="0"),
+    Column("last_error", String(500)),
+    Column("created_at", String(40), nullable=False),
+    Column("completed_at", String(40)),
+    ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
+    CheckConstraint(
+        "status IN ('eligible','blocked','deleted','failed')", name="ck_retention_job_status"
+    ),
+    UniqueConstraint("organization_id", "record_type", "record_id", name="uq_retention_job_record"),
+)
+Index("ix_retention_jobs_due", retention_jobs.c.organization_id, retention_jobs.c.status)
+
+retention_audit_events = Table(
+    "retention_audit_events",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("organization_id", String(36), nullable=False),
+    Column("actor_user_id", String(36), nullable=False),
+    Column("action", String(80), nullable=False),
+    Column("resource_type", String(80), nullable=False),
+    Column("resource_id", String(255)),
+    Column("details", JSON, nullable=False),
+    Column("occurred_at", String(40), nullable=False),
+    ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
+    ForeignKeyConstraint(["actor_user_id"], ["users.id"], ondelete="RESTRICT"),
+)
+Index(
+    "ix_retention_audit_org_time",
+    retention_audit_events.c.organization_id,
+    retention_audit_events.c.occurred_at,
+)
+
 for _operation in ("UPDATE", "DELETE"):
     event.listen(
         execution_result_provenance,
@@ -1229,6 +1374,10 @@ class SQLiteRepository(Repository):
         self._migrate(url)
         self.engine: Engine = create_engine(url)
         self._enable_foreign_keys(self.engine)
+        self._initialize_context()
+
+    def _initialize_context(self) -> None:
+        """Initialize request-scoped tenant and execution authorization state."""
         self._organization_context: ContextVar[str | None] = ContextVar(
             f"chinescan_org_{id(self)}", default=None
         )
@@ -1542,7 +1691,10 @@ class SQLiteRepository(Repository):
             tables = set(inspector.get_table_names()) - {"alembic_version"}
             with engine.connect() as connection:
                 revision = MigrationContext.configure(connection).get_current_revision()
-            if revision is None and tables:
+            if engine.dialect.name != "sqlite":
+                config = self._alembic_config(url)
+                command.upgrade(config, "head")
+            elif revision is None and tables:
                 if tables != {"records"} or not self._is_initial_records_schema(inspector):
                     raise StorageError(
                         "SQLite schema is not a recognized ChiNeScan revision; "
@@ -1558,7 +1710,7 @@ class SQLiteRepository(Repository):
             raise
         except Exception as exc:
             raise StorageError(
-                "SQLite migration failed; database contents were not recreated."
+                "Database migration failed; database contents were not recreated."
             ) from exc
         finally:
             engine.dispose()

@@ -1,4 +1,4 @@
-import type { ApprovedFolder, CaseData, CaseSummary, CodeJob, CodeProject, Finding, FolderPreview, ModuleCapability, Overview, Page, Scan, LogSource, LogEvidence, LogSourceRegistryStatus, LogJob, LogAlert, LogEvent, LogTimeline, MalwareAnalysis, MalwareCapability, MalwareJob, MalwareSample, ProjectDetail, ProjectSummary, ProjectLogLocation, ProjectLogSuggestion, ProjectLogJob, ProjectMalwareJob, MalwareHostHint, FsDirectory, FsPage, GitHubImportCapabilities, GitHubImportPreview, GitHubImportJob, ChainInfo, ChainJob, ChainGraph, DashboardAlert, ModuleScore, Organization, OrganizationInvitation, OrganizationMember, TotpStatus, Client, Engagement, EngagementAssignment, EngagementAsset, ScopeRevisionRecord, AuthorizationRecord, ApprovalRecord, ExecutionJob, ExecutionProvenance, RepositoryAsset, RegisteredLocalProject, RepositoryQuota, RepositoryRetention, ExecutionQuota, GlobalExecutionDiagnostics, MalwareEvidence } from './types';
+import type { ApprovedFolder, CaseData, CaseSummary, CodeJob, CodeProject, Finding, FolderPreview, ModuleCapability, Overview, Page, Scan, LogSource, LogEvidence, LogSourceRegistryStatus, LogJob, LogAlert, LogEvent, LogTimeline, MalwareAnalysis, MalwareCapability, MalwareJob, MalwareSample, ProjectDetail, ProjectSummary, ProjectLogLocation, ProjectLogSuggestion, ProjectLogJob, ProjectMalwareJob, MalwareHostHint, FsDirectory, FsPage, GitHubImportCapabilities, GitHubImportPreview, GitHubImportJob, ChainInfo, ChainJob, ChainGraph, DashboardAlert, ModuleScore, Organization, OrganizationInvitation, OrganizationMember, TotpStatus, Client, Engagement, EngagementAssignment, EngagementAsset, ScopeRevisionRecord, AuthorizationRecord, ApprovalRecord, ExecutionJob, ExecutionProvenance, RepositoryAsset, RegisteredLocalProject, RepositoryQuota, RepositoryRetention, ExecutionQuota, GlobalExecutionDiagnostics, MalwareEvidence, Phase6Status, Phase6Policy, Phase6Hold, Phase6AuditEvent } from './types';
 
 export function safeLocalUrl(value: unknown): string | null {
   if (typeof value !== 'string' || value.trim() !== value || !value.startsWith('/') || value.startsWith('//') || value.includes('\\')) return null;
@@ -15,11 +15,29 @@ export function safeLocalUrl(value: unknown): string | null {
 let csrfToken = '';
 export function setCsrfToken(token: string) { csrfToken = token; }
 
+const configuredApiBase = (import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\/$/, '');
+
+export function apiUrl(path: string): string {
+  if (!configuredApiBase) return path;
+  if (!path.startsWith('/')) throw new Error('API paths must be absolute paths.');
+  return `${configuredApiBase}${path}`;
+}
+
+export function apiRequest(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(apiUrl(path), {
+    ...init,
+    credentials: configuredApiBase ? 'include' : 'same-origin',
+  });
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body) headers.set('Content-Type', 'application/json');
   if (init?.method && init.method !== 'GET' && csrfToken) headers.set('X-CSRF-Token', csrfToken);
-  const response = await fetch(path, { ...init, headers, credentials: 'same-origin' });
+  const response = await apiRequest(path, {
+    ...init,
+    headers,
+  });
   if (response.status === 401) {
     if (path === '/api/auth/login') {
       const detail = await response.json().catch(() => ({}));
@@ -41,6 +59,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export class UnauthorizedError extends Error {}
 export class ApiError extends Error { constructor(message: string, readonly code?: string) { super(message); } }
 export const api = {
+  phase6Status: (org: string) => request<Phase6Status>(`/api/organizations/${encodeURIComponent(org)}/phase6/status`),
+  phase6Policies: (org: string) => request<{ items: Phase6Policy[] }>(`/api/organizations/${encodeURIComponent(org)}/phase6/retention/policies`),
+  createPhase6Policy: (org: string, body: { retention_days: number; engagement_id?: string; evidence_category?: string }) => request<{ id: string }>(`/api/organizations/${encodeURIComponent(org)}/phase6/retention/policies`, { method: 'POST', body: JSON.stringify(body) }),
+  phase6Holds: (org: string) => request<{ items: Phase6Hold[] }>(`/api/organizations/${encodeURIComponent(org)}/phase6/legal-holds`),
+  createPhase6Hold: (org: string, body: { reason: string; records: Array<[string, string]>; engagement_id?: string }) => request<{ id: string }>(`/api/organizations/${encodeURIComponent(org)}/phase6/legal-holds`, { method: 'POST', body: JSON.stringify(body) }),
+  releasePhase6Hold: (org: string, id: string) => request<{ id: string; status: string }>(`/api/organizations/${encodeURIComponent(org)}/phase6/legal-holds/${encodeURIComponent(id)}/release`, { method: 'POST', body: '{}' }),
+  phase6RetentionJobs: (org: string) => request<{ items: Array<Record<string, unknown>> }>(`/api/organizations/${encodeURIComponent(org)}/phase6/retention/jobs`),
+  phase6Audit: (org: string) => request<{ items: Phase6AuditEvent[] }>(`/api/organizations/${encodeURIComponent(org)}/phase6/retention/audit`),
   repositoryProjects: (org: string, engagement: string) => request<{ items: RegisteredLocalProject[] }>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/repositories/projects`),
   repositoryAssets: (org: string, engagement: string) => request<{ items: RepositoryAsset[] }>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/repositories`),
   repositoryQuota: (org: string, engagement: string) => request<RepositoryQuota>(`/api/organizations/${encodeURIComponent(org)}/engagements/${encodeURIComponent(engagement)}/repositories/quota`),

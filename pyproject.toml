@@ -21,6 +21,7 @@ dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn[standard]>=0.34,<1",
   "argon2-cffi>=23.1,<26",
+  "defusedxml>=0.7.1,<1",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +32,9 @@ dev = [
   "mypy>=1.15,<2",
   "pip-audit>=2.8,<3",
   "types-PyYAML>=6.0.12,<7",
+]
+postgres = [
+  "psycopg[binary]>=3.2,<4",
 ]
 
 [project.scripts]

@@ -97,6 +97,58 @@ jobs:
       - run: uv run --locked --extra dev pip-audit --skip-editable
       - run: uv run --locked --extra dev bandit --severity-level medium -r chinescan
 
+  postgres-acceptance:
+    name: PostgreSQL migration and bootstrap acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=12
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        with:
+          enable-cache: true
+          prune-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --python 3.12 --extra dev --extra postgres
+      - name: Create reviewed compatibility roles
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE anon NOLOGIN;
+          CREATE ROLE authenticated NOLOGIN;
+          CREATE ROLE service_role NOLOGIN;
+          CREATE ROLE chinescan_backend LOGIN PASSWORD 'ci-only-backend-password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          SQL
+      - name: Apply baseline migration
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/migrations/20261127000000_chinescan_baseline.sql
+      - name: Verify baseline as backend role
+        env:
+          PGPASSWORD: ci-only-backend-password
+        run: psql -h 127.0.0.1 -U chinescan_backend -d postgres -v ON_ERROR_STOP=1 -f supabase/manual/verify_chinescan.sql
+      - name: Test bootstrap and PostgreSQL adapter
+        env:
+          CHINESCAN_TEST_POSTGRES_BOOTSTRAP: "1"
+          CHINESCAN_TEST_POSTGRES_BOOTSTRAP_URL: postgresql+psycopg://chinescan_backend:ci-only-backend-password@127.0.0.1:5432/postgres
+          CHINESCAN_TEST_POSTGRES_URL: postgresql+psycopg://chinescan_backend:ci-only-backend-password@127.0.0.1:5432/postgres
+        run: uv run --locked --extra dev --extra postgres pytest tests/integration/test_first_superuser.py tests/integration/test_postgres_backend.py -q
+
   dashboard:
     name: dashboard build and browser acceptance
     runs-on: ubuntu-latest

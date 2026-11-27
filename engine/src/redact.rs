@@ -145,7 +145,10 @@ fn redact_assignments(value: &str) -> String {
     let mut search_from = 0;
 
     while search_from < value.len() {
-        let Some(relative_delimiter) = value[search_from..].find([':', '=']) else {
+        let Some(relative_delimiter) = value.as_bytes()[search_from..]
+            .iter()
+            .position(|byte| *byte == b':' || *byte == b'=')
+        else {
             break;
         };
         let delimiter = search_from + relative_delimiter;

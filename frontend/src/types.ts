@@ -183,3 +183,15 @@ export type ExecutionProvenance = {
   execution_context: Record<string, unknown>;
   results: Array<{ record_type: 'scan' | 'finding' | 'evidence' | 'artifact' | 'report'; record_id: string; linked_at: string }>;
 };
+export type Phase6Status = {
+  platform: string;
+  profile: string;
+  policy_version: string;
+  hardened_enforced: boolean;
+  required_controls: string[];
+  enforced_controls: string[];
+  unavailable_controls: string[];
+};
+export type Phase6Policy = { id: string; retention_days: number; status: string; effective_at: string; evidence_category: string | null; engagement_id: string | null };
+export type Phase6Hold = { id: string; reason: string; status: 'active' | 'released'; created_at: string; released_at: string | null; record_count: number };
+export type Phase6AuditEvent = { id: string; action: string; resource_type: string; resource_id: string | null; details: Record<string, unknown>; occurred_at: string };

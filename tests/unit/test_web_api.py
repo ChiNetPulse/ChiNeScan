@@ -1802,6 +1802,32 @@ def test_origin_host_and_login_throttle(tmp_path):
     assert rejected_host.status_code == 400
 
 
+def test_trusted_proxy_accepts_only_allowlisted_forwarded_https_origin(tmp_path):
+    settings = Settings(
+        trusted_proxy=True,
+        cors_allowed_origins=["https://dashboard.example.test"],
+    )
+    _app, client, _credential, _database = _fixture(tmp_path, settings=settings)
+    forwarded = {
+        "Origin": "https://dashboard.example.test",
+        "X-Forwarded-Proto": "https",
+        "X-Forwarded-Host": "dashboard.example.test",
+    }
+    accepted = client.post(
+        "/api/auth/login",
+        json={"email": "analyst@example.test", "password": "safe local password"},
+        headers=forwarded,
+    )
+    assert accepted.status_code == 200
+
+    rejected = client.post(
+        "/api/auth/login",
+        json={"email": "analyst@example.test", "password": "safe local password"},
+        headers={**forwarded, "Origin": "https://evil.example.test"},
+    )
+    assert rejected.status_code == 403
+
+
 def test_cli_bootstrap_creates_external_operator_file_without_default_password(
     tmp_path, monkeypatch
 ):

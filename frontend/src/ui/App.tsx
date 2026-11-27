@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, safeLocalUrl, setCsrfToken, UnauthorizedError } from '../api';
+import { api, apiRequest, apiUrl, setCsrfToken, UnauthorizedError } from '../api';
 import type {
   Engagement,
   EngagementAssignment,
@@ -28,6 +28,7 @@ import {
   type EngagementSectionTab,
 } from './UnifiedEngagementWorkspace';
 import { UnifiedJobsMonitor } from './UnifiedJobsMonitor';
+import { Phase6GovernanceWorkspace } from './Phase6GovernanceWorkspace';
 import { useGlassTracking } from './glass';
 
 type Section =
@@ -35,6 +36,7 @@ type Section =
   | 'organizations'
   | 'engagement'
   | 'executions'
+  | 'governance'
   | 'scans'
   | 'findings'
   | 'cases'
@@ -229,7 +231,7 @@ export function App() {
           ? <RecoveryInstructions onBack={() => navigateAuth('login', setAuthPage)} onReset={() => navigateAuth('reset', setAuthPage)}/>
           : <Login error={error} busy={busy} signupAvailable={signupAvailable} onSubmit={submitLogin} onRetry={() => window.location.reload()} onSignup={() => { navigateAuth('signup', setAuthPage); setError(''); }} onForgot={() => { navigateAuth('forgot', setAuthPage); setError(''); }} />;
 
-  const title = section === 'chain' ? 'On-chain tracing' : section === 'overview' ? 'Overview' : section === 'scans' ? 'Scan history' : section === 'findings' ? 'Findings' : section === 'cases' ? 'Cases' : section === 'jobs' ? 'Code assessments' : section === 'projects' ? 'Projects' : section === 'malware' ? 'Malware triage' : section === 'status' ? 'System status' : section === 'modules' ? 'Modules' : section === 'organizations' ? 'Organizations & engagements' : section === 'engagement' ? 'Engagement workspace' : section === 'executions' ? 'Governed execution jobs' : section === 'account' ? 'Account security' : 'Log analysis';
+  const title = section === 'chain' ? 'On-chain tracing' : section === 'overview' ? 'Overview' : section === 'scans' ? 'Scan history' : section === 'findings' ? 'Findings' : section === 'cases' ? 'Cases' : section === 'jobs' ? 'Code assessments' : section === 'projects' ? 'Projects' : section === 'malware' ? 'Malware triage' : section === 'status' ? 'System status' : section === 'modules' ? 'Modules' : section === 'organizations' ? 'Organizations & engagements' : section === 'engagement' ? 'Engagement workspace' : section === 'executions' ? 'Governed execution jobs' : section === 'governance' ? 'Phase 6 governance' : section === 'account' ? 'Account security' : 'Log analysis';
   const nav = (id: Section, label: string, glyph: string) => <button data-glass className={`nav-link ${section === id ? 'active' : ''}`} key={id} onClick={() => { setSection(id); setPage(0); setFilter(''); setDetail(null); setMobileNavOpen(false); }}><span className="nav-glyph" aria-hidden="true">{glyph}</span>{label}{id === 'scans' && overview ? <span className="nav-count">{overview.scan_count}</span> : null}</button>;
   const activeOrg = contextOrgs.find((o) => o.id === selectedOrgId) ?? null;
   const activeEng = contextEngagements.find((e) => e.id === selectedEngId) ?? null;
@@ -241,7 +243,7 @@ export function App() {
     <aside id="main-sidebar" className={`sidebar ${mobileNavOpen ? 'mobile-open' : ''}`}>
       <div className="brand"><div className="brand-mark" aria-hidden="true"><span>C</span><i /></div><div><strong>ChiNeScan</strong><small>LOCAL SECURITY WORKSTATION</small></div></div>
       <div className="nav-caption">WORKSPACE</div>
-      <nav aria-label="Main navigation">{nav('overview', 'Overview', '⌂')}{nav('organizations', 'Organizations', '▤')}{nav('engagement', 'Engagements', '◈')}{nav('executions', 'Governed Jobs', '⚡')}{nav('projects', 'Projects', '▧')}{nav('jobs', 'Code assessments', '⌘')}{nav('logs', 'Log analysis', '≋')}{nav('malware', 'Malware triage', '◇')}{nav('chain', 'On-chain tracing', '◎')}{nav('scans', 'Scans', '⌕')}{nav('findings', 'Findings', '◈')}{nav('cases', 'Cases', '▤')}{nav('account', 'Account security', '◉')}{nav('modules', 'Modules', '▦')}{nav('status', 'System status', '◉')}</nav>
+      <nav aria-label="Main navigation">{nav('overview', 'Overview', '⌂')}{nav('organizations', 'Organizations', '▤')}{nav('engagement', 'Engagements', '◈')}{nav('executions', 'Governed Jobs', '⚡')}{nav('governance', 'Phase 6 governance', '◉')}{nav('projects', 'Projects', '▧')}{nav('jobs', 'Code assessments', '⌘')}{nav('logs', 'Log analysis', '≋')}{nav('malware', 'Malware triage', '◇')}{nav('chain', 'On-chain tracing', '◎')}{nav('scans', 'Scans', '⌕')}{nav('findings', 'Findings', '◈')}{nav('cases', 'Cases', '▤')}{nav('account', 'Account security', '◉')}{nav('modules', 'Modules', '▦')}{nav('status', 'System status', '◉')}</nav>
       <div className="sidebar-bottom"><div className="local-indicator"><span />LOCAL INSTANCE</div><p>Assessment data stays on this device.</p><div className="profile"><div className="avatar">{email.slice(0, 1).toUpperCase()}</div><div className="profile-name"><strong>{email}</strong><small>{activeOrg ? `${activeOrg.role} · ${activeOrg.name}` : 'Local operator'}</small></div><button className="icon-button" onClick={logout} disabled={busy} aria-label="Sign out" title="Sign out">↗</button></div></div>
     </aside>
     <main className="main-content">
@@ -337,6 +339,7 @@ export function App() {
             onSelectScan={(id) => { setSection('scans'); setDetail({ kind: 'scan', id }); }}
           />
         )}
+        {section === 'governance' && selectedOrgId && <Phase6GovernanceWorkspace organizationId={selectedOrgId} onUnauthorized={signOut} />}
         {section === 'account' && (
           <AccountSecurityWorkspace
             onUnauthorized={signOut}
@@ -510,9 +513,8 @@ function ScanDetail({ scan, onCreateCase, onOpenFinding, onRefreshScan, onUnauth
     setExportError('');
     setExporting(format);
     try {
-      const url = safeLocalUrl(`/api/scans/${encodeURIComponent(scan.scan_id)}/report/${format}`);
-      if (!url) throw new Error('The report URL is not a local ChiNeScan route.');
-      const response = await fetch(url, { credentials: 'same-origin' });
+      const path = `/api/scans/${encodeURIComponent(scan.scan_id)}/report/${format}`;
+      const response = await apiRequest(path);
       if (response.status === 401) { onUnauthorized(); return; }
       if (!response.ok) {
         let detail = `Export failed with HTTP ${response.status}.`;
@@ -549,8 +551,7 @@ function ScanDetail({ scan, onCreateCase, onOpenFinding, onRefreshScan, onUnauth
     } finally { setExporting(''); }
   }
   function downloadJsonl() {
-    const url = safeLocalUrl(`/api/scans/${encodeURIComponent(scan.scan_id)}/findings.jsonl`);
-    if (!url) { setExportError('The retrieval URL is not a local ChiNeScan route.'); return; }
+    const url = apiUrl(`/api/scans/${encodeURIComponent(scan.scan_id)}/findings.jsonl`);
     const anchor = document.createElement('a');
     anchor.href = url;
     anchor.download = `scan-${scan.scan_id}-findings.jsonl`;

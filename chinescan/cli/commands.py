@@ -574,6 +574,8 @@ def web_restore_operator(
 @web_app.command("serve")
 def web_serve(
     port: int = typer.Option(8765, min=1024, max=65535),
+    host: str = typer.Option("127.0.0.1", "--host"),
+    secure_cookie: bool = typer.Option(False, "--secure-cookie"),
     credential_file: Path | None = typer.Option(None, "--credential-file"),  # noqa: B008
     projects_file: Path | None = typer.Option(None, "--projects-file"),  # noqa: B008
     log_sources_file: Path | None = typer.Option(None, "--log-sources-file"),  # noqa: B008
@@ -601,16 +603,19 @@ def web_serve(
         projects_path=project_config,
         log_sources_path=log_config,
         malware_registry_path=malware_config,
-        settings=settings,
+        settings=settings.model_copy(
+            update={"secure_cookie": secure_cookie or settings.secure_cookie}
+        ),
+        secure_cookie=secure_cookie or settings.secure_cookie,
     )
     if (FRONTEND_DIST / "index.html").is_file():
-        typer.echo(f"ChiNeScan dashboard available at http://127.0.0.1:{port}")
+        typer.echo(f"ChiNeScan dashboard available at http://{host}:{port}")
     else:
-        typer.echo(f"ChiNeScan API listening at http://127.0.0.1:{port}")
+        typer.echo(f"ChiNeScan API listening at http://{host}:{port}")
         typer.echo("Run `npm run dev` in frontend for the development dashboard.")
     run(
         application,
-        host="127.0.0.1",
+        host=host,
         port=port,
         workers=1,
         access_log=False,

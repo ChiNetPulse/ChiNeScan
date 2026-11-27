@@ -277,10 +277,10 @@ def test_crash_recovery_separates_safe_retry_from_uncertain_external_actions(
         # Backup and restore preserves reconciliation_required and action history
         bundle = tmp_path / "backup-bundle"
         assert backup_database(repo.path, bundle).verification.verified
-        assert verify_backup(bundle).migration_revision == "0015_durable_job_leases_actions"
+        assert verify_backup(bundle).migration_revision == "0016_phase6_governance"
         restored_db = tmp_path / "restored.sqlite3"
         restored = restore_backup(bundle, restored_db)
-        assert restored.resulting_revision == "0015_durable_job_leases_actions"
+        assert restored.resulting_revision == "0016_phase6_governance"
         restored_repo = SQLiteRepository(restored_db)
         try:
             with restored_repo.engine.connect() as rconn:
