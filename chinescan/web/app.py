@@ -28,6 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from starlette.middleware.base import RequestResponseEndpoint
+from starlette.middleware.cors import CORSMiddleware
 from starlette.routing import Match
 
 from chinescan.chain_trace.export import export_graph
@@ -63,6 +64,11 @@ from chinescan.core.external_reports import (
     MAX_EXTERNAL_REPORT_BYTES,
     ExternalReportError,
     parse_scanity_export,
+)
+from chinescan.core.first_superuser import (
+    FIRST_SUPERUSER_EMAIL,
+    FirstSuperuserBootstrapError,
+    complete_first_superuser_setup,
 )
 from chinescan.core.fs_policy import (
     FilesystemBrowserService,
@@ -112,6 +118,7 @@ from chinescan.core.repository_assessment import (
     RepositoryAssessmentService,
     RepositorySnapshotStore,
 )
+from chinescan.core.storage.postgres import PostgresRepository
 from chinescan.core.storage.sqlite import SQLiteRepository
 from chinescan.integrations.artex.client import ArtexHealthClient, ArtexIntegrationError
 from chinescan.integrations.artex.models import ArtexAuditEvent, ArtexSyncState
@@ -152,6 +159,7 @@ from chinescan.web.malware_jobs import MalwareDashboardManager
 from chinescan.web.nmap_api import create_nmap_router
 from chinescan.web.nuclei_api import create_nuclei_router
 from chinescan.web.organization_api import create_organization_router
+from chinescan.web.phase6_api import create_phase6_router
 from chinescan.web.rate_limit import InProcessRateLimiter
 from chinescan.web.repository_execution_api import create_repository_router
 
@@ -222,6 +230,18 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(ForgotPasswordRequest):
     token: str = Field(min_length=32, max_length=256)
     password: str = Field(min_length=12, max_length=1024)
+
+
+class FirstSuperuserSetupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: str = Field(min_length=3, max_length=254)
+    token: str = Field(min_length=32, max_length=256)
+    password: str = Field(min_length=12, max_length=1024)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return normalize_email(value)
 
 
 class AuthSessionResponse(BaseModel):
@@ -633,7 +653,14 @@ def create_app(
     """Create an app; the optional project-limit override is only for isolated tests."""
     configure_logging()
     active_settings = settings or Settings(_env_file=None)
-    repository = SQLiteRepository(database_path)
+    repository: SQLiteRepository
+    if active_settings.database_url:
+        repository = PostgresRepository(
+            active_settings.database_url,
+            storage_root=Path(database_path).expanduser().resolve(strict=False).parent,
+        )
+    else:
+        repository = SQLiteRepository(database_path)
     organization_service = OrganizationService(repository)
     identity_service = IdentityService(organization_service)
     engagement_security_service = EngagementSecurityService(repository, organization_service)
@@ -811,6 +838,10 @@ def create_app(
                     max_open_files=resource_limits.scanner_open_files,
                     max_file_bytes=resource_limits.scanner_temp_bytes,
                     network_isolation_required=True,
+                    linux_namespaces_required=True,
+                    linux_cgroup_required=True,
+                    linux_seccomp_required=True,
+                    filesystem_isolation_required=True,
                 ),
                 require_hardened_isolation=active_settings.integrations.nmap.require_hardened_isolation,
             ),
@@ -835,6 +866,10 @@ def create_app(
                     max_open_files=resource_limits.scanner_open_files,
                     max_file_bytes=resource_limits.scanner_temp_bytes,
                     network_isolation_required=True,
+                    linux_namespaces_required=True,
+                    linux_cgroup_required=True,
+                    linux_seccomp_required=True,
+                    filesystem_isolation_required=True,
                 ),
                 require_hardened_isolation=active_settings.integrations.nuclei.require_hardened_isolation,
             ),
@@ -986,6 +1021,18 @@ def create_app(
     application = FastAPI(
         title="ChiNeScan local dashboard", docs_url=None, redoc_url=None, lifespan=lifespan
     )
+    allowed_origins = tuple(active_settings.cors_allowed_origins)
+    if allowed_origins:
+        # Credentials are required for the existing HttpOnly session cookie.
+        # Never combine credentialed CORS with a wildcard origin.
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(allowed_origins),
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Content-Type", "X-CSRF-Token"],
+            expose_headers=[],
+        )
     application.state.repository = repository
     application.state.project_registry = registry
     application.state.chain_job_manager = chain_jobs
@@ -1072,22 +1119,44 @@ def create_app(
             result = Response("Local loopback access required.", status_code=400)
             result.headers["X-Request-ID"] = request_id
             return result
+
+        def origin_matches_request(origin: str) -> bool:
+            parsed_origin = urlsplit(origin)
+            if (
+                parsed_origin.path not in {"", "/"}
+                or parsed_origin.query
+                or parsed_origin.fragment
+                or parsed_origin.username
+                or parsed_origin.password
+            ):
+                return False
+            if (
+                parsed_origin.scheme == request.url.scheme
+                and parsed_origin.netloc.lower() == host.lower()
+            ):
+                return True
+            if not active_settings.trusted_proxy:
+                return False
+            forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
+            forwarded_host = request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
+            if forwarded_proto != "https" or not forwarded_host:
+                return False
+            forwarded_origin = f"{forwarded_proto}://{forwarded_host.lower()}"
+            configured_origins = {
+                configured.rstrip("/").lower()
+                for configured in active_settings.cors_allowed_origins
+            }
+            return (
+                origin.rstrip("/").lower() in configured_origins
+                and origin.rstrip("/").lower() == forwarded_origin
+            )
+
         if request.url.path.startswith("/api/fs/"):
             origin = request.headers.get("origin")
-            if origin:
-                parsed_origin = urlsplit(origin)
-                if (
-                    parsed_origin.scheme != request.url.scheme
-                    or parsed_origin.netloc.lower() != host.lower()
-                    or parsed_origin.path not in {"", "/"}
-                    or parsed_origin.query
-                    or parsed_origin.fragment
-                    or parsed_origin.username
-                    or parsed_origin.password
-                ):
-                    result = Response("Same-origin request required.", status_code=403)
-                    result.headers["X-Request-ID"] = request_id
-                    return result
+            if origin and not origin_matches_request(origin):
+                result = Response("Same-origin request required.", status_code=403)
+                result.headers["X-Request-ID"] = request_id
+                return result
         content_length = request.headers.get("content-length")
         if content_length:
             try:
@@ -1116,17 +1185,7 @@ def create_app(
                 result = Response("Same-origin request required.", status_code=403)
                 result.headers["X-Request-ID"] = request_id
                 return result
-            parsed = urlsplit(origin)
-            origin_authority = parsed.netloc
-            if (
-                parsed.scheme != request.url.scheme
-                or origin_authority.lower() != host.lower()
-                or parsed.path not in {"", "/"}
-                or parsed.query
-                or parsed.fragment
-                or parsed.username
-                or parsed.password
-            ):
+            if not origin_matches_request(origin):
                 result = Response("Same-origin request required.", status_code=403)
                 result.headers["X-Request-ID"] = request_id
                 return result
@@ -1538,6 +1597,8 @@ def create_app(
         require_csrf,
     )
     application.router.routes.extend(repository_router.routes)
+    phase6_router = create_phase6_router(repository, current_session, require_csrf)
+    application.router.routes.extend(phase6_router.routes)
     if malware_evidence_store is not None and sample_registry is not None:
         malware_evidence_router = create_malware_evidence_router(
             malware_evidence_store,
@@ -2021,6 +2082,58 @@ def create_app(
             )
         sessions.revoke_all()
         return {"status": "Password reset. Sign in with your new password."}
+
+    @application.post(
+        "/api/auth/first-superuser/setup",
+        response_model=AuthSessionResponse,
+        status_code=201,
+    )
+    def first_superuser_setup(
+        payload: FirstSuperuserSetupRequest, request: Request, response: Response
+    ) -> dict[str, str]:
+        """Consume the one-time deployment bootstrap token exactly once."""
+        if not isinstance(repository, PostgresRepository):
+            raise HTTPException(
+                status_code=503,
+                detail="First administrator setup requires the reviewed PostgreSQL deployment.",
+            )
+        keys = lockout_keys(request, payload.email)
+        retry = auth_lockout.retry_after(keys)
+        if retry:
+            raise lockout_response(retry)
+        if payload.email != FIRST_SUPERUSER_EMAIL:
+            perform_dummy_verification(payload.password)
+            auth_lockout.fail(keys)
+            raise HTTPException(status_code=400, detail="Account setup cannot be completed.")
+        try:
+            user_id = complete_first_superuser_setup(
+                repository.engine, payload.token, payload.password
+            )
+            user = organization_service.get_active_user(user_id)
+            if not user or user.get("platform_role") != "superuser":
+                raise FirstSuperuserBootstrapError("Administrator identity is unavailable.")
+        except FirstSuperuserBootstrapError:
+            auth_lockout.fail(keys)
+            raise HTTPException(
+                status_code=400, detail="Account setup cannot be completed."
+            ) from None
+        auth_lockout.succeed(keys)
+        sessions.revoke_user_sessions(user_id)
+        opaque, session = sessions.create(
+            user["email_normalized"], user["auth_epoch"], user_id=user_id
+        )
+        response.set_cookie(
+            COOKIE_NAME,
+            opaque,
+            httponly=True,
+            secure=secure_cookie,
+            samesite="strict",
+            max_age=absolute_ttl_seconds,
+            path="/",
+        )
+        application.state.local_operator_user_id = user_id
+        organization_service.operator_user_id = user_id
+        return {"email": session.email, "csrf_token": session.csrf_token}
 
     @application.post("/api/auth/logout", response_model=dict[str, str])
     def logout(

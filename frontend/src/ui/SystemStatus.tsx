@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { UnauthorizedError } from '../api';
+import { apiRequest, UnauthorizedError } from '../api';
 
 type Check = {
   id: string;
@@ -129,7 +129,7 @@ function decodeArtexStatus(value: unknown): ArtexStatus {
 }
 
 async function get<T>(url: string, signal: AbortSignal, decode: (value: unknown) => T): Promise<{ value: T; status: number }> {
-  const response = await fetch(url, { credentials: 'same-origin', signal });
+  const response = await apiRequest(url, { signal });
   if (response.status === 401) throw new UnauthorizedError();
   if (response.status === 429) throw new RateLimitedError();
   if (response.status >= 500 && !(url === '/api/ready' && response.status === 503)) {

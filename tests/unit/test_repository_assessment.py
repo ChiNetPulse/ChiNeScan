@@ -538,7 +538,7 @@ def test_backup_includes_snapshot_and_database_only_bundle_is_incomplete(tmp_pat
     destination_dir = tmp_path / "restored-state"
     destination_dir.mkdir()
     restored = restore_backup(bundle, destination_dir / "restored.sqlite3")
-    assert restored.resulting_revision == "0015_durable_job_leases_actions"
+    assert restored.resulting_revision == "0016_phase6_governance"
     assert (
         destination_dir / "repository-snapshots" / org / bound["snapshot_sha256"] / "app.py"
     ).is_file()

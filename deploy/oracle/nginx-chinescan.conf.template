@@ -1,0 +1,28 @@
+# Replace the example hostnames and certificate paths before enabling.
+# Keep the upstream bound to loopback; do not expose port 8765 directly.
+map $http_origin $chinescan_forwarded_host {
+    default "";
+    https://dashboard.example.com dashboard.example.com;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name api.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/api.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;
+
+    client_max_body_size 16m;
+
+    location / {
+        proxy_pass http://127.0.0.1:8765;
+        proxy_http_version 1.1;
+        proxy_set_header Host 127.0.0.1:8765;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $chinescan_forwarded_host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_read_timeout 90s;
+        proxy_send_timeout 90s;
+    }
+}

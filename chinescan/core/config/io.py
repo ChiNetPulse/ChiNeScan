@@ -1,5 +1,6 @@
 """TOML configuration utilities."""
 
+import json
 import os
 import re
 import tomllib
@@ -62,7 +63,14 @@ def load_settings(
         for key in Settings.model_fields:
             env_name = f"CHINESCAN_{key.upper()}"
             if env_name in os.environ:
-                data[key] = os.environ[env_name]
+                value = os.environ[env_name]
+                if key == "cors_allowed_origins":
+                    value = json.loads(value)
+                    if not isinstance(value, list) or not all(
+                        isinstance(origin, str) for origin in value
+                    ):
+                        raise ValueError("cors_allowed_origins must be a JSON list of strings")
+                data[key] = value
         data.update(cli_overrides or {})
         return Settings(_env_file=None, **data)
     except (OSError, ValueError, TypeError, RecursionError) as exc:

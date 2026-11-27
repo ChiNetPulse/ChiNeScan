@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal, cast
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from chinescan.core.accounts import (
@@ -139,7 +140,12 @@ class IntegrationsSettings(BaseModel):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CHINESCAN_", extra="ignore")
     database_path: Path = Field(default_factory=default_data_path)
+    database_url: str | None = None
     reports_dir: Path = Field(default_factory=default_reports_path)
+    # Remote browser access is opt-in. Keep the local default empty so the
+    # existing same-origin/loopback deployment remains the safe baseline.
+    cors_allowed_origins: list[str] = Field(default_factory=list)
+    secure_cookie: bool = False
     malware_managed_directory: Path | None = None
     malware_evidence_org_quota_bytes: int = Field(
         default=1_073_741_824, ge=67_108_864, le=20_000_000_000
@@ -219,6 +225,36 @@ class Settings(BaseSettings):
     data_source: Literal["real", "simulation"] = "real"
     integrations: IntegrationsSettings = Field(default_factory=IntegrationsSettings)
     _allowed_root_validation: list[object] = PrivateAttr(default_factory=list)
+
+    @field_validator("cors_allowed_origins")
+    @classmethod
+    def validate_cors_origins(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for origin in values:
+            parsed = urlsplit(origin)
+            if (
+                origin == "*"
+                or parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("cors_allowed_origins must contain exact HTTP(S) origins")
+            normalized.append(origin.rstrip("/"))
+        return list(dict.fromkeys(normalized))
+
+    @field_validator("database_url")
+    @classmethod
+    def validate_database_url(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        if "\n" in value or "\r" in value:
+            raise ValueError("database_url must not contain line breaks")
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"postgresql", "postgresql+psycopg"} or not parsed.netloc:
+            raise ValueError("database_url must be a PostgreSQL connection URL")
+        return value
 
     @model_validator(mode="after")
     def validate_repository_snapshot_limits(self) -> Settings:

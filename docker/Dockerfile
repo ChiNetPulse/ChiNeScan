@@ -3,8 +3,13 @@ FROM python:3.12.16-slim-trixie@sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635
 WORKDIR /build
 COPY pyproject.toml uv.lock README.md ./
 COPY chinescan ./chinescan
+ARG CHINESCAN_POSTGRES=0
 RUN python -m pip install --no-cache-dir uv==0.13.5 build==1.6.1 \
-    && uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /build/requirements.txt \
+    && if [ "$CHINESCAN_POSTGRES" = "1" ]; then \
+         uv export --frozen --no-dev --extra postgres --no-emit-project --format requirements-txt --output-file /build/requirements.txt; \
+       else \
+         uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /build/requirements.txt; \
+       fi \
     && python -m build --wheel
 COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations

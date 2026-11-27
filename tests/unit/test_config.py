@@ -81,3 +81,31 @@ def test_reports_dir_environment_and_cli_overrides(config_path: Path, monkeypatc
     assert env_settings.reports_dir == Path("from-environment")
     assert cli_settings.reports_dir == Path("from-cli")
     assert file_settings.reports_dir == Path("from-file")
+
+
+def test_remote_browser_settings_are_explicit_and_environment_driven(
+    config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("CHINESCAN_CORS_ALLOWED_ORIGINS", '["https://dashboard.example.test"]')
+    monkeypatch.setenv("CHINESCAN_SECURE_COOKIE", "true")
+
+    settings = load_settings(config_path)
+
+    assert settings.cors_allowed_origins == ["https://dashboard.example.test"]
+    assert settings.secure_cookie is True
+
+
+def test_postgres_url_is_opt_in_and_validated(
+    config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv(
+        "CHINESCAN_DATABASE_URL",
+        "postgresql+psycopg://app:placeholder@example.test:5432/chinescan",
+    )
+
+    settings = load_settings(config_path)
+
+    assert settings.database_url is not None
+    assert "placeholder" in settings.database_url

@@ -2344,7 +2344,7 @@ def test_governed_result_records_keep_immutable_job_provenance(
     backup = tmp_path / f"backup-{result_status}"
     backup_result = backup_database(repository.path, backup)
     assert backup_result.verification.verified
-    assert verify_backup(backup).migration_revision == "0015_durable_job_leases_actions"
+    assert verify_backup(backup).migration_revision == "0016_phase6_governance"
     restored_path = tmp_path / f"restored-{result_status}.sqlite3"
     restore_backup(backup, restored_path, active_database_path=repository.path)
     restored = type(repository)(restored_path)

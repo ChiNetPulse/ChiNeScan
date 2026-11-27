@@ -56,6 +56,7 @@ def test_mutating_routes_reject_missing_csrf_and_wrong_typed_record_ids(tmp_path
             "/api/auth/signup",
             "/api/auth/forgot-password",
             "/api/auth/reset-password",
+            "/api/auth/first-superuser/setup",
             "/api/auth/invitations/accept",
         }
         for route in routes:

@@ -7,6 +7,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -17,6 +18,13 @@ from chinescan.core.execution_isolation import (
     IsolationProfile,
     make_preexec_fn,
     require_isolation,
+)
+from chinescan.core.linux_isolation import (
+    LinuxCgroup,
+    LinuxIsolationRequest,
+    LinuxIsolationUnavailable,
+    namespace_command,
+    native_linux_available,
 )
 from chinescan.core.resource_governance import ExecutionDeadlineExceeded
 
@@ -68,7 +76,7 @@ def _kernel32() -> Any | None:
 class _ProcessTreeJob:
     """Best-effort Windows Job Object wrapper for complete child process-tree termination."""
 
-    def __init__(self) -> None:
+    def __init__(self, profile: IsolationProfile | None = None) -> None:
         self._handle: int | None = None
         kernel32 = _kernel32()
         if kernel32 is None:
@@ -81,7 +89,14 @@ class _ProcessTreeJob:
             # Set JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (0x2000) so closing or terminating
             # the Job Object kills the entire child process tree.
             class _IoCounters(ctypes.Structure):
-                _fields_ = [("ReadOperationCount", ctypes.c_uint64)] * 6
+                _fields_ = [
+                    ("ReadOperationCount", ctypes.c_uint64),
+                    ("WriteOperationCount", ctypes.c_uint64),
+                    ("OtherOperationCount", ctypes.c_uint64),
+                    ("ReadTransferCount", ctypes.c_uint64),
+                    ("WriteTransferCount", ctypes.c_uint64),
+                    ("OtherTransferCount", ctypes.c_uint64),
+                ]
 
             class _BasicLimitInfo(ctypes.Structure):
                 _fields_ = [
@@ -108,6 +123,12 @@ class _ProcessTreeJob:
 
             info = _ExtendedLimitInfo()
             info.BasicLimitInformation.LimitFlags = 0x00002000
+            if profile is not None:
+                info.BasicLimitInformation.LimitFlags |= 0x00000002 | 0x00000008
+                info.BasicLimitInformation.PerJobUserTimeLimit = profile.cpu_seconds * 10_000_000
+                info.BasicLimitInformation.ActiveProcessLimit = profile.max_processes
+                info.ProcessMemoryLimit = profile.memory_bytes
+                info.BasicLimitInformation.LimitFlags |= 0x00000200
             ok = kernel32.SetInformationJobObject(
                 handle, 9, ctypes.byref(info), ctypes.sizeof(info)
             )
@@ -251,11 +272,62 @@ def run_supervised_subprocess(
             require_isolation(isolation_profile)
         preexec_fn = make_preexec_fn(isolation_profile) if os.name == "posix" else None
 
+    linux_request = LinuxIsolationRequest(
+        namespaces=bool(isolation_profile and isolation_profile.linux_namespaces_required),
+        cgroup=bool(isolation_profile and isolation_profile.linux_cgroup_required),
+        seccomp=bool(isolation_profile and isolation_profile.linux_seccomp_required),
+        filesystem=bool(isolation_profile and isolation_profile.filesystem_isolation_required),
+        network=bool(isolation_profile and isolation_profile.network_isolation_required),
+        filesystem_read_roots=(
+            isolation_profile.filesystem_read_roots if isolation_profile else ()
+        ),
+        filesystem_write_roots=(
+            isolation_profile.filesystem_write_roots if isolation_profile else ()
+        ),
+        network_mode=isolation_profile.network_policy.mode if isolation_profile else "deny_all",
+        network_policy_json=(
+            isolation_profile.network_policy.json() if isolation_profile else None
+        ),
+    )
+    linux_cgroup: LinuxCgroup | None = None
+    if os.name == "posix" and sys.platform.startswith("linux"):
+        requested_native = any(
+            (
+                linux_request.namespaces,
+                linux_request.cgroup,
+                linux_request.seccomp,
+                linux_request.filesystem,
+                linux_request.network,
+            )
+        )
+        if requested_native:
+            available, reason = native_linux_available(linux_request)
+            if not available:
+                raise SubprocessExecutionError(
+                    "SUBPROCESS_ISOLATION_UNAVAILABLE",
+                    f"Linux worker isolation is unavailable: {reason or 'unknown'}.",
+                )
+            if linux_request.cgroup:
+                try:
+                    linux_cgroup = LinuxCgroup(
+                        cpu_seconds=isolation_profile.cpu_seconds if isolation_profile else 1,
+                        memory_bytes=isolation_profile.memory_bytes if isolation_profile else 1,
+                        max_processes=isolation_profile.max_processes if isolation_profile else 1,
+                    )
+                except LinuxIsolationUnavailable as exc:
+                    raise SubprocessExecutionError(
+                        "SUBPROCESS_ISOLATION_UNAVAILABLE", str(exc)
+                    ) from exc
+
     executable = resolve_executable(command[0])
     args = [executable, *command[1:]]
     env = {key: value for key, value in os.environ.items() if key.upper() in env_allowlist}
     if extra_env:
         env.update(extra_env)
+    if linux_request.filesystem:
+        env["CHINESCAN_LANDLOCK"] = "1"
+        env["CHINESCAN_FS_READ_ROOTS"] = os.pathsep.join(linux_request.filesystem_read_roots)
+        env["CHINESCAN_FS_WRITE_ROOTS"] = os.pathsep.join(linux_request.filesystem_write_roots)
 
     started = time.monotonic()
     effective_deadline = started + float(timeout_seconds)
@@ -272,7 +344,7 @@ def run_supervised_subprocess(
         )
 
     process: subprocess.Popen[bytes] | None = None
-    job = _ProcessTreeJob()
+    job = _ProcessTreeJob(isolation_profile)
     stdout = bytearray()
     stderr = bytearray()
     exceeded = threading.Event()
@@ -325,8 +397,17 @@ def run_supervised_subprocess(
             if preexec_fn is not None:
                 popen_kwargs["preexec_fn"] = preexec_fn
 
+        launch_args = namespace_command(args, linux_request)
+        if linux_cgroup is not None:
+            env["CHINESCAN_CGROUP_PATH"] = str(linux_cgroup.path)
+        if linux_request.seccomp:
+            env["CHINESCAN_SECCOMP"] = "1"
+        if linux_request.namespaces or linux_request.filesystem:
+            env["CHINESCAN_DROP_CAPABILITIES"] = "1"
         launcher = popen_factory or subprocess.Popen
-        process = launcher(args, **popen_kwargs)  # type: ignore[call-overload]
+        process = launcher(launch_args, **popen_kwargs)  # type: ignore[call-overload]
+        if linux_cgroup is not None:
+            linux_cgroup.join(process.pid)
         job.assign(process)
 
         if input_bytes is not None and process.stdin is not None:
@@ -400,3 +481,5 @@ def run_supervised_subprocess(
             if thread.is_alive():
                 thread.join(timeout=1.0)
         job.close()
+        if linux_cgroup is not None:
+            linux_cgroup.cleanup()

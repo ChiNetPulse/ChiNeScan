@@ -1,0 +1,15 @@
+# Local Supabase CLI configuration only. This does not link or modify the
+# remote project. The application schema is not yet ported from SQLite.
+project_id = "chinescan"
+
+[api]
+enabled = true
+
+[db]
+port = 54322
+
+[studio]
+enabled = false
+
+[storage]
+enabled = true

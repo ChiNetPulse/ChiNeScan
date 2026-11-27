@@ -48,6 +48,24 @@ class OrganizationService:
         self.repository = repository
         self.engine = repository.engine
         self.operator_user_id: str | None = None
+        self.load_platform_superuser()
+
+    def load_platform_superuser(self) -> str | None:
+        """Load the persisted platform superuser when the schema supports it."""
+        try:
+            with self.engine.connect() as connection:
+                user_id = connection.execute(
+                    select(users.c.id).where(
+                        users.c.platform_role == "superuser",
+                        users.c.status == "active",
+                    )
+                ).scalar_one_or_none()
+        except Exception:
+            # Older local SQLite databases predate the platform_role column;
+            # their existing credential-file bootstrap remains authoritative.
+            return self.operator_user_id
+        self.operator_user_id = str(user_id) if user_id is not None else None
+        return self.operator_user_id
 
     def user_id_for_email(self, email: str) -> str | None:
         normalized = normalize_email(email)
@@ -130,6 +148,7 @@ class OrganizationService:
                     "email_normalized": normalized,
                     "display_name": normalized,
                     "auth_epoch": auth_epoch,
+                    "platform_role": "superuser",
                 }
                 if any(user[key] != value for key, value in changes.items()):
                     connection.execute(
@@ -144,6 +163,7 @@ class OrganizationService:
                     "email_normalized": normalized,
                     "display_name": normalized,
                     "status": "active",
+                    "platform_role": "superuser",
                     "auth_epoch": auth_epoch,
                     "created_at": timestamp,
                     "updated_at": timestamp,

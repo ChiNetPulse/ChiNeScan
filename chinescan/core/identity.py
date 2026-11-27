@@ -59,6 +59,7 @@ def _user_dict(row: Any) -> dict[str, Any]:
         "email_normalized": row.email_normalized,
         "display_name": row.display_name,
         "status": row.status,
+        "platform_role": getattr(row, "platform_role", "user"),
         "auth_epoch": row.auth_epoch,
         "created_at": row.created_at,
         "updated_at": row.updated_at,

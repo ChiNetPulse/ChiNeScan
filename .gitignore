@@ -39,6 +39,7 @@ frontend/.playwright-browsers/
 engine/target/
 frontend/dist/
 .worktrees/
+supabase/.temp/
 latest scan.json
 target/
 *.whl

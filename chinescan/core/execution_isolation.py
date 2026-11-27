@@ -14,6 +14,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
+from chinescan.core.network_policy import NetworkPolicy
+
 
 class IsolationUnavailableError(RuntimeError):
     """Raised when a requested execution profile cannot be enforced safely."""
@@ -34,6 +36,13 @@ class IsolationProfile:
     max_open_files: int = 256
     max_file_bytes: int = 33_554_432
     network_isolation_required: bool = False
+    linux_namespaces_required: bool = False
+    linux_cgroup_required: bool = False
+    linux_seccomp_required: bool = False
+    filesystem_isolation_required: bool = False
+    filesystem_read_roots: tuple[str, ...] = ()
+    filesystem_write_roots: tuple[str, ...] = ()
+    network_policy: NetworkPolicy = NetworkPolicy()
 
 
 @dataclass(frozen=True)
@@ -119,10 +128,35 @@ def require_isolation(profile: IsolationProfile) -> IsolationCapabilities:
             "ISOLATION_UNAVAILABLE", "The hardened scanner worker is unavailable on this host."
         )
     if profile.network_isolation_required and not capabilities.network_isolation:
-        raise IsolationUnavailableError(
-            "NETWORK_ISOLATION_UNAVAILABLE",
-            "The configured scanner profile requires deployment-managed network isolation.",
+        from chinescan.core.network_policy import approved_policy_available
+
+        available, reason = approved_policy_available(profile.network_policy)
+        if not available:
+            raise IsolationUnavailableError(
+                "NETWORK_ISOLATION_UNAVAILABLE",
+                f"The configured scanner network policy is unavailable: {reason or 'unknown'}.",
+            )
+    if sys.platform.startswith("linux") and os.name == "posix":
+        from chinescan.core.linux_isolation import LinuxIsolationRequest, native_linux_available
+
+        available, reason = native_linux_available(
+            LinuxIsolationRequest(
+                namespaces=profile.linux_namespaces_required,
+                cgroup=profile.linux_cgroup_required,
+                seccomp=profile.linux_seccomp_required,
+                filesystem=profile.filesystem_isolation_required,
+                network=profile.network_isolation_required,
+                filesystem_read_roots=profile.filesystem_read_roots,
+                filesystem_write_roots=profile.filesystem_write_roots,
+                network_mode=profile.network_policy.mode,
+                network_policy_json=profile.network_policy.json(),
+            )
         )
+        if not available:
+            raise IsolationUnavailableError(
+                "ISOLATION_UNAVAILABLE",
+                f"The requested Linux worker controls are unavailable: {reason or 'unknown'}.",
+            )
     return capabilities
 
 
