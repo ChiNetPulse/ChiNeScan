@@ -70,6 +70,18 @@ jobs:
     name: quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=12
     steps:
       # actions/checkout v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -83,7 +95,22 @@ jobs:
           prune-cache: true
           cache-dependency-glob: uv.lock
 
-      - run: uv sync --locked --python 3.12 --extra dev
+      - run: uv sync --locked --python 3.12 --extra dev --extra postgres
+      - name: Create PostgreSQL acceptance roles
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE anon NOLOGIN;
+          CREATE ROLE authenticated NOLOGIN;
+          CREATE ROLE service_role NOLOGIN;
+          CREATE ROLE chinescan_backend LOGIN PASSWORD 'ci-only-backend-password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          SQL
+      - name: Apply PostgreSQL baseline for the full suite
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/migrations/20261127000000_chinescan_baseline.sql
       - uses: dtolnay/rust-toolchain@1.99.1
       - name: Install native engine for full Python suite
         run: uv pip install --python .venv/bin/python ./engine
@@ -93,7 +120,12 @@ jobs:
       - run: uv run --locked --extra dev ruff format --check .
       - run: uv run --locked --extra dev mypy --strict chinescan
       # Optional real_scanner tests require external binaries and local data and remain opt-in.
-      - run: uv run --locked --extra dev pytest --basetemp "${RUNNER_TEMP}/c6" --cov=chinescan --cov-report=term-missing --cov-fail-under=80
+      - name: Run full Python suite with PostgreSQL integration enabled
+        env:
+          CHINESCAN_TEST_POSTGRES_BOOTSTRAP: "1"
+          CHINESCAN_TEST_POSTGRES_BOOTSTRAP_URL: postgresql+psycopg://chinescan_backend:ci-only-backend-password@127.0.0.1:5432/postgres
+          CHINESCAN_TEST_POSTGRES_URL: postgresql+psycopg://chinescan_backend:ci-only-backend-password@127.0.0.1:5432/postgres
+        run: uv run --locked --extra dev --extra postgres pytest --basetemp "${RUNNER_TEMP}/c6" --cov=chinescan --cov-report=term-missing --cov-fail-under=80
       - run: uv run --locked --extra dev pip-audit --skip-editable
       - run: uv run --locked --extra dev bandit --severity-level medium -r chinescan
 
