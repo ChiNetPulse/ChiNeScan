@@ -24,12 +24,7 @@ The following are locally implemented and tested:
 - Optional PostgreSQL adapter selected by `CHINESCAN_DATABASE_URL`; SQLite
   remains the default local backend.
 - Supabase-compatible 40-table baseline SQL, role-aware RLS, integrity
-  triggers, transaction-local organization identity binding, and verification
-  SQL.
-- One-time first application-superuser bootstrap for the fixed email
-  `cipherchi@proton.me`. This is an application identity, not a PostgreSQL
-  administrator, Supabase project owner, `service_role`, or
-  `chinescan_backend`.
+  triggers, and tenant-scoped isolation.
 - POSIX resource limits, supervised process-tree cleanup, Linux namespace and
   seccomp bootstrap paths, Landlock/cgroup fail-closed checks, Windows Job
   Object controls, and immutable approved-destination policy models.
@@ -40,9 +35,7 @@ Important deployment limitations remain. Native Linux delegated cgroups,
 Landlock availability, approved-destination firewall enforcement, native
 Windows restricted-token/AppContainer/ACL/network acceptance, and full
 deployment crash/restart acceptance require suitable hosts and privileges.
-The live Supabase project, Oracle VM, and Vercel production deployment have
-not been changed by this repository work. Scanner profiles requiring an
-unverified control remain unavailable.
+Scanner profiles requiring an unverified control remain unavailable.
 
 ## Architecture
 
@@ -52,59 +45,38 @@ unverified control remain unavailable.
   recovery, evidence metadata, reports, and scanner adapters.
 - **SQLite:** default local database and local content-addressed evidence
   storage.
-- **PostgreSQL/Supabase:** opt-in durable database backend. The adapter
-  requires the reviewed `chinescan_backend` login and does not silently fall
-  back to SQLite.
+- **PostgreSQL/Supabase:** opt-in durable database backend configured via
+  `CHINESCAN_DATABASE_URL`. The adapter requires a dedicated least-privilege
+  database role and does not silently fall back to SQLite.
 - **Rust:** optional PyO3 redaction engine; Python redaction remains the safe
   fallback.
 - **Workers:** governed subprocess execution with authorization, immutable
   scope binding, capability snapshots, supervision, resource controls, and
   fail-closed isolation profiles.
 
-### Intended hybrid deployment
+### Hybrid deployment overview
 
-- **Vercel:** the existing `frontend/` Vite + React static application.
-- **Oracle AMD VM:** FastAPI backend, ordinary backend services, local
+- **Frontend (`frontend/`):** Vite + React static application.
+- **Backend host:** FastAPI backend, ordinary backend services, local
   content-addressed evidence, and guarded worker orchestration.
-- **Supabase:** PostgreSQL only after the reviewed baseline is manually
-  applied and verified.
+- **Database:** PostgreSQL / Supabase after schema migrations are applied and
+  verified.
 
-Vercel must receive only public frontend configuration such as
-`VITE_API_BASE_URL`. Database URLs, backend passwords, service-role keys,
-bootstrap tokens, and evidence credentials are backend-only.
+Frontend deployments must receive only public configuration such as
+`VITE_API_BASE_URL`. Database URLs, backend passwords, API keys, and evidence
+credentials are backend-only.
 
 ## Authentication and authorization
 
-ChineScan uses custom application authentication and session management; it
-does not replace that model with Supabase Auth. Passwords use the existing
-Argon2 policy. Sessions, CSRF protection, login throttling, organization
-memberships, roles, approvals, audit events, and immutable scope revisions are
-enforced by the backend.
+ChineScan uses application-managed authentication and session handling with
+Argon2 password hashing, CSRF protection, login throttling, organization
+memberships, role-based access control, approvals, audit events, and immutable
+scope revisions enforced by the backend.
 
-The PostgreSQL backend connects as the dedicated `chinescan_backend` role,
-which must be `LOGIN`, `NOSUPERUSER`, `NOBYPASSRLS`, `NOCREATEROLE`, and not an
-owner of application tables. The Supabase `service_role` is separate and is
-not used as the direct backend login. Browser roles have no application-table
-privileges. PostgreSQL transactions bind `chinescan.user_id`,
-`chinescan.organization_id`, and write access before RLS-protected work.
-
-The first administrator sequence is deliberately separate from database-role
-provisioning:
-
-1. Provision or verify `chinescan_backend` with a password supplied
-   out-of-band.
-2. Apply `supabase/migrations/20261127000000_chinescan_baseline.sql` manually
-   in the intended new Supabase project.
-3. Run `supabase/manual/verify_chinescan.sql` as `chinescan_backend`.
-4. Run `py -3.12 scripts/bootstrap_first_superuser.py` from the protected
-   backend host.
-5. Deliver the short-lived setup token out-of-band.
-6. POST it with a newly chosen password to
-   `/api/auth/first-superuser/setup`.
-7. Verify sign-in, platform role, owner membership, and audit history.
-
-The live Supabase migration and first-superuser provisioning have not been
-performed by this repository work.
+When PostgreSQL is enabled, the backend connects with a dedicated
+least-privilege database role (without elevated database or RLS-bypass privileges) and
+enforces row-level tenant isolation per transaction. Browser roles have no
+direct application-table privileges.
 
 ## Local setup
 
@@ -145,8 +117,8 @@ startup helper only when local dashboard use is intended.
 Configuration is loaded from the existing settings and environment model.
 Common deployment variables include:
 
-- `CHINESCAN_DATABASE_URL`: protected PostgreSQL URL; only the reviewed
-  `chinescan_backend` role is accepted for PostgreSQL deployments.
+- `CHINESCAN_DATABASE_URL`: protected PostgreSQL connection URL using a
+  dedicated least-privilege backend role.
 - `CHINESCAN_CORS_ALLOWED_ORIGINS`: explicit frontend origins.
 - `CHINESCAN_TRUSTED_PROXY_MODE`: opt-in trusted-proxy handling; it requires
   loopback ingress, HTTPS forwarded protocol, and an allowlisted origin.
@@ -157,25 +129,17 @@ Common deployment variables include:
 
 Use `.env.example`, `frontend/.env.example`, and
 `deploy/oracle/chinescan.env.template` as templates. They contain placeholders
-only. Never commit `.env`, database passwords, service-role keys, setup tokens,
-or production credentials.
+only. Never commit `.env`, database passwords, API keys, or production
+credentials.
 
 ## Database and evidence
 
 Alembic’s expected application revision is `0016_phase6_governance`. The
-Supabase SQL package is a reviewed baseline for a new project and records that
-revision. It creates 40 application tables, RLS policies, 15 integrity
-triggers, helper functions, explicit backend grants, and browser privilege
-denial.
+PostgreSQL baseline creates 40 application tables, RLS policies, 15 integrity
+triggers, helper functions, and browser privilege denial.
 
-The complete SQL and manual verification procedure are in
-`supabase/manual/README.md` and
-`docs/reports/phase-6-supabase-migration-review.md`. The baseline is not a
-reversible production migration: for a non-empty project, stop and use a
-reviewed backup or forward migration rather than ad hoc drops.
-
-Evidence currently remains in Oracle/local content-addressed storage. This
-release does not claim that Supabase Storage, backups, exports, caches, or
+Evidence currently remains in local content-addressed storage. This release
+does not claim that remote object storage, backups, exports, caches, or
 external evidence copies are governed by the local deletion lifecycle.
 
 ## Testing and CI
@@ -215,21 +179,19 @@ The GitHub Actions workflow runs Python quality, coverage, pip-audit,
 Bandit, Rust formatting/Clippy/tests/audit, frontend tests/typecheck/build,
 browser acceptance, Windows worker checks, secret scanning, container checks,
 and a disposable PostgreSQL migration/RLS/bootstrap job. Production secrets
-are not required for pull requests. Production deployment and Supabase
-administrator bootstrap are manual and separately controlled.
+are not required for pull requests. Production deployment is separately
+controlled.
 
 ## Deployment preparation
 
-Oracle templates are under `deploy/oracle/`: systemd, Nginx, environment,
-bootstrap, and health-check files. They are operator templates, not evidence
-that the Oracle VM is deployed or accepted. See `deploy/oracle/README.md` and
+Deployment templates are under `deploy/oracle/`: systemd, Nginx, environment,
+bootstrap, and health-check files. See `deploy/oracle/README.md` and
 `docs/HYBRID-DEPLOYMENT.md` for prerequisites, resource limits, HTTPS, trusted
 proxy configuration, and the remaining acceptance gates.
 
 `vercel.json` targets the Vite frontend in `frontend/`. Configure the
-repository’s Vercel project to use `main` as its production branch and set
-only public frontend variables. Do not reuse the unrelated Chinetpulse
-Portfolio Vercel project.
+frontend deployment to use `main` as its production branch and set only public
+frontend variables.
 
 ## Security boundaries and known gaps
 
