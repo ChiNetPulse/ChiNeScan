@@ -1,8 +1,8 @@
 # ChineScan Deployment Progress
 
-Last updated: 2026-11-28T12:35:00+01:00
+Last updated: 2026-11-28T13:00:00+01:00
 Target: Oracle Cloud VM (`141.145.152.200`) + Supabase PostgreSQL (`eqxqrelhqomtyimbuwzu`) + Vercel (`https://chinescan.vercel.app`)
-Production Branch: `main` (code commit `9d9355b5`)
+Production Branch: `main` (merged `release/phase-4` at `36ea4bdb`)
 
 ## Checklist
 
@@ -34,3 +34,10 @@ Production Branch: `main` (code commit `9d9355b5`)
   - `https://chinescan.vercel.app/api/ready` (unauthenticated) returns `401 Unauthorized`.
   - `POST https://chinescan.vercel.app/api/auth/login` with `Origin: https://chinescan.vercel.app` returns `401 Invalid email or password.` (verifying `trusted_proxy`, `X-Forwarded-Proto: https`, `X-Forwarded-Host: chinescan.vercel.app`, CORS origin validation, and Supabase DB query).
 - [x] **Phase 9: Final `DEPLOYMENT.md` & progress update**
+- [x] **Phase 10: `begin_immediate` recursion fix, Phase 4 merge & branch cleanup**
+  - Fixed recursive `begin_immediate()` call and formatting in `chinescan/core/storage/sqlite.py` (`642ff2be`); verified all 32 `tests/unit/test_managed_malware.py` tests pass.
+  - Merged `release/phase-4` into `main` (`36ea4bdb`), preserving Phase 5/6 hardened isolation, Nuclei integration, and `EvidenceIngestionService`; verified all 11 `tests/unit/test_nmap_integration.py` tests pass.
+  - Verified `release/phase-4-report` content was already identical in `release/phase-4` / `main`.
+- [x] **Phase 11: First-superuser provisioning verification**
+  - Confirmed `chinescan/core/first_superuser.py`, `scripts/bootstrap_first_superuser.py`, `POST /api/auth/first-superuser/setup`, and Supabase `SECURITY DEFINER` functions (`chinescan_bootstrap_first_superuser`, `chinescan_complete_first_superuser_setup`) are in place and tested (`tests/integration/test_first_superuser.py`).
+  - Documented operator activation workflow in `DEPLOYMENT.md` (run `scripts/bootstrap_first_superuser.py` on Oracle VM, then POST one-time token + chosen password to `https://chinescan.vercel.app/api/auth/first-superuser/setup`).

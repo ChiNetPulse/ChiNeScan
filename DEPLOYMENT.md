@@ -44,3 +44,24 @@ Public health & auth boundary verification:
 curl -sf https://chinescan.vercel.app/api/health
 curl -i https://chinescan.vercel.app/api/ready   # Expect HTTP 401
 ```
+
+## First Superuser Provisioning
+
+The initial platform superuser (`cipherchi@proton.me`) is provisioned using a one-time, 15-minute, SHA-256-hashed setup token with no default password:
+
+1. On the Oracle VM, issue the one-time token:
+
+```bash
+sudo -u chinescan bash -c 'set -a && source /etc/chinescan/chinescan.env && set +a && /opt/chinescan/.venv/bin/python /opt/chinescan/scripts/bootstrap_first_superuser.py --storage-root /var/lib/chinescan'
+```
+
+2. Complete activation by posting the token and your chosen password to `/api/auth/first-superuser/setup` (same-origin over HTTPS):
+
+```bash
+curl -i -X POST https://chinescan.vercel.app/api/auth/first-superuser/setup \
+  -H "Content-Type: application/json" \
+  -H "Origin: https://chinescan.vercel.app" \
+  -d '{"email":"cipherchi@proton.me","token":"<ONE_TIME_TOKEN>","password":"<CHOSEN_PASSWORD>"}'
+```
+
+3. Restart `chinescan.service` after activation if needed so background workers initialize with the active superuser operator context.
