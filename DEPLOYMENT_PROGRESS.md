@@ -44,9 +44,14 @@ Production Branch: `main` (merged `release/phase-4` at `36ea4bdb`)
 - [x] **Phase 12: First-superuser setup endpoint auth exemption**
   - Exempted `POST /api/auth/first-superuser/setup` (and only `POST` on that exact path) from existing-session middleware in `chinescan/web/app.py` and added it to the `"auth"` rate-limit category.
   - Added focused unit tests in `tests/unit/test_first_superuser_endpoint.py` verifying unauthenticated one-time activation, invalid/expired/reused token rejection, wrong-email rejection, and `401` enforcement on `GET` and protected endpoints.
-- [ ] **Phase 13: First-superuser token recovery for expired unactivated accounts**
+- [x] **Phase 13: First-superuser token recovery for expired unactivated accounts**
   - Added `chinescan_reissue_first_superuser_token()` Supabase `SECURITY DEFINER` function (in migration file + `supabase/manual/recover_first_superuser_token.sql`).
   - Added `reissue_first_superuser_token()` Python function in `chinescan/core/first_superuser.py`.
   - Updated `scripts/bootstrap_first_superuser.py` to automatically fall back to reissue when fresh bootstrap fails (account exists but unactivated). Already-activated accounts are still rejected.
   - Added `tests/unit/test_first_superuser_reissue.py` (11 tests): reissue happy path, wrong-email rejection, TTL validation, DB-activated rejection, used-token rejection, script fallback, and `complete_first_superuser_setup` coverage.
-  - **⚠ Requires manual Supabase SQL application**: run `supabase/manual/recover_first_superuser_token.sql` as the Supabase postgres role before running the bootstrap script.
+  - Applied `recover_first_superuser_token.sql` and activated `cipherchi@proton.me`.
+- [x] **Phase 14: Production resource diagnosis, device folder upload, GitHub import, and branding consolidation**
+  - Fixed `OrganizationService.personal_organization_id()` and `load_platform_superuser()` in `chinescan/core/organizations.py` to resolve `chinescan-administration` for the active `superuser` owner, eliminating `404 Resource not found.` across Overview, Code Assessments, Projects, and background job workers.
+  - Added safe browser-device folder upload (`POST /api/projects/upload-folder`, `ProjectService.register_uploaded_folder()` in `chinescan/core/projects.py` & `chinescan/web/app.py`) with path-traversal rejection, secret/build directory exclusion, and bounded upload limits, wired to `FolderApprovalPicker.tsx`.
+  - Wired `GitHubImportDialog` into `CodeJobsWorkspace.tsx` and enabled `CHINESCAN_GITHUB_IMPORT_ENABLED=true` on the Oracle VM.
+  - Consolidated ChiNeScan branding from `chinescan-emblem.svg` across `App.tsx`, `styles.css`, `index.html`, favicons (`favicon-32x32.png`, `apple-touch-icon.png`), and `og-image.png`.

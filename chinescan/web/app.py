@@ -409,6 +409,19 @@ class FolderApprovalRequest(BaseModel):
     purpose: Literal["project", "logs", "malware"] = "project"
 
 
+class UploadedFolderFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(min_length=1, max_length=260)
+    content_base64: str = Field(max_length=3_000_000)
+
+
+class UploadedFolderRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=120)
+    approved: bool
+    files: list[UploadedFolderFile] = Field(min_length=1, max_length=2000)
+
+
 class ProjectRemoveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     confirmation: str = Field(min_length=1, max_length=120)
@@ -769,6 +782,9 @@ def create_app(
         active_settings.allow_soft_denied,
     )
     github_managed_directory = Path(database_path).expanduser().resolve(strict=False).parent / "gh"
+    upload_managed_directory = (
+        Path(database_path).expanduser().resolve(strict=False).parent / "uploads"
+    )
     project_service = ProjectService(
         repository,
         fs_browser,
@@ -778,6 +794,7 @@ def create_app(
         soft_denied=soft_denied,
         allow_soft_denied=active_settings.allow_soft_denied,
         managed_import_directory=github_managed_directory,
+        managed_upload_directory=upload_managed_directory,
     )
     repository_snapshot_store = RepositorySnapshotStore(
         repository,
@@ -2684,6 +2701,44 @@ def create_app(
             raise HTTPException(
                 status_code=422,
                 detail={"code": code, "message": folder_approval_error(code)},
+            ) from exc
+
+    @application.post("/api/projects/upload-folder", status_code=201)
+    def upload_project_folder(
+        payload: UploadedFolderRequest,
+        request: Request,
+        _session: Session = Depends(require_csrf),  # noqa: B008
+    ) -> dict[str, Any]:
+        import base64
+        import binascii
+
+        client_ip = request.client.host if request.client else ""
+        if not project_throttle.allowed("projects:" + client_ip):
+            raise HTTPException(status_code=429, detail="Project operation rate limit reached.")
+        if payload.approved is not True:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "approval_required", "message": "Explicit approval is required."},
+            )
+        decoded_files: list[tuple[str, bytes]] = []
+        for entry in payload.files:
+            try:
+                raw = base64.b64decode(entry.content_base64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "invalid_encoding",
+                        "message": "Uploaded file encoding is invalid.",
+                    },
+                ) from exc
+            decoded_files.append((entry.path, raw))
+        try:
+            return project_service.register_uploaded_folder(payload.name, decoded_files)
+        except ProjectError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": exc.code, "message": str(exc)},
             ) from exc
 
     @application.delete("/api/projects/{project_id}")

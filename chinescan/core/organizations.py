@@ -65,6 +65,10 @@ class OrganizationService:
             # their existing credential-file bootstrap remains authoritative.
             return self.operator_user_id
         self.operator_user_id = str(user_id) if user_id is not None else None
+        if self.operator_user_id:
+            org_id = self.personal_organization_id(self.operator_user_id)
+            if org_id and hasattr(self.repository, "_local_operator_organization_id"):
+                self.repository._local_operator_organization_id = org_id
         return self.operator_user_id
 
     def user_id_for_email(self, email: str) -> str | None:
@@ -92,7 +96,26 @@ class OrganizationService:
                     organization_memberships.c.status == "active",
                 )
             ).scalar_one_or_none()
-            return str(row) if row else None
+            if row:
+                return str(row)
+            admin_row = connection.execute(
+                select(organizations.c.id)
+                .join(
+                    organization_memberships,
+                    organization_memberships.c.organization_id == organizations.c.id,
+                )
+                .join(users, users.c.id == organization_memberships.c.user_id)
+                .where(
+                    organizations.c.slug == "chinescan-administration",
+                    organizations.c.status == "active",
+                    organization_memberships.c.user_id == user_id,
+                    organization_memberships.c.role == "owner",
+                    organization_memberships.c.status == "active",
+                    users.c.platform_role == "superuser",
+                    users.c.status == "active",
+                )
+            ).scalar_one_or_none()
+            return str(admin_row) if admin_row else None
 
     @staticmethod
     def _audit(

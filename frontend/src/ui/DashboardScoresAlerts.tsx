@@ -6,6 +6,7 @@ type Section = 'scans' | 'findings' | 'cases' | 'malware';
 export function DashboardScoresAlerts({ onNavigate, onUnauthorized }: { onNavigate: (section: Section) => void; onUnauthorized: () => void }) {
   const [scores, setScores] = useState<ModuleScore[]>([]);
   const [alerts, setAlerts] = useState<DashboardAlert[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState('');
   const [working, setWorking] = useState('');
   const refreshRef = useRef<() => void>(() => undefined);
@@ -16,6 +17,8 @@ export function DashboardScoresAlerts({ onNavigate, onUnauthorized }: { onNaviga
     } catch (reason) {
       if (reason instanceof UnauthorizedError) onUnauthorized();
       else setError('Scores or alerts could not be loaded. Retry this view.');
+    } finally {
+      setLoaded(true);
     }
   }, [onUnauthorized]);
   refreshRef.current = () => { void load(); };
@@ -70,7 +73,7 @@ export function DashboardScoresAlerts({ onNavigate, onUnauthorized }: { onNaviga
           <button type="button" onClick={() => onNavigate('cases')}>Cases</button>
           <button type="button" onClick={() => onNavigate('malware')}>Malware triage</button>
         </div>
-      </article>)}</div> : <p className="score-empty">Loading module scores…</p>}
+      </article>)}</div> : <p className="score-empty">{loaded ? 'No module scores recorded yet. Run an assessment to populate coverage and scores.' : 'Loading module scores…'}</p>}
     </section>
     <section className="panel alert-panel" aria-labelledby="alerts-heading" aria-live="polite">
       <div className="panel-heading"><div><h2 id="alerts-heading">Alerts</h2><p>Rule-based local alerts. State changes are recorded in the local audit trail.</p></div></div>

@@ -241,7 +241,7 @@ export function App() {
     <svg className="glass-filter-defs" aria-hidden="true" focusable="false"><filter id="glass-refraction"><feTurbulence type="fractalNoise" baseFrequency=".012 .025" numOctaves="2" seed="8"/><feDisplacementMap in="SourceGraphic" scale="3"/></filter></svg>
     <TerminalBackdrop mode={backgroundMode}/>
     <aside id="main-sidebar" className={`sidebar ${mobileNavOpen ? 'mobile-open' : ''}`}>
-      <div className="brand"><div className="brand-mark" aria-hidden="true"><span>C</span><i /></div><div><strong>ChiNeScan</strong><small>LOCAL SECURITY WORKSTATION</small></div></div>
+      <div className="brand"><img src="/chinescan-emblem.svg" alt="ChiNeScan" className="brand-emblem" /><div><strong>ChiNeScan</strong><small>LOCAL SECURITY WORKSTATION</small></div></div>
       <div className="nav-caption">WORKSPACE</div>
       <nav aria-label="Main navigation">{nav('overview', 'Overview', '⌂')}{nav('organizations', 'Organizations', '▤')}{nav('engagement', 'Engagements', '◈')}{nav('executions', 'Governed Jobs', '⚡')}{nav('governance', 'Phase 6 governance', '◉')}{nav('projects', 'Projects', '▧')}{nav('jobs', 'Code assessments', '⌘')}{nav('logs', 'Log analysis', '≋')}{nav('malware', 'Malware triage', '◇')}{nav('chain', 'On-chain tracing', '◎')}{nav('scans', 'Scans', '⌕')}{nav('findings', 'Findings', '◈')}{nav('cases', 'Cases', '▤')}{nav('account', 'Account security', '◉')}{nav('modules', 'Modules', '▦')}{nav('status', 'System status', '◉')}</nav>
       <div className="sidebar-bottom"><div className="local-indicator"><span />LOCAL INSTANCE</div><p>Assessment data stays on this device.</p><div className="profile"><div className="avatar">{email.slice(0, 1).toUpperCase()}</div><div className="profile-name"><strong>{email}</strong><small>{activeOrg ? `${activeOrg.role} · ${activeOrg.name}` : 'Local operator'}</small></div><button className="icon-button" onClick={logout} disabled={busy} aria-label="Sign out" title="Sign out">↗</button></div></div>
@@ -449,7 +449,7 @@ function navigateAuth(page: AuthPage, setPage: (page: AuthPage) => void) {
   window.history.pushState({}, '', path); setPage(page);
 }
 function AuthShell({ children }: { children: React.ReactNode }) {
-  return <div className="login-page"><div className="login-orb orb-one"/><div className="login-orb orb-two"/><section className="login-card"><div className="login-brand"><div className="brand-mark"><span>C</span><i /></div><span>ChiNeScan</span></div>{children}</section><footer className="login-footer">ChiNeScan <span>•</span> Local analyst console</footer></div>;
+  return <div className="login-page"><div className="login-orb orb-one"/><div className="login-orb orb-two"/><section className="login-card"><div className="login-brand"><img src="/chinescan-emblem.svg" alt="ChiNeScan" className="brand-emblem brand-emblem-lg" /><span>ChiNeScan</span></div>{children}</section><footer className="login-footer">ChiNeScan <span>•</span> Local analyst console</footer></div>;
 }
 function AuthFooter() { return <div className="login-foot"><span>◉</span> Available from this device only</div>; }
 function ForgotPassword({ busy, error, onBack, onSubmit }: { busy: boolean; error: string; onBack: () => void; onSubmit: (email: string) => void }) {

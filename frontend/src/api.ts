@@ -188,6 +188,9 @@ export const api = {
   approveFolder: (directoryId: string, name: string, purpose: 'project' | 'logs' | 'malware' = 'project') => request<ApprovedFolder>('/api/projects/approve-folder', {
     method: 'POST', body: JSON.stringify({ directory_id: directoryId, name, approved: true, purpose }),
   }),
+  uploadFolder: (name: string, files: Array<{ path: string; content_base64: string }>) => request<ApprovedFolder & { file_count?: number; excluded_count?: number }>('/api/projects/upload-folder', {
+    method: 'POST', body: JSON.stringify({ name, approved: true, files }),
+  }),
   fsRoots: (capability: 'project_directory' | 'log_location') => request<{ items: FsDirectory[] }>(`/api/fs/roots?${new URLSearchParams({ capability })}`),
   fsList: (capability: 'project_directory' | 'log_location', directoryId: string, cursor?: string | null) => {
     const query = new URLSearchParams({ capability, directory_id: directoryId, limit: '100' });

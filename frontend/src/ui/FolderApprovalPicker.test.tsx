@@ -51,4 +51,61 @@ describe('shared folder approval picker', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Windows system folders cannot be approved.');
     expect(fetchMock).not.toHaveBeenCalledWith('/api/projects/approve-folder', expect.anything());
   });
+
+  it('uploads a device folder via input fallback, excludes secret files, and registers the project', async () => {
+    const uploadedProject = { ...project, kind: 'upload' as const, name: 'local-app' };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path === '/api/fs/picker-roots') return response(roots);
+      if (path === '/api/projects/upload-folder' && init?.method === 'POST') return response(uploadedProject, 201);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const onApproved = vi.fn();
+    render(<FolderApprovalPicker onClose={vi.fn()} onUnauthorized={vi.fn()} onApproved={onApproved} />);
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(input).toBeTruthy();
+
+    const makeFile = (relPath: string, content: string) => {
+      const file = new File([content], relPath.split('/').pop() || 'file', { type: 'text/plain' });
+      Object.defineProperty(file, 'webkitRelativePath', { value: relPath });
+      return file;
+    };
+
+    fireEvent.change(input, {
+      target: {
+        files: [
+          makeFile('local-app/src/index.ts', 'export const ok = true;'),
+          makeFile('local-app/.env', 'SECRET=123'),
+          makeFile('local-app/.git/HEAD', 'ref: refs/heads/main'),
+        ],
+      },
+    });
+
+    expect(await screen.findByText(/1\s+files/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 unsafe\/secret or oversized files excluded/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Approve folder' }));
+    await waitFor(() => expect(onApproved).toHaveBeenCalledWith(uploadedProject));
+    const uploadCall = fetchMock.mock.calls.find(([url]) => String(url) === '/api/projects/upload-folder');
+    expect(uploadCall).toBeTruthy();
+    const sentBody = JSON.parse(String(uploadCall?.[1]?.body));
+    expect(sentBody.name).toBe('local-app');
+    expect(sentBody.files).toHaveLength(1);
+    expect(sentBody.files[0].path).toBe('src/index.ts');
+  });
+
+  it('shows an error if a selected device folder contains only excluded files', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input) === '/api/fs/picker-roots') return response(roots);
+      return response({});
+    });
+    render(<FolderApprovalPicker onClose={vi.fn()} onUnauthorized={vi.fn()} onApproved={vi.fn()} />);
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const envFile = new File(['SECRET=1'], '.env', { type: 'text/plain' });
+    Object.defineProperty(envFile, 'webkitRelativePath', { value: 'empty-app/.env' });
+    fireEvent.change(input, { target: { files: [envFile] } });
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'No eligible source files remained after excluding'
+    );
+  });
 });

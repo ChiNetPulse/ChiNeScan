@@ -100,4 +100,29 @@ describe('code assessment workspace', () => {
     expect(screen.getByRole('button', { name: 'Start assessment' })).toBeEnabled();
     expect(fetchMock).toHaveBeenCalledWith('/api/code/projects', expect.anything());
   });
+
+  it('opens the GitHub import dialog from Code Assessments', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const path = String(input);
+      if (path === '/api/code/projects') return response([]);
+      if (path.startsWith('/api/code/jobs')) return response({ items: [], total: 0, limit: 50, offset: 0 });
+      if (path === '/api/github/status') {
+        return response({
+          enabled: true,
+          git_available: true,
+          project_count: 0,
+          max_projects: 20,
+          max_repo_mb: 100,
+          max_files: 5000,
+          allow_private: false,
+          has_token: false,
+          unavailable_reason: null,
+        });
+      }
+      throw new Error(`Unexpected call: ${path}`);
+    });
+    render(<CodeJobsWorkspace onUnauthorized={unauthorized} onOpenScan={vi.fn()} onCreateCase={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Import from GitHub' }));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+  });
 });

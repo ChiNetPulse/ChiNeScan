@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import os
+import re
 import shutil
 import stat
 import tomllib
@@ -11,7 +12,7 @@ import unicodedata
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from chinescan.core.fs_policy import (
@@ -190,6 +191,7 @@ class ProjectService:
         soft_denied: list[Path],
         allow_soft_denied: bool,
         managed_import_directory: Path | None = None,
+        managed_upload_directory: Path | None = None,
     ) -> None:
         self.repository = repository
         self.browser = browser
@@ -203,11 +205,19 @@ class ProjectService:
             if managed_import_directory is not None
             else None
         )
+        self.managed_upload_directory = (
+            managed_upload_directory.expanduser().absolute()
+            if managed_upload_directory is not None
+            else None
+        )
 
     def decision(self, path: str | Path) -> PathDecision:
         github_item = self._github_item_for_path(path)
         if github_item is not None:
             return self._github_decision(path, github_item)
+        upload_item = self._upload_item_for_path(path)
+        if upload_item is not None:
+            return self._upload_decision(path, upload_item)
         return decide_path(
             path,
             allowed_roots=self.allowed_roots or [Path(path)],
@@ -267,6 +277,161 @@ class ProjectService:
             raise ProjectError(
                 "clone_delete_refused", "The managed import is unavailable."
             ) from exc
+
+    def _upload_item_for_path(self, path: str | Path) -> dict[str, Any] | None:
+        try:
+            candidate = Path(path).resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        for item in self.repository.list_records("project"):
+            if item.get("kind") != "upload":
+                continue
+            try:
+                root = Path(str(item["root"])).resolve(strict=False)
+                candidate.relative_to(root)
+                return item
+            except (KeyError, OSError, RuntimeError, ValueError):
+                continue
+        return None
+
+    def _upload_decision(self, path: str | Path, item: dict[str, Any]) -> PathDecision:
+        try:
+            target = Path(path).expanduser().resolve(strict=True)
+            managed = _canonical_directory(self.managed_upload_directory or Path())
+            root = Path(str(item["root"])).resolve(strict=True)
+            target.relative_to(root)
+            root.relative_to(managed)
+            if _has_link_component(target) or not safe_project_tree(root):
+                raise ValueError
+            return PathDecision(True, "managed-upload", "allowed", target)
+        except (OSError, RuntimeError, ValueError, ProjectError, KeyError):
+            return PathDecision(False, "denied", "managed_upload_invalid")
+
+    def register_uploaded_folder(
+        self, name: str, files: Sequence[tuple[str, bytes]]
+    ) -> dict[str, Any]:
+        if self.managed_upload_directory is None:
+            raise ProjectError("upload_unavailable", "Managed folder uploads are unavailable.")
+        normalized = unicodedata.normalize("NFKC", name).strip()
+        if not 1 <= len(normalized) <= 120 or any(ord(char) < 32 for char in normalized):
+            raise ProjectError("invalid_name", "Project name must be 1 to 120 characters.")
+        if any(
+            _name_key(str(item.get("name", ""))) == _name_key(normalized)
+            for item in self._all_internal_and_file()
+        ):
+            raise ProjectError("duplicate_name", "A project with that name already exists.")
+        if not files:
+            raise ProjectError("empty_folder", "The selected folder contains no files.")
+        if len(files) > 2000:
+            raise ProjectError("too_many_files", "Folders are limited to 2,000 files per upload.")
+
+        excluded_dirs = {
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+            "dist",
+            "build",
+            "target",
+            ".next",
+            ".nuxt",
+            ".tox",
+            ".eggs",
+        }
+        secret_names = {
+            ".env",
+            ".npmrc",
+            ".pypirc",
+            ".netrc",
+            ".htpasswd",
+            "credentials.json",
+            "id_rsa",
+            "id_dsa",
+            "id_ecdsa",
+            "id_ed25519",
+        }
+        secret_exts = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"}
+        secret_content_re = re.compile(
+            rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"
+            rb"|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}"
+        )
+
+        validated: list[tuple[PurePosixPath, bytes]] = []
+        excluded_count = 0
+        total_bytes = 0
+        for raw_path, content in files:
+            if "\x00" in raw_path or "\\" in raw_path or raw_path.startswith("/"):
+                raise ProjectError("invalid_path", "Uploaded file path is invalid.")
+            posix = PurePosixPath(raw_path)
+            parts = posix.parts
+            if not parts or any(part in {"", ".", ".."} for part in parts):
+                raise ProjectError("invalid_path", "Uploaded file path is invalid.")
+            lower_parts = [part.lower() for part in parts]
+            filename = lower_parts[-1]
+            if (
+                any(part in excluded_dirs for part in lower_parts[:-1])
+                or filename in secret_names
+                or filename.startswith(".env.")
+                or any(filename.endswith(ext) for ext in secret_exts)
+                or secret_content_re.search(content[:65536]) is not None
+            ):
+                excluded_count += 1
+                continue
+            if len(content) > 2 * 1024 * 1024:
+                raise ProjectError(
+                    "file_too_large", "Individual uploaded files cannot exceed 2 MiB."
+                )
+            total_bytes += len(content)
+            if total_bytes > 25 * 1024 * 1024:
+                raise ProjectError(
+                    "upload_too_large", "Total uploaded folder size cannot exceed 25 MiB."
+                )
+            validated.append((posix, content))
+
+        if not validated:
+            raise ProjectError(
+                "no_eligible_files",
+                "No eligible source files remained after excluding unsafe or secret files.",
+            )
+
+        project_id = str(uuid.uuid4())
+        self.managed_upload_directory.mkdir(parents=True, exist_ok=True)
+        managed_root = _canonical_directory(self.managed_upload_directory)
+        project_dir = managed_root / project_id
+        project_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            for rel_path, content in validated:
+                dest = (project_dir / Path(*rel_path.parts)).resolve(strict=False)
+                dest.relative_to(project_dir)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(content)
+        except Exception as exc:
+            shutil.rmtree(project_dir, ignore_errors=True)
+            raise ProjectError(
+                "upload_write_failed", "The uploaded folder could not be stored safely."
+            ) from exc
+
+        item: dict[str, Any] = {
+            "project_id": project_id,
+            "name": normalized,
+            "kind": "upload",
+            "root": str(project_dir),
+            "configured_by": "dashboard",
+            "created_at": _now(),
+            "last_scan_refs": [],
+            "file_count": len(validated),
+            "excluded_count": excluded_count,
+        }
+        self.repository.save("project", project_id, item)
+        return {
+            **self._public(item),
+            "file_count": len(validated),
+            "excluded_count": excluded_count,
+        }
 
     def _delete_verified_github_clone(self, root: Path) -> None:
         verified = self._verified_github_candidate(root, "managed")
@@ -478,7 +643,7 @@ class ProjectService:
         malware_jobs.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
         return {
             **self._summary(item),
-            "origin_label": "This device" if item.get("kind") == "local" else "GitHub",
+            "origin_label": "This device" if item.get("kind") in {"local", "upload"} else "GitHub",
             "last_scan_refs": [row["scan_id"] for row in scans[:10]],
             "recent_scans": [self._safe_scan(row) for row in scans[:10]],
             "recent_jobs": [self._safe_job(row) for row in jobs[:10]],
@@ -551,6 +716,17 @@ class ProjectService:
                 raise ProjectError(
                     "clone_delete_refused", "The managed import could not be removed safely."
                 ) from exc
+        elif item.get("kind") == "upload" and self.managed_upload_directory is not None:
+            try:
+                managed = _canonical_directory(self.managed_upload_directory)
+                candidate = _canonical_directory(Path(str(item.get("root", ""))))
+                candidate.relative_to(managed)
+                if candidate.parent == managed and candidate.is_dir():
+                    shutil.rmtree(candidate)
+            except (OSError, RuntimeError, ValueError, ProjectError) as exc:
+                raise ProjectError(
+                    "upload_delete_refused", "The managed upload could not be removed safely."
+                ) from exc
         scans = [
             row
             for row in self.repository.list_records("scan")
@@ -578,6 +754,8 @@ class ProjectService:
             name, root = str(item["name"]), Path(str(item["root"]))
         if item is not None and item.get("kind") == "github":
             decision = self._github_decision(root, item)
+        elif item is not None and item.get("kind") == "upload":
+            decision = self._upload_decision(root, item)
         else:
             decision = folder_approval_decision(
                 root,
@@ -645,7 +823,7 @@ class ProjectService:
             "name": str(item["name"]),
             "kind": str(item.get("kind", "local")),
             "configured_by": str(item.get("configured_by", "file")),
-            "origin_label": "This device" if item.get("kind") == "local" else "GitHub",
+            "origin_label": "This device" if item.get("kind") in {"local", "upload"} else "GitHub",
             "created_at": str(item.get("created_at", "")),
             "last_scan_refs": list(item.get("last_scan_refs", [])),
             "last_scan": item.get("last_scan_refs", [None])[0]
