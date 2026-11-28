@@ -51,6 +51,9 @@ packages = ["chinescan"]
 testpaths = ["tests"]
 addopts = "--strict-markers"
 
+[tool.coverage.report]
+precision = 2
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

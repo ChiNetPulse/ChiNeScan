@@ -127,7 +127,10 @@ jobs:
           CHINESCAN_TEST_POSTGRES_URL: postgresql+psycopg://chinescan_backend:ci-only-backend-password@127.0.0.1:5432/postgres
         run: uv run --locked --extra dev --extra postgres pytest --basetemp "${RUNNER_TEMP}/c6" --cov=chinescan --cov-report=term-missing --cov-fail-under=80
       - name: Enforce measured Python coverage threshold
-        run: uv run --locked --extra dev --extra postgres coverage report --fail-under=80
+        run: |
+          uv run --locked --extra dev --extra postgres coverage report --precision=2 --fail-under=80
+          uv run --locked --extra dev --extra postgres coverage json -o "${RUNNER_TEMP}/coverage.json"
+          uv run --locked --extra dev python -c "import json, os, pathlib, sys; data = json.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'coverage.json').read_text(encoding='utf-8')); pct = float(data['totals']['percent_covered']); print(f'Measured Python coverage: {pct:.2f}% (threshold: 80.00%)'); sys.exit(0 if pct >= 80.0 else 1)"
       - run: uv run --locked --extra dev pip-audit --skip-editable
       - run: uv run --locked --extra dev bandit --severity-level medium -r chinescan
 
