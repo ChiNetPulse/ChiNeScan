@@ -1196,6 +1196,7 @@ def create_app(
                 "/api/auth/signup",
                 "/api/auth/forgot-password",
                 "/api/auth/reset-password",
+                "/api/auth/first-superuser/setup",
             }:
                 category = "auth"
             elif "/report/" in path or "/export/" in path or "/exports/" in path:
@@ -1257,7 +1258,7 @@ def create_app(
             "/api/auth/forgot-password",
             "/api/auth/reset-password",
             "/api/auth/invitations/accept",
-        }
+        } or (path == "/api/auth/first-superuser/setup" and request.method == "POST")
         unsupported_version_alias = path.startswith("/api/v") and not path.startswith("/api/v1/")
         has_matching_api_route = any(
             route.matches(request.scope)[0] is not Match.NONE for route in application.router.routes

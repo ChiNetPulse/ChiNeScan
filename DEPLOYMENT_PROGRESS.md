@@ -41,3 +41,6 @@ Production Branch: `main` (merged `release/phase-4` at `36ea4bdb`)
 - [x] **Phase 11: First-superuser provisioning verification**
   - Confirmed `chinescan/core/first_superuser.py`, `scripts/bootstrap_first_superuser.py`, `POST /api/auth/first-superuser/setup`, and Supabase `SECURITY DEFINER` functions (`chinescan_bootstrap_first_superuser`, `chinescan_complete_first_superuser_setup`) are in place and tested (`tests/integration/test_first_superuser.py`).
   - Documented operator activation workflow in `DEPLOYMENT.md` (run `scripts/bootstrap_first_superuser.py` on Oracle VM, then POST one-time token + chosen password to `https://chinescan.vercel.app/api/auth/first-superuser/setup`).
+- [x] **Phase 12: First-superuser setup endpoint auth exemption**
+  - Exempted `POST /api/auth/first-superuser/setup` (and only `POST` on that exact path) from existing-session middleware in `chinescan/web/app.py` and added it to the `"auth"` rate-limit category.
+  - Added focused unit tests in `tests/unit/test_first_superuser_endpoint.py` verifying unauthenticated one-time activation, invalid/expired/reused token rejection, wrong-email rejection, and `401` enforcement on `GET` and protected endpoints.
