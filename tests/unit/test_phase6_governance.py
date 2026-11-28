@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from sqlalchemy import select
 
 from chinescan.core.phase6_governance import (
@@ -62,3 +64,33 @@ def test_active_hold_blocks_retention_until_release(repository) -> None:
     result = service.run_once(organization_id, actor_id)
     assert result["deleted"] == 1
     assert repository.get("evidence", record_id) is None
+
+
+def test_retention_service_lists_audit_and_handles_eligibility_edges(repository) -> None:
+    organization_id = repository._local_operator_organization_id
+    assert organization_id is not None
+    with repository.engine.connect() as connection:
+        actor_id = connection.execute(
+            select(organizations.c.owner_user_id).where(organizations.c.id == organization_id)
+        ).scalar_one()
+    service = EvidenceLifecycleService(repository)
+
+    with pytest.raises(Phase6PolicyError, match="retention_days"):
+        service.create_policy(organization_id, actor_id, 0)
+    with pytest.raises(Phase6PolicyError, match="retention limit"):
+        service.run_once(organization_id, actor_id, limit=0)
+    with pytest.raises(Phase6PolicyError, match="reason"):
+        service.create_hold(organization_id, actor_id, [], "")
+
+    policy_id = service.create_policy(organization_id, actor_id, 1, evidence_category="scanner.raw")
+    assert service.list_policies(organization_id, actor_id)[0]["id"] == policy_id
+    assert service.list_holds(organization_id, actor_id) == []
+    assert service.list_retention_jobs(organization_id, actor_id) == []
+    assert len(service.list_audit(organization_id, actor_id)) == 1
+
+    repository.save(
+        "evidence",
+        "no-policy",
+        {"evidence_type": "other.category", "ingested_at": "not-a-timestamp"},
+    )
+    assert service.run_once(organization_id, actor_id)["skipped"] == 1

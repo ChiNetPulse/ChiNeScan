@@ -126,6 +126,8 @@ jobs:
           CHINESCAN_TEST_POSTGRES_BOOTSTRAP_URL: postgresql+psycopg://chinescan_backend:ci-only-backend-password@127.0.0.1:5432/postgres
           CHINESCAN_TEST_POSTGRES_URL: postgresql+psycopg://chinescan_backend:ci-only-backend-password@127.0.0.1:5432/postgres
         run: uv run --locked --extra dev --extra postgres pytest --basetemp "${RUNNER_TEMP}/c6" --cov=chinescan --cov-report=term-missing --cov-fail-under=80
+      - name: Enforce measured Python coverage threshold
+        run: uv run --locked --extra dev --extra postgres coverage report --fail-under=80
       - run: uv run --locked --extra dev pip-audit --skip-editable
       - run: uv run --locked --extra dev bandit --severity-level medium -r chinescan
 
