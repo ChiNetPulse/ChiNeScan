@@ -104,6 +104,66 @@ def bootstrap_first_superuser(
     )
 
 
+def reissue_first_superuser_token(
+    engine: Engine,
+    *,
+    email: str = FIRST_SUPERUSER_EMAIL,
+    ttl_seconds: int = BOOTSTRAP_TOKEN_TTL_SECONDS,
+) -> FirstSuperuserBootstrapResult:
+    """Issue a fresh one-time token for an existing, unactivated first superuser.
+
+    Safe to call when the initial bootstrap already created the account but
+    the setup token expired before activation. The user ID, organization, and
+    membership are preserved unchanged. The database function rejects this call
+    if the account's password has already been set or if the previous token
+    was ever consumed, making replay and takeover impossible.
+
+    The returned token is never persisted in cleartext and must be delivered
+    to the administrator out-of-band.
+    """
+    try:
+        normalized = normalize_email(email)
+    except CredentialError as exc:
+        raise FirstSuperuserBootstrapError(str(exc)) from exc
+    if normalized != FIRST_SUPERUSER_EMAIL:
+        raise FirstSuperuserBootstrapError(
+            f"Token reissue is restricted to {FIRST_SUPERUSER_EMAIL}."
+        )
+    if not 60 <= ttl_seconds <= 3600:
+        raise FirstSuperuserBootstrapError("Bootstrap token lifetime is invalid.")
+
+    setup_token = secrets.token_urlsafe(32)
+    expires_at = time.time() + ttl_seconds
+    try:
+        with engine.begin() as connection:
+            user_id: str | None = connection.execute(
+                text(
+                    """
+                    SELECT public.chinescan_reissue_first_superuser_token(
+                        :email, :token_hash, :expires_at
+                    )
+                    """
+                ),
+                {
+                    "email": normalized,
+                    "token_hash": _token_hash(setup_token),
+                    "expires_at": expires_at,
+                },
+            ).scalar_one()
+    except Exception as exc:
+        raise FirstSuperuserBootstrapError(
+            "Token reissue was not completed. "
+            "The account may already be activated, or no eligible unactivated account was found."
+        ) from exc
+    return FirstSuperuserBootstrapResult(
+        user_id=str(user_id),
+        email=normalized,
+        setup_token=setup_token,
+        expires_at=expires_at,
+        created=False,  # account already existed; only the token was replaced
+    )
+
+
 def complete_first_superuser_setup(
     engine: Engine,
     token: str,

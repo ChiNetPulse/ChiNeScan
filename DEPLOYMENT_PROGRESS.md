@@ -44,3 +44,9 @@ Production Branch: `main` (merged `release/phase-4` at `36ea4bdb`)
 - [x] **Phase 12: First-superuser setup endpoint auth exemption**
   - Exempted `POST /api/auth/first-superuser/setup` (and only `POST` on that exact path) from existing-session middleware in `chinescan/web/app.py` and added it to the `"auth"` rate-limit category.
   - Added focused unit tests in `tests/unit/test_first_superuser_endpoint.py` verifying unauthenticated one-time activation, invalid/expired/reused token rejection, wrong-email rejection, and `401` enforcement on `GET` and protected endpoints.
+- [ ] **Phase 13: First-superuser token recovery for expired unactivated accounts**
+  - Added `chinescan_reissue_first_superuser_token()` Supabase `SECURITY DEFINER` function (in migration file + `supabase/manual/recover_first_superuser_token.sql`).
+  - Added `reissue_first_superuser_token()` Python function in `chinescan/core/first_superuser.py`.
+  - Updated `scripts/bootstrap_first_superuser.py` to automatically fall back to reissue when fresh bootstrap fails (account exists but unactivated). Already-activated accounts are still rejected.
+  - Added `tests/unit/test_first_superuser_reissue.py` (11 tests): reissue happy path, wrong-email rejection, TTL validation, DB-activated rejection, used-token rejection, script fallback, and `complete_first_superuser_setup` coverage.
+  - **⚠ Requires manual Supabase SQL application**: run `supabase/manual/recover_first_superuser_token.sql` as the Supabase postgres role before running the bootstrap script.

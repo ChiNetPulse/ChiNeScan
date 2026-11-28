@@ -1443,4 +1443,52 @@ GRANT EXECUTE ON FUNCTION public.chinescan_is_org_admin(text) TO chinescan_backe
 GRANT EXECUTE ON FUNCTION public.chinescan_bootstrap_first_superuser(text, text, text, text, double precision) TO chinescan_backend;
 GRANT EXECUTE ON FUNCTION public.chinescan_complete_first_superuser_setup(text, text, text) TO chinescan_backend;
 
+-- Recovery: reissue a fresh token for an existing unactivated first-superuser account.
+-- Safe to call only when the account exists, its password is still NULL, and
+-- the previous bootstrap token was never consumed.  The user ID, organization,
+-- and membership are preserved unchanged.
+CREATE OR REPLACE FUNCTION public.chinescan_reissue_first_superuser_token(
+  p_email      text,
+  p_token_hash text,
+  p_expires_at double precision
+) RETURNS text
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  selected_user_id text;
+  stamp            text := clock_timestamp()::text;
+BEGIN
+  IF lower(trim(p_email)) <> 'cipherchi@proton.me' THEN
+    RAISE EXCEPTION 'token reissue is restricted to the fixed first-superuser email';
+  END IF;
+  IF p_token_hash IS NULL OR length(p_token_hash) <> 64
+     OR p_expires_at <= extract(epoch FROM clock_timestamp()) THEN
+    RAISE EXCEPTION 'reissue bootstrap material is invalid';
+  END IF;
+  -- The account must exist with no password set and no prior token consumption.
+  -- FOR UPDATE prevents concurrent reissue races.
+  SELECT account.id INTO selected_user_id
+    FROM public.users account
+    JOIN public.user_credentials credential ON credential.user_id = account.id
+   WHERE account.email_normalized = 'cipherchi@proton.me'
+     AND account.platform_role   = 'superuser'
+     AND account.status          = 'active'
+     AND credential.password_hash       IS NULL
+     AND credential.bootstrap_used_at   IS NULL
+   FOR UPDATE;
+  IF selected_user_id IS NULL THEN
+    RAISE EXCEPTION 'no eligible unactivated first-superuser account found; reissue is not permitted';
+  END IF;
+  -- Atomically replace only the expired token hash and expiry.
+  UPDATE public.user_credentials
+     SET bootstrap_token_hash  = p_token_hash,
+         bootstrap_expires_at  = p_expires_at,
+         updated_at            = stamp
+   WHERE user_id = selected_user_id;
+  RETURN selected_user_id;
+END
+$$;
+
+REVOKE ALL ON FUNCTION public.chinescan_reissue_first_superuser_token(text, text, double precision) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.chinescan_reissue_first_superuser_token(text, text, double precision) TO chinescan_backend;
+
 COMMIT;

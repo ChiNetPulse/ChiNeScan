@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Issue the one-time first ChineScan administrator setup token."""
+"""Issue the one-time first ChineScan administrator setup token.
+
+If a previous bootstrap already created the superuser account but the token
+expired before activation, this script automatically issues a fresh token for
+the existing unactivated account without touching the user ID, organization,
+or membership.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +20,7 @@ from chinescan.core.first_superuser import (
     FIRST_SUPERUSER_EMAIL,
     FirstSuperuserBootstrapError,
     bootstrap_first_superuser,
+    reissue_first_superuser_token,
 )
 from chinescan.core.storage.postgres import PostgresRepository
 
@@ -33,7 +40,19 @@ def main() -> int:
     repository = None
     try:
         repository = PostgresRepository(args.database_url, storage_root=args.storage_root)
-        result = bootstrap_first_superuser(repository.engine, email=FIRST_SUPERUSER_EMAIL)
+        try:
+            result = bootstrap_first_superuser(repository.engine, email=FIRST_SUPERUSER_EMAIL)
+        except FirstSuperuserBootstrapError:
+            # Fresh bootstrap failed — the account may already exist from a prior
+            # run whose token expired unused.  Attempt a secure reissue; this
+            # call will itself fail with a clear message if the account has
+            # already been activated or is otherwise ineligible.
+            result = reissue_first_superuser_token(repository.engine, email=FIRST_SUPERUSER_EMAIL)
+            print(
+                "(Existing unactivated account detected; "
+                "a fresh token has been issued for the same user ID.)",
+                file=sys.stderr,
+            )
     except FirstSuperuserBootstrapError as exc:
         print(str(exc), file=sys.stderr)
         return 1
