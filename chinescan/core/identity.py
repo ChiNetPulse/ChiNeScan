@@ -31,6 +31,7 @@ from chinescan.core.accounts import (
 )
 from chinescan.core.organizations import OrganizationService, now_iso
 from chinescan.core.storage.sqlite import (
+    begin_immediate,
     organization_invitations,
     organization_memberships,
     organizations,
@@ -122,7 +123,7 @@ class IdentityService:
         stamp = now_iso()
 
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 user_row = connection.execute(select(users).where(users.c.id == user_id)).first()
                 if user_row is None:
@@ -320,7 +321,7 @@ class IdentityService:
     def verify_totp(self, user_id: str, code: str, *, now: float | None = None) -> bool:
         timestamp = time.time() if now is None else float(now)
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 ok = self._verify_totp_connection(connection, user_id, code, timestamp)
                 connection.commit()
@@ -352,7 +353,7 @@ class IdentityService:
         secret = generate_totp_secret()
         stamp = now_iso()
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 cred = connection.execute(
                     select(user_credentials).where(user_credentials.c.user_id == user_id)
@@ -383,7 +384,7 @@ class IdentityService:
         timestamp = time.time() if now is None else float(now)
         stamp = now_iso()
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 cred = connection.execute(
                     select(user_credentials).where(user_credentials.c.user_id == user_id)
@@ -465,7 +466,7 @@ class IdentityService:
         timestamp = time.time() if now is None else float(now)
         stamp = now_iso()
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 if not self._verify_totp_connection(connection, user_id, code, timestamp):
                     connection.commit()
@@ -498,7 +499,7 @@ class IdentityService:
         timestamp = time.time() if now is None else float(now)
         stamp = now_iso()
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 if not self._verify_totp_connection(connection, user_id, code, timestamp):
                     connection.commit()
@@ -528,7 +529,7 @@ class IdentityService:
     def change_password(self, user_id: str, current_password: str, new_password: str) -> str | None:
         stamp = now_iso()
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 row = connection.execute(
                     select(users, user_credentials)
@@ -587,7 +588,7 @@ class IdentityService:
             raise IdentityError("Cannot disable or revoke the active local operator account.")
         stamp = now_iso()
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 target = connection.execute(
                     select(users).where(users.c.id == target_user_id)
@@ -753,7 +754,7 @@ class IdentityService:
         digest = _token_hash(token)
         stamp = now_iso()
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 inv = connection.execute(
                     select(organization_invitations).where(

@@ -46,6 +46,7 @@ from chinescan.core.resource_governance import (
 from chinescan.core.storage.sqlite import (
     approval_requests,
     authorization_documents,
+    begin_immediate,
     engagement_assets,
     execution_action_attempts,
     execution_jobs,
@@ -130,7 +131,7 @@ class ExecutionGovernanceService:
             raise ValueError("A valid idempotency key is required.")
         now = datetime.now(UTC)
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 existing = connection.execute(
                     select(execution_jobs).where(
@@ -966,7 +967,7 @@ class ExecutionGovernanceService:
     ) -> dict[str, Any] | None:
         """Persist an authorized cancellation request; return None for inaccessible jobs."""
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 row = connection.execute(
                     select(execution_jobs).where(
@@ -1105,7 +1106,7 @@ class ExecutionGovernanceService:
     ) -> bool:
         """Atomically record worker observation and complete a persisted cancellation."""
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 row = connection.execute(
                     select(execution_jobs).where(
@@ -1614,7 +1615,7 @@ class ExecutionGovernanceService:
         ts = time.time() if now is None else float(now)
         stamp = now_iso()
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 existing = connection.execute(
                     select(worker_leases.c.worker_id).where(worker_leases.c.worker_id == worker_id)
@@ -1672,7 +1673,7 @@ class ExecutionGovernanceService:
         """Revalidate an action, persist durable intent, and consume sensitive approval."""
         ts = time.time() if now is None else float(now)
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 row = connection.execute(
                     select(execution_jobs).where(
@@ -2099,7 +2100,7 @@ class ExecutionGovernanceService:
         eff_worker_id = worker_id or f"worker-{secrets.token_hex(8)}"
         ts = time.time() if now is None else float(now)
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 claimed = self._claim_on_connection(
                     connection, job_id, eff_worker_id, lease_duration_seconds, ts
@@ -2120,7 +2121,7 @@ class ExecutionGovernanceService:
         self._validate_lease_bounds(lease_duration_seconds)
         ts = time.time() if now is None else float(now)
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 active_rows = connection.execute(
                     select(
@@ -2192,7 +2193,7 @@ class ExecutionGovernanceService:
         self._validate_lease_bounds(lease_duration_seconds)
         ts = time.time() if now is None else float(now)
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 row = connection.execute(
                     select(execution_jobs).where(execution_jobs.c.id == job_id)
@@ -2323,7 +2324,7 @@ class ExecutionGovernanceService:
             raise ValueError("Reconciliation evidence reference is required and bounded.")
         stamp = now_iso()
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 row = connection.execute(
                     select(execution_jobs).where(
@@ -2440,7 +2441,7 @@ class ExecutionGovernanceService:
         stamp = now_iso()
         ts = time.time() if now is None else float(now)
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 job_row = connection.execute(
                     select(execution_jobs).where(
@@ -2504,7 +2505,7 @@ class ExecutionGovernanceService:
             raise ValueError("Invalid action attempt completion state.")
         stamp = now_iso()
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 job_row = connection.execute(
                     select(execution_jobs).where(execution_jobs.c.id == job_id)
@@ -2578,7 +2579,7 @@ class ExecutionGovernanceService:
         stamp = now_iso()
         recovered: list[dict[str, Any]] = []
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 stopped_workers: set[str] = set()
                 if include_stopped_workers:
@@ -2791,7 +2792,7 @@ class ExecutionGovernanceService:
     ) -> bool:
         ts = time.time() if now is None else float(now)
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 row = connection.execute(
                     select(execution_jobs).where(

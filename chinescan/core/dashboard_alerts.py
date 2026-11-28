@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from chinescan.core.storage.sqlite import SQLiteRepository
+from chinescan.core.storage.sqlite import SQLiteRepository, begin_immediate
 
 
 def timestamp() -> str:
@@ -32,7 +32,7 @@ class DashboardAlerts:
         at = now or timestamp()
         alert_id = str(uuid4())
         with self.repository.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 connection.exec_driver_sql(
                     "INSERT OR IGNORE INTO dashboard_alerts "
@@ -143,7 +143,7 @@ class DashboardAlerts:
             raise AlertStateError("Alert action is not supported.")
         at = now or timestamp()
         with self.repository.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 row = (
                     connection.exec_driver_sql(

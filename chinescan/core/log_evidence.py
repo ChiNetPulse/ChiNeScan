@@ -21,6 +21,7 @@ from chinescan.core.organizations import now_iso
 from chinescan.core.storage.security import is_reparse_or_link, secure_snapshot_directory
 from chinescan.core.storage.sqlite import (
     assessment_audit_events,
+    begin_immediate,
     engagement_assets,
     engagements,
     execution_jobs,
@@ -206,7 +207,7 @@ class LogEvidenceStore:
         reserved_at = now_iso()
         reservation_expires = (datetime.now(UTC) + timedelta(days=1)).isoformat()
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 expired = connection.execute(
                     select(
@@ -360,7 +361,7 @@ class LogEvidenceStore:
             source_format = _source_format(root, entries)
             manifest = {"manifest_version": MANIFEST_VERSION, "entries": entries}
             with self.engine.connect() as connection:
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                begin_immediate(connection)
                 try:
                     if not security._can_operate(
                         connection, user_id, organization_id, engagement_id
@@ -706,7 +707,7 @@ class LogEvidenceStore:
         security: EngagementSecurityService,
     ) -> bool:
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 if not security._can_manage(connection, user_id, organization_id, engagement_id):
                     connection.rollback()

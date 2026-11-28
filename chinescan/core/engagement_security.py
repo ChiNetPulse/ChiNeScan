@@ -23,6 +23,7 @@ from chinescan.core.storage.sqlite import (
     assessment_audit_events,
     authorization_documents,
     authorization_records,
+    begin_immediate,
     clients,
     engagement_assets,
     engagement_assignments,
@@ -538,7 +539,7 @@ class EngagementSecurityService:
         if not change_summary.strip() or len(change_summary) > 2000:
             raise EngagementSecurityError("A concise scope change summary is required.")
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 if not self._can_manage(connection, user_id, organization_id, engagement_id):
                     connection.rollback()
@@ -1550,7 +1551,7 @@ class EngagementSecurityService:
         if expiry <= current or expiry > current + MAX_APPROVAL_TTL:
             raise EngagementSecurityError("Approval expiry must be within the next 24 hours.")
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 decision = self._decision(
                     connection,
@@ -1663,7 +1664,7 @@ class EngagementSecurityService:
         if decision not in {"approved", "denied"} or len(reason.strip()) > 500:
             raise EngagementSecurityError("Approval decision or reason is invalid.")
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 row = connection.execute(
                     select(approval_requests).where(

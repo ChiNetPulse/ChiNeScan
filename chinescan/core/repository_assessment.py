@@ -26,6 +26,7 @@ from chinescan.core.storage.security import StorageSecurityError, secure_snapsho
 from chinescan.core.storage.sqlite import (
     assessment_audit_events,
     authorization_records,
+    begin_immediate,
     engagement_assets,
     engagement_assignments,
     engagements,
@@ -262,7 +263,7 @@ class RepositorySnapshotStore:
         staging: Path | None = None
         expired_reservations: list[dict[str, Any]] = []
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 expired_reservations = [
                     dict(row._mapping)
@@ -446,7 +447,7 @@ class RepositorySnapshotStore:
                 os.rename(staging, destination_root)
                 staging = None
             with self.engine.connect() as connection:
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                begin_immediate(connection)
                 try:
                     existing = connection.execute(
                         select(repository_snapshots).where(
@@ -756,7 +757,7 @@ class RepositorySnapshotStore:
                 "hold_reason_required", "A short hold reason is required."
             )
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 if not RepositoryAssessmentService._is_lead_connection(
                     connection,
@@ -817,7 +818,7 @@ class RepositorySnapshotStore:
                 "hold_reason_required", "A short hold-release reason is required."
             )
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 if not RepositoryAssessmentService._is_lead_connection(
                     connection,
@@ -875,7 +876,7 @@ class RepositorySnapshotStore:
     ) -> bool:
         """Explicit auditable deletion; never a side effect of a normal read/write request."""
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 if not RepositoryAssessmentService._is_lead_connection(
                     connection,
@@ -1223,7 +1224,7 @@ class RepositoryAssessmentService:
         attestation_id, binding_id = str(uuid.uuid4()), str(uuid.uuid4())
         try:
             with self.engine.connect() as connection:
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                begin_immediate(connection)
                 try:
                     self._validate_binding_connection(
                         connection,

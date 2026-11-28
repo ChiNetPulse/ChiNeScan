@@ -24,6 +24,8 @@ from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
+from chinescan.core.storage.sqlite import begin_immediate
+
 EMAIL_RE = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$")
 RESET_TOKEN_TTL_SECONDS = 15 * 60
 RESET_RATE_LIMIT_SECONDS = 60
@@ -178,7 +180,7 @@ class ProgressiveLockout:
                 return 0
             max_retry = 0
             with self._engine.connect() as connection:
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                begin_immediate(connection)
                 try:
                     for key_hash in hashes:
                         row = connection.execute(
@@ -634,7 +636,7 @@ class SessionStore:
             from chinescan.core.storage.sqlite import user_sessions
 
             with self._engine.connect() as connection:
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                begin_immediate(connection)
                 try:
                     connection.execute(
                         user_sessions.delete().where(
@@ -685,7 +687,7 @@ class SessionStore:
             from chinescan.core.storage.sqlite import user_sessions
 
             with self._engine.connect() as connection:
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                begin_immediate(connection)
                 try:
                     row = connection.execute(
                         select(user_sessions).where(user_sessions.c.token_hash == key)
