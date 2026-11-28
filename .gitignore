@@ -47,3 +47,5 @@ target/
 *.key
 *.p12
 .worktrees/
+# Generated CI/acceptance test artifacts (JUnit XML, ruff JSON reports)
+artifacts/

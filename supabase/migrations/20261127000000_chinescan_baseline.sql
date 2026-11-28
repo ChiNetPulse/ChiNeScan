@@ -896,6 +896,9 @@ $$;
 GRANT USAGE ON SCHEMA public TO chinescan_backend;
 REVOKE ALL ON TABLE public.alembic_version FROM PUBLIC, anon, authenticated;
 GRANT SELECT ON TABLE public.alembic_version TO chinescan_backend;
+ALTER TABLE public.alembic_version ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "alembic_version_backend" ON public.alembic_version
+  AS PERMISSIVE FOR SELECT TO chinescan_backend USING (true);
 
 REVOKE ALL ON TABLE public."auth_lockouts" FROM anon, authenticated;
 ALTER TABLE public."auth_lockouts" ENABLE ROW LEVEL SECURITY;

@@ -2,5 +2,8 @@
   "buildCommand": "npm --prefix frontend run build",
   "installCommand": "npm --prefix frontend ci",
   "outputDirectory": "frontend/dist",
-  "framework": "vite"
+  "framework": "vite",
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "http://141.145.152.200:8765/api/:path*" }
+  ]
 }
