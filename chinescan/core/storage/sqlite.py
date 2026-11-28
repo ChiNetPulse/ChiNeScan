@@ -34,11 +34,19 @@ from sqlalchemy import (
     or_,
     select,
 )
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.engine.reflection import Inspector
 
 from chinescan.core.errors import StorageError
 from chinescan.core.storage.repository import Repository
+
+
+def begin_immediate(connection: Connection) -> None:
+    """Acquire a SQLite write lock immediately, or start a transaction on other dialects."""
+    if connection.dialect.name == "sqlite":
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+    elif not connection.in_transaction():
+        connection.begin()
 
 metadata = MetaData()
 records = Table(
