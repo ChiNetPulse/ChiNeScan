@@ -1400,6 +1400,7 @@ class SQLiteRepository(Repository):
             f"chinescan_org_write_{id(self)}", default=False
         )
         self._local_operator_organization_id: str | None = None
+        self._local_operator_user_id: str | None = None
         self._bound_authorizations: list[Any] = []
 
     @contextmanager

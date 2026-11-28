@@ -69,6 +69,8 @@ class OrganizationService:
             org_id = self.personal_organization_id(self.operator_user_id)
             if org_id and hasattr(self.repository, "_local_operator_organization_id"):
                 self.repository._local_operator_organization_id = org_id
+            if org_id and hasattr(self.repository, "_local_operator_user_id"):
+                self.repository._local_operator_user_id = self.operator_user_id
         return self.operator_user_id
 
     def user_id_for_email(self, email: str) -> str | None:
