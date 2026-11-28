@@ -324,3 +324,162 @@ def test_linux_worker_bootstrap_rejects_invalid_startup(
     )
     monkeypatch.setenv("CHINESCAN_DROP_CAPABILITIES", "1")
     assert bootstrap.main() == 125
+
+
+def test_native_linux_availability_rejects_unsupported_seccomp_architecture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(isolation.sys, "platform", "linux")
+    monkeypatch.setattr(isolation.os, "name", "posix")
+    monkeypatch.setattr(isolation.platform, "machine", lambda: "aarch64")
+    assert native_linux_available(LinuxIsolationRequest(seccomp=True)) == (
+        False,
+        "seccomp_architecture_not_supported",
+    )
+
+
+def test_native_linux_availability_rejects_unsafe_cgroup_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(isolation.sys, "platform", "linux")
+    monkeypatch.setattr(isolation.os, "name", "posix")
+    monkeypatch.setenv("CHINESCAN_CGROUP_ROOT", "/sys/fs/cgroup")
+
+    class FakePath:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def resolve(self) -> FakePath:
+            return self
+
+        def __eq__(self, other: object) -> bool:
+            return isinstance(other, FakePath) and self.value == other.value
+
+    monkeypatch.setattr(isolation, "Path", FakePath)
+    assert native_linux_available(LinuxIsolationRequest(cgroup=True)) == (
+        False,
+        "cgroup_root_not_allowed",
+    )
+
+
+def test_native_linux_availability_rejects_missing_cgroup_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(isolation.sys, "platform", "linux")
+    monkeypatch.setattr(isolation.os, "name", "posix")
+    root = tmp_path / "delegated"
+    root.mkdir()
+    monkeypatch.setenv("CHINESCAN_CGROUP_ROOT", str(root))
+
+    class FakePath:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def resolve(self) -> FakePath:
+            return self
+
+        def __truediv__(self, other: str) -> FakePath:
+            return FakePath(f"{self.value}/{other}")
+
+        def is_file(self) -> bool:
+            return False
+
+    monkeypatch.setattr(isolation, "Path", FakePath)
+    assert native_linux_available(LinuxIsolationRequest(cgroup=True)) == (
+        False,
+        "cgroup_v2_unavailable",
+    )
+
+
+def test_namespace_command_rejects_missing_runtime_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(isolation.shutil, "which", lambda _: None)
+    with pytest.raises(LinuxIsolationUnavailable, match="unshare"):
+        namespace_command(["scanner"], LinuxIsolationRequest(namespaces=True))
+
+    monkeypatch.setattr(isolation.shutil, "which", lambda _: "/usr/bin/unshare")
+    monkeypatch.setattr("chinescan.core.network_policy.deployment_helper", lambda: None)
+    with pytest.raises(LinuxIsolationUnavailable, match="network policy"):
+        namespace_command(
+            ["scanner"],
+            LinuxIsolationRequest(
+                namespaces=True,
+                network=True,
+                network_mode="approved_destinations",
+                network_policy_json="{}",
+            ),
+        )
+
+
+def test_filesystem_boundary_rejects_kernel_setup_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "allowed"
+    root.mkdir()
+    monkeypatch.setattr(isolation, "apply_no_new_privs", lambda: None)
+    monkeypatch.setattr(isolation, "_landlock_supported", lambda: False)
+    with pytest.raises(LinuxIsolationUnavailable, match="unavailable"):
+        apply_filesystem_boundary((str(root),), ())
+
+    monkeypatch.setattr(isolation, "_landlock_supported", lambda: True)
+    monkeypatch.setattr(isolation, "_syscall", lambda number, *args: -1 if number == 444 else 0)
+    with pytest.raises(LinuxIsolationUnavailable, match="ruleset creation"):
+        apply_filesystem_boundary((str(root),), ())
+
+
+@pytest.mark.parametrize(
+    "failure_number, message", [(445, "filesystem rule"), (446, "restriction")]
+)
+def test_filesystem_boundary_rejects_rule_and_restriction_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure_number: int,
+    message: str,
+) -> None:
+    root = tmp_path / "allowed"
+    root.mkdir()
+    monkeypatch.setattr(isolation, "apply_no_new_privs", lambda: None)
+    monkeypatch.setattr(isolation, "_landlock_supported", lambda: True)
+    monkeypatch.setattr(
+        isolation,
+        "_syscall",
+        lambda number, *args: 10 if number == 444 else -1 if number == failure_number else 0,
+    )
+    monkeypatch.setattr(isolation.os, "open", lambda *_args, **_kwargs: 42)
+    monkeypatch.setattr(isolation.os, "close", lambda _fd: None)
+    with pytest.raises(LinuxIsolationUnavailable, match=message):
+        apply_filesystem_boundary((str(root),), ())
+
+
+def test_privilege_reduction_failures_are_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FailingCapset:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, *_args: object) -> int:
+            return -1
+
+    class FailingLibc:
+        capset = FailingCapset()
+
+    monkeypatch.setattr(isolation.ctypes, "CDLL", lambda *_args, **_kwargs: FailingLibc())
+    with pytest.raises(LinuxIsolationUnavailable, match="capability reduction"):
+        isolation.drop_capabilities()
+
+    class FailingPrctl:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, *_args: object) -> int:
+            return -1
+
+    class SeccompLibc:
+        prctl = FailingPrctl()
+
+    monkeypatch.setattr(isolation.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(isolation.ctypes, "CDLL", lambda *_args, **_kwargs: SeccompLibc())
+    monkeypatch.setattr(isolation, "apply_no_new_privs", lambda: None)
+    monkeypatch.setattr(isolation.ctypes, "get_errno", lambda: 1)
+    with pytest.raises(LinuxIsolationUnavailable, match="seccomp initialization"):
+        isolation.apply_seccomp()
