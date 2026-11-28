@@ -49,3 +49,6 @@ target/
 .worktrees/
 # Generated CI/acceptance test artifacts (JUnit XML, ruff JSON reports)
 artifacts/
+
+.vercel
+.env*
