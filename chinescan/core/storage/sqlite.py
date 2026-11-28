@@ -44,7 +44,7 @@ from chinescan.core.storage.repository import Repository
 def begin_immediate(connection: Connection) -> None:
     """Acquire a SQLite write lock immediately, or start a transaction on other dialects."""
     if connection.dialect.name == "sqlite":
-        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        begin_immediate(connection)
     elif not connection.in_transaction():
         connection.begin()
 
@@ -1777,7 +1777,7 @@ class SQLiteRepository(Repository):
     ) -> str:
         """Atomically verify and consume one project/session acknowledgement."""
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 row = connection.execute(
                     select(records.c.record_id, records.c.payload).where(
@@ -1880,7 +1880,7 @@ class SQLiteRepository(Repository):
         if not 1 <= active_limit <= 5:
             raise ValueError("malware active/queue limit is invalid")
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 active = connection.execute(
                     select(func.count())
@@ -1922,7 +1922,7 @@ class SQLiteRepository(Repository):
     ) -> None:
         """Atomically reserve an analysis slot for an already managed sample."""
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 active = connection.execute(
                     select(func.count())
@@ -1971,7 +1971,7 @@ class SQLiteRepository(Repository):
     def claim_next_malware_job(self, started_at: str) -> dict[str, Any] | None:
         """Claim the oldest queued job only when no other manager has a running job."""
         with self.engine.connect() as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            begin_immediate(connection)
             try:
                 running = connection.execute(
                     select(records.c.record_id)
