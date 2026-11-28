@@ -106,6 +106,82 @@ class PostgresRepository(SQLiteRepository):
                 self._organization_write_access.reset(write_token)
                 self._organization_principal_id.reset(principal_token)
 
+    @contextmanager
+    def local_operator_context(self) -> Iterator[None]:
+        """Resolve the platform superuser and their admin org for background workers.
+
+        On PostgreSQL/Supabase, the _local_operator_organization_id attribute is
+        populated by OrganizationService.load_platform_superuser() at startup, but
+        the RLS setup requires the principal to be set in the context var *before*
+        any query.  This override looks up the superuser and their org dynamically
+        and delegates to member_context, which correctly sets up Supabase RLS session
+        variables (chinescan.user_id, chinescan.organization_id, chinescan.write_access).
+        """
+        from sqlalchemy import select
+
+        from chinescan.core.storage.sqlite import organization_memberships, organizations, users
+
+        organization_id = self._local_operator_organization_id
+        user_id: str | None = None
+
+        if not organization_id:
+            # Fall back: query the DB for an active superuser and their admin org.
+            with self.engine.connect() as connection:
+                row = connection.execute(
+                    select(
+                        users.c.id,
+                        organization_memberships.c.organization_id,
+                    )
+                    .join(
+                        organization_memberships,
+                        organization_memberships.c.user_id == users.c.id,
+                    )
+                    .join(
+                        organizations,
+                        organizations.c.id == organization_memberships.c.organization_id,
+                    )
+                    .where(
+                        users.c.platform_role == "superuser",
+                        users.c.status == "active",
+                        organizations.c.status == "active",
+                        organization_memberships.c.role == "owner",
+                        organization_memberships.c.status == "active",
+                    )
+                    .limit(1)
+                ).one_or_none()
+            if row is not None:
+                user_id = str(row[0])
+                organization_id = str(row[1])
+                # Cache for future calls.
+                self._local_operator_organization_id = organization_id
+
+        if not organization_id or not user_id:
+            # Try to get user_id from the already-cached org.
+            if organization_id and not user_id:
+                with self.engine.connect() as connection:
+                    uid = connection.execute(
+                        select(users.c.id)
+                        .join(
+                            organization_memberships,
+                            organization_memberships.c.user_id == users.c.id,
+                        )
+                        .where(
+                            organization_memberships.c.organization_id == organization_id,
+                            organization_memberships.c.role == "owner",
+                            organization_memberships.c.status == "active",
+                            users.c.platform_role == "superuser",
+                            users.c.status == "active",
+                        )
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    user_id = str(uid) if uid else None
+
+        if not organization_id or not user_id:
+            raise StorageError("Local operator authorization is unavailable.")
+
+        with self.member_context(organization_id, user_id, write=True):
+            yield
+
     @staticmethod
     def _verify_schema(database_url: str) -> tuple[str, bool, bool]:
         """Require the reviewed Supabase baseline before opening the app backend."""
